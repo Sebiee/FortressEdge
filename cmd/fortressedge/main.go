@@ -176,7 +176,7 @@ func run() error {
 		}
 		quic = &frpsvc.QUIC{ClientCA: cfg.ClientCAPath, Certificate: cert, Verify: httpsvc.NodeOnly(cfg.Tunnel)}
 	}
-	frps, err := frpsvc.Start(ctx, quic, domains.Domain)
+	frps, err := frpsvc.Start(ctx, quic, cfg.Limits.ResponseHeaderTimeout, domains.Domain)
 	if err != nil {
 		return err
 	}

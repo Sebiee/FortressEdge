@@ -93,7 +93,8 @@ no bytes back:
 - A name whose dark node left goes silent the same way.
 
 A published name whose origin does not answer gets `502`, or `504` after
-10 seconds without response headers, with an empty body. Nothing the edge
+a minute without response headers (`response_header_timeout` in the
+[policy](operations.md#limits)), with an empty body. Nothing the edge
 sends names frp or a version.
 
 The tunnel name needs a client certificate. A request that names a site

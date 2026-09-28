@@ -16,9 +16,18 @@ func Forward(src string) *lineForward {
 }
 
 type lineForward struct {
-	mu  sync.Mutex
-	buf []byte
-	src string
+	mu    sync.Mutex
+	buf   []byte
+	src   string
+	quiet func(msg string) bool
+}
+
+// Quiet logs at debug the lines whose message quiet reports true for,
+// whatever level the other logger gave them: what it rates higher than an
+// operator needs to see. Call it before the first Write.
+func (w *lineForward) Quiet(quiet func(msg string) bool) *lineForward {
+	w.quiet = quiet
+	return w
 }
 
 func (w *lineForward) Write(p []byte) (int, error) {
@@ -43,6 +52,9 @@ func (w *lineForward) Write(p []byte) (int, error) {
 			continue
 		}
 		lvl, msg := classifyForeign(line)
+		if w.quiet != nil && w.quiet(msg) {
+			lvl = slog.LevelDebug
+		}
 		slog.Log(context.Background(), lvl, msg, "src", w.src)
 	}
 	return len(p), nil

@@ -131,9 +131,9 @@ holds a whole /64.
 Each limit is a key under `limits:` in the policy (`policy.yml`). A key
 left out keeps its default, and `0` turns a rate or count off. A change
 through `fortressctl apply` applies at once, without dropping
-connections, except for the three keys marked *reboot*: Go's HTTP server
-and the connection cap fix those when they start, so the edge reboots
-into the new policy.
+connections, except for the four keys marked *reboot*: Go's HTTP server,
+the connection cap, and frps fix those when they start, so the edge
+reboots into the new policy.
 
 ```yaml
 limits:
@@ -150,12 +150,22 @@ limits:
   max_connections: 0                # reboot. All sources, per port; 0: RAM ÷ 64 KiB, 1024–32768
   max_header_size: 64KiB            # reboot. Request line and headers
   max_http2_streams: 100            # reboot. Concurrent streams per HTTP/2 connection
+  response_header_timeout: 60s      # reboot. Wait for the origin's response headers; whole seconds, 1s–10m
 ```
 
 A visitor keeps what it has used when a rate changes: its allowance
 refills at the new rate, up to the new burst. A lower
 `connections_per_source` closes nothing already open; the source's new
 connections are refused until its count drops below it. `exempt` applies at once too.
+
+`response_header_timeout` limits the origin, not a source: how long a
+request waits for its response headers. A site that sends them only with
+a stream's first event (server-sent events, long polling, Argo CD's
+`/api/v1/stream/applications`) has the stream cut with a `504` when no
+event comes within it, so raise it for such sites. It no longer applies
+once the headers arrive. A visitor who leaves before then (a reload, a
+closed tab) is not a warning: frp's `context canceled` line for it is
+logged at debug, below what the edge logs.
 
 | Over the limit | What the source sees |
 | --- | --- |
@@ -167,6 +177,7 @@ connections are refused until its count drops below it. `exempt` applies at once
 | `max_uri_size` | `414` |
 | `max_body_size` | the upload is cut off; the origin sees a short body |
 | `max_http2_streams` | the client queues further requests; the server announces the limit when the connection opens |
+| `response_header_timeout` | `504` with an empty body |
 
 Each refused request (`429`) or connection is a strike. A source with
 more than `ban_after` strikes within `ban_window`, counted from its first

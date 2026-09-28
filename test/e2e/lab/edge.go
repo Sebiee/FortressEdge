@@ -78,14 +78,19 @@ func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 }
 
 // BootEdge starts NewEdge's edge, waits until its ops API answers, and
-// applies o.Policy.
+// applies o.Policy, waiting for the reboot a boot-time limit in it causes.
 func BootEdge(t *testing.T, o EdgeOptions) *Edge {
 	t.Helper()
 	e := NewEdge(t, o)
 	e.VM.Restart(t)
 	e.WaitUp(t)
 	if o.Policy != "" {
-		e.Apply(t, o.Policy)
+		boot := BootID(t, e.Ops)
+		if out := e.Apply(t, o.Policy); strings.Contains(out, "rebooting") {
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				assert.NotEqual(c, boot, BootID(c, e.Ops), "the edge rebooted into the policy")
+			}, Until(t), Tick)
+		}
 	}
 	return e
 }

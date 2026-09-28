@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+`response_header_timeout` in the policy's `limits`: how long a request
+waits for the origin's response headers before the edge answers `504`,
+whole seconds from 1s to 10m, and a boot-time limit like
+`max_connections`. The default is 60s, frp's own; it was a fixed 10s,
+which cut server-sent events and long polls (such as Argo CD's
+application stream) whose headers come with their first event. A visitor
+who leaves before the origin answers is logged at debug, no longer as
+frp's `context canceled` warning. `/~!ops/status` shows the limit.
+
 ## 0.1.0
 
 First release.

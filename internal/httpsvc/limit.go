@@ -350,6 +350,7 @@ func (v *visitors) stats() map[string]any {
 			"max_uri_size":               lim.MaxURIBytes,
 			"max_body_size":              lim.MaxBodyBytes,
 			"max_http2_streams":          lim.MaxHTTP2Streams,
+			"response_header_timeout":    lim.ResponseHeaderTimeout.String(),
 			"exempt":                     len(lim.Exempt),
 		},
 	}

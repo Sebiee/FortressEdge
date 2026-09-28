@@ -269,6 +269,22 @@ func TestForwardHoldsPartialLines(t *testing.T) {
 	}
 }
 
+func TestForwardQuiet(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := Forward("frp").Quiet(func(msg string) bool { return msg == "visitor left" })
+	if _, err := io.WriteString(w, "2026-09-22 16:53:23.833 [W] visitor left\n2026-09-22 16:53:23.834 [W] origin down\n"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, `level=DEBUG msg="visitor left"`) || !strings.Contains(got, `level=WARN msg="origin down"`) {
+		t.Fatalf("%s", got)
+	}
+}
+
 func TestFanoutLinesStayIntact(t *testing.T) {
 	var buf bytes.Buffer
 	f := &fanout{plain: []io.Writer{&buf}}

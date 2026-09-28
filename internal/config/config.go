@@ -150,12 +150,17 @@ type Limits struct {
 	MaxURIBytes       int   // request target
 	MaxBodyBytes      int64 // request body; 0: no limit
 	MaxHTTP2Streams   int   // concurrent streams per HTTP/2 connection
+	// ResponseHeaderTimeout is how long a request waits for the origin's
+	// response headers; a stream that sends them with its first event
+	// (server-sent events, long polling) is cut after it. Whole seconds.
+	ResponseHeaderTimeout time.Duration
 }
 
-// BootLimits are the limits the HTTP servers and listeners fix when they
-// start; a change to any of them reboots. The rest apply at once.
+// BootLimits are the limits the HTTP servers, listeners, and frps fix
+// when they start; a change to any of them reboots. The rest apply at once.
 func (l Limits) BootLimits() Limits {
-	return Limits{MaxConns: l.MaxConns, MaxHeaderBytes: l.MaxHeaderBytes, MaxHTTP2Streams: l.MaxHTTP2Streams}
+	return Limits{MaxConns: l.MaxConns, MaxHeaderBytes: l.MaxHeaderBytes, MaxHTTP2Streams: l.MaxHTTP2Streams,
+		ResponseHeaderTimeout: l.ResponseHeaderTimeout}
 }
 
 // DefaultLimits are generous: many people can share one IPv4 address.
@@ -175,24 +180,27 @@ func DefaultLimits() Limits {
 		MaxURIBytes:     16 << 10,
 		MaxBodyBytes:    512 << 20,
 		MaxHTTP2Streams: 100, // net/http's default is 250
+		// frp's default.
+		ResponseHeaderTimeout: time.Minute,
 	}
 }
 
 // limitsYAML is policy.yml's limits block. A key left out keeps its default.
 type limitsYAML struct {
-	ConnsPerSource    *int   `yaml:"connections_per_source"`
-	RequestsPerSecond *int   `yaml:"requests_per_second"`
-	RequestBurst      *int   `yaml:"request_burst"`
-	NewConnsPerSecond *int   `yaml:"new_connections_per_second"`
-	NewConnBurst      *int   `yaml:"new_connection_burst"`
-	Ban               string `yaml:"ban"`
-	BanAfter          *int   `yaml:"ban_after"`
-	BanWindow         string `yaml:"ban_window"`
-	MaxConns          *int   `yaml:"max_connections"`
-	MaxHeaderSize     string `yaml:"max_header_size"`
-	MaxURISize        string `yaml:"max_uri_size"`
-	MaxBodySize       string `yaml:"max_body_size"`
-	MaxHTTP2Streams   *int   `yaml:"max_http2_streams"`
+	ConnsPerSource        *int   `yaml:"connections_per_source"`
+	RequestsPerSecond     *int   `yaml:"requests_per_second"`
+	RequestBurst          *int   `yaml:"request_burst"`
+	NewConnsPerSecond     *int   `yaml:"new_connections_per_second"`
+	NewConnBurst          *int   `yaml:"new_connection_burst"`
+	Ban                   string `yaml:"ban"`
+	BanAfter              *int   `yaml:"ban_after"`
+	BanWindow             string `yaml:"ban_window"`
+	MaxConns              *int   `yaml:"max_connections"`
+	MaxHeaderSize         string `yaml:"max_header_size"`
+	MaxURISize            string `yaml:"max_uri_size"`
+	MaxBodySize           string `yaml:"max_body_size"`
+	MaxHTTP2Streams       *int   `yaml:"max_http2_streams"`
+	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 }
 
 // edgeConfig is fortress.yml.
@@ -564,6 +572,14 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 			return fmt.Errorf("%s: limits: max_http2_streams: want 1 to 10000", PolicyName)
 		}
 		l.MaxHTTP2Streams = *v
+	}
+	if s := strings.TrimSpace(y.ResponseHeaderTimeout); s != "" {
+		// frps counts it in whole seconds.
+		d, err := time.ParseDuration(s)
+		if err != nil || d < time.Second || d > 10*time.Minute || d%time.Second != 0 {
+			return fmt.Errorf("%s: limits: response_header_timeout: want whole seconds from 1s to 10m, such as 60s", PolicyName)
+		}
+		l.ResponseHeaderTimeout = d
 	}
 	return nil
 }
