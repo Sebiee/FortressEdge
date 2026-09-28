@@ -1,0 +1,89 @@
+package bake
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+)
+
+// Config is fortress.yml as fields, one per key, in the order YAML writes
+// them. A field left at its zero value leaves its key out, so the edge uses
+// the key's default.
+type Config struct {
+	// ClientCA is the PEM CA certificate that signs the dark-node, operator,
+	// and log-reader certificates: exactly one certificate. Required.
+	ClientCA string `yaml:"client_ca"`
+	// ACME is the ACME directory URL. Empty is Let's Encrypt.
+	ACME string `yaml:"acme"`
+	// ACMECA is the PEM CA that signed the ACME directory's HTTPS
+	// certificate. Empty trusts the system roots.
+	ACMECA string `yaml:"acme_ca"`
+	// NTP is the time source for the boot clock sync, host or host:port.
+	// Empty is pool.ntp.org.
+	NTP string `yaml:"ntp"`
+	// RenewInterval is how often ACME certificates are checked, a duration
+	// such as 4h. Empty is 4h.
+	RenewInterval string `yaml:"renew_interval"`
+	// QUIC lets dark nodes connect over QUIC on UDP 443 too.
+	QUIC bool `yaml:"quic"`
+	// AccessLog writes one JSON line per site request.
+	AccessLog bool `yaml:"access_log"`
+	// AccessLogMaxSize is the size at which the access log starts a new
+	// file, such as 8MiB (KiB, MiB, GiB). Empty is 8MiB.
+	AccessLogMaxSize string `yaml:"access_log_max_size"`
+	// AccessLogMaxFiles is how many access log files are kept. 0 is 3.
+	AccessLogMaxFiles int `yaml:"access_log_max_files"`
+}
+
+// Check reports what is wrong with c, as the edge would. An error names the
+// fortress.yml key it is about, as "fortress.yml: acme: ...".
+func (c Config) Check() error { return Check(c.YAML()) }
+
+// Keys lists fortress.yml's keys in the order of Config's fields.
+func Keys() []string {
+	t := reflect.TypeFor[Config]()
+	keys := make([]string, t.NumField())
+	for i := range keys {
+		keys[i] = t.Field(i).Tag.Get("yaml")
+	}
+	return keys
+}
+
+// YAML is c as fortress.yml: the keys it sets, in Keys' order, strings
+// quoted and PEM as block scalars. The same Config gives the same bytes,
+// whatever YAML library another version of this package would use.
+func (c Config) YAML() []byte {
+	var b bytes.Buffer
+	v := reflect.ValueOf(c)
+	for i, key := range Keys() {
+		switch f := v.Field(i); f.Kind() {
+		case reflect.String:
+			s := strings.TrimSpace(f.String())
+			switch {
+			case s == "":
+			case strings.Contains(s, "\n"):
+				fmt.Fprintf(&b, "%s: |\n", key)
+				for line := range strings.SplitSeq(s, "\n") {
+					fmt.Fprintf(&b, "  %s\n", strings.TrimRight(line, " \t\r"))
+				}
+			default:
+				q, _ := json.Marshal(s) // a JSON string is a YAML double-quoted scalar
+				fmt.Fprintf(&b, "%s: %s\n", key, q)
+			}
+		case reflect.Bool:
+			if f.Bool() {
+				fmt.Fprintf(&b, "%s: true\n", key)
+			}
+		case reflect.Int:
+			if f.Int() != 0 {
+				fmt.Fprintf(&b, "%s: %s\n", key, strconv.FormatInt(f.Int(), 10))
+			}
+		default:
+			panic("bake: Config field " + key + " of a kind YAML does not write")
+		}
+	}
+	return b.Bytes()
+}

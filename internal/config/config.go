@@ -224,6 +224,9 @@ var (
 	policyKeys = []string{"block", "exempt", "limits"}
 )
 
+// EdgeKeys lists the keys fortress.yml takes.
+func EdgeKeys() []string { return slices.Clone(edgeKeys) }
+
 // InvalidError is a config that parsed but is not acceptable. Callers map
 // it to HTTP 400; other errors are failures to store or apply.
 type InvalidError struct{ Err error }
