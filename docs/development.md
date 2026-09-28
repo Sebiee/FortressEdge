@@ -325,6 +325,14 @@ attaches the ISO it just tested, `fortressctl`, `fortresskube`, and
 carry a build provenance attestation, signed by GitHub, naming the
 workflow run and commit that made them.
 
+`fortress.yml` (its keys and what they accept) and the bake change only
+in a minor release, `vX.Y.0`; a patch release never touches them. The
+[Terraform provider](https://github.com/Sebiee/terraform-provider-fortressedge)
+checks and bakes `fortress.yml` with this module's `bake` package, and its
+major.minor follows this repository's, so a provider of the same minor
+bakes every patch release. A fortressedge release reaches the provider as
+a Dependabot pull request there, and merging it releases the provider.
+
 ```sh
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
