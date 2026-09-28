@@ -24,7 +24,10 @@ requires this module for `bake`: a change there that alters the bytes of
 a bake needs a provider release of the same version. `make tidy` tidies all of
 them, and CI fails when one is untidy or the pins differ. Dependabot opens
 one grouped PR per module for minor and patch updates; the frp fork is
-updated by hand. There is no committed `go.work`, so each module builds
+updated by hand. An update to the root module leaves `test/e2e` untidy,
+since it builds against the root: the `dependabot tidy` workflow runs
+`make tidy` on the Dependabot branch, pushes the result, and starts CI on
+it. There is no committed `go.work`, so each module builds
 exactly as it is released.
 
 ## Build and test
