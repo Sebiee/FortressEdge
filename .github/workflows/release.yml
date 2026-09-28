@@ -65,19 +65,32 @@ jobs:
           cp out/kube/fortresskube "dist/fortresskube-${TAG}-linux-amd64"
           (cd dist && sha256sum "fortressedge-${TAG}.iso" "fortressctl-${TAG}-linux-amd64" "fortresskube-${TAG}-linux-amd64" > SHA256SUMS)
       - name: Image
+        id: image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/fortresskube:${TAG}"
+          name="ghcr.io/${GITHUB_REPOSITORY,,}/fortresskube"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -f cmd/fortresskube/Dockerfile -t "$image" out/kube
-          docker push "$image"
-      # - name: Attest
-      #   uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-      #   with:
-      #     subject-path: |
-      #       dist/fortressedge-${{ env.TAG }}.iso
-      #       dist/fortressctl-${{ env.TAG }}-linux-amd64
+          docker build -f cmd/fortresskube/Dockerfile -t "$name:$TAG" out/kube
+          docker push "$name:$TAG"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$name:$TAG" | cut -d@ -f2)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Build provenance, signed by GitHub: which workflow run, commit, and
+      # repository made each file. gh attestation verify checks it.
+      - name: Attest release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/fortressedge-${{ env.TAG }}.iso
+            dist/fortressctl-${{ env.TAG }}-linux-amd64
+            dist/fortresskube-${{ env.TAG }}-linux-amd64
+      - name: Attest image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,9 +112,12 @@ jobs:
           sha256sum -c SHA256SUMS
           gh attestation verify fortressedge-${TAG}.iso --repo ${GH_REPO}
           gh attestation verify fortressctl-${TAG}-linux-amd64 --repo ${GH_REPO}
+          gh attestation verify fortresskube-${TAG}-linux-amd64 --repo ${GH_REPO}
+          gh attestation verify oci://ghcr.io/${GH_REPO,,}/fortresskube:${TAG} --repo ${GH_REPO}
           \`\`\`
 
-          Attach the ISO, a Cloud-Init drive, and a persistent /data disk. See README.
+          Bake the ISO with your fortress.yml (fortressctl bake, or the Terraform provider),
+          and boot it with a cloud-init drive and a blank data disk. See README.
           EOF
           gh release create "$TAG" \
             --title "FortressEdge $TAG" \

@@ -14,17 +14,18 @@ import (
 	"github.com/Sebiee/fortressedge/test/e2e/lab"
 )
 
-// Certificates that live 12 seconds, checked every 250ms, as Traefik's
+// Certificates that live 24 seconds, checked every 250ms, as Traefik's
 // suite does with 120-second ones: each is replaced in the last third of
 // its life, twice, so a renewed certificate is renewed again; none is
 // served expired; and a name no node publishes is not renewed. ARI is off,
 // so the lifetime alone decides. certmagic renews at once when fewer than
 // five checks are left, so the lifetime is well over fifteen checks; and
-// it renews one certificate at a time, so the last third (4s) must hold
-// two back-to-back ACME orders, each up to a second under -race.
+// it renews one certificate at a time, so the last third (8s) must hold
+// two back-to-back ACME orders: a second each under -race, and several
+// when the host is busy and the 1-vCPU guest waits for it.
 func TestCertificatesRenewBeforeTheyExpire(t *testing.T) {
 	t.Parallel()
-	const life = 12 * time.Second
+	const life = 24 * time.Second
 	a := bootACME(t, lab.PebbleOptions{Validity: life, NoARI: true}, "250ms")
 	stop := a.vm.Tunnel(t, a.web, "wss", "gone.example.com", a.pebble.Roots, a.nodeCrt, a.nodeKey)
 	stop()
