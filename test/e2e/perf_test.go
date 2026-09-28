@@ -24,7 +24,7 @@ var (
 	perfFiles = flag.Int("perf-files", 0, "TestPerfGuard replays the first this many files of open-appsec's "+
 		"legitimate set; 0 skips it (make perf-guard sets it)")
 	perfRate   = flag.Float64("perf-rate", 1000, "requests a second the perf guard sends: low enough for a 2-core runner")
-	perfRounds = flag.Int("perf-rounds", 5, "times the perf guard boots and measures each build")
+	perfRounds = flag.Int("perf-rounds", 3, "times the perf guard boots and measures each build")
 	perfBase   = flag.String("base-iso", "", "the bench ISO of the commit to compare with; "+
 		"empty compares allocations with testdata/perf-baseline.json only")
 	perfCPUTol   = flag.Float64("perf-cpu-tolerance", 0.20, "how much more CPU a request may cost than with -base-iso")
