@@ -1,0 +1,113 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+jobs:
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require annotated semver tag
+        run: |
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          test "$(git cat-file -t "$TAG")" = tag
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Cache apt packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .apt-cache
+          key: apt-${{ hashFiles('os/ci-apt.sh') }}
+      - name: Install QEMU and syslinux
+        run: os/ci-apt.sh
+      - name: Cache Alpine kernel
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/alpine
+          key: alpine-${{ hashFiles('os/alpine.sh') }}
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Smoke
+        env:
+          GOTESTSUM_FORMAT: github-actions
+        run: make ci
+      - name: Package
+        run: |
+          test -f out/fortressedge.iso
+          test -f out/fortressctl
+          mkdir -p dist
+          cp out/fortressedge.iso "dist/fortressedge-${TAG}.iso"
+          cp out/fortressctl "dist/fortressctl-${TAG}-linux-amd64"
+          make kube
+          cp out/kube/fortresskube "dist/fortresskube-${TAG}-linux-amd64"
+          (cd dist && sha256sum "fortressedge-${TAG}.iso" "fortressctl-${TAG}-linux-amd64" "fortresskube-${TAG}-linux-amd64" > SHA256SUMS)
+      - name: Image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/fortresskube:${TAG}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -f cmd/fortresskube/Dockerfile -t "$image" out/kube
+          docker push "$image"
+      # - name: Attest
+      #   uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      #   with:
+      #     subject-path: |
+      #       dist/fortressedge-${{ env.TAG }}.iso
+      #       dist/fortressctl-${{ env.TAG }}-linux-amd64
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat >notes.md <<EOF
+          FortressEdge ${TAG}
+
+          See CHANGELOG.md.
+
+          Assets
+          - fortressedge-${TAG}.iso
+          - fortressctl-${TAG}-linux-amd64
+          - fortresskube-${TAG}-linux-amd64 (image: ghcr.io/${GH_REPO,,}/fortresskube:${TAG})
+          - SHA256SUMS
+
+          Verify
+          \`\`\`
+          sha256sum -c SHA256SUMS
+          gh attestation verify fortressedge-${TAG}.iso --repo ${GH_REPO}
+          gh attestation verify fortressctl-${TAG}-linux-amd64 --repo ${GH_REPO}
+          \`\`\`
+
+          Attach the ISO, a Cloud-Init drive, and a persistent /data disk. See README.
+          EOF
+          gh release create "$TAG" \
+            --title "FortressEdge $TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            "dist/fortressedge-${TAG}.iso" \
+            "dist/fortressctl-${TAG}-linux-amd64" \
+            "dist/fortresskube-${TAG}-linux-amd64" \
+            dist/SHA256SUMS

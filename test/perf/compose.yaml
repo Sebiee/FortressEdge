@@ -1,0 +1,31 @@
+# Dark-node VM: three origins + frpc (wss+mTLS) to the fortressedge VM.
+# EDGE_ADDR = fortressedge VM IP. TLS_DIR = fortressctl ca output. FRPC_BIN = frpc 0.71.x binary.
+#
+#   curl -fsSL https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_linux_amd64.tar.gz \
+#     | tar -xz --strip-components=1 -C . frp_0.71.0_linux_amd64/frpc
+#   EDGE_ADDR=192.0.2.10 TLS_DIR=$PWD/tls FRPC_BIN=$PWD/frpc docker compose -f test/perf/compose.yaml up
+services:
+  origin-a:
+    image: hashicorp/http-echo:1.0.0
+    command: ["-listen=:8080", "-text=origin-a"]
+    restart: unless-stopped
+  origin-b:
+    image: hashicorp/http-echo:1.0.0
+    command: ["-listen=:8080", "-text=origin-b"]
+    restart: unless-stopped
+  origin-c:
+    image: hashicorp/http-echo:1.0.0
+    command: ["-listen=:8080", "-text=origin-c"]
+    restart: unless-stopped
+  frpc:
+    image: alpine:3.21
+    environment:
+      EDGE_ADDR: ${EDGE_ADDR:?set EDGE_ADDR to the fortressedge VM IP}
+    volumes:
+      - ${FRPC_BIN:?set FRPC_BIN to the frpc binary}:/usr/local/bin/frpc:ro
+      - ${TLS_DIR:?set TLS_DIR to fortressctl ca output}:/tls:ro
+      - ./frpc.toml:/etc/frpc.toml:ro
+    entrypoint: ["/usr/local/bin/frpc"]
+    command: ["-c", "/etc/frpc.toml"]
+    depends_on: [origin-a, origin-b, origin-c]
+    restart: unless-stopped

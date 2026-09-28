@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  # One entry per Go module. A single entry over several directories
+  # resolves them together, which leaked fortresskube's Kubernetes
+  # versions into the edge's go.mod. Minor and patch bumps arrive as one
+  # PR per module; the frp fork is a replace and is updated by hand.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor:
+        update-types: [minor, patch]
+  - package-ecosystem: gomod
+    directory: /test/e2e
+    schedule:
+      interval: weekly
+    groups:
+      minor:
+        update-types: [minor, patch]
+  - package-ecosystem: gomod
+    directory: /cmd/fortresskube
+    schedule:
+      interval: weekly
+    groups:
+      minor:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directories: [/, /cmd/fortresskube]
+    schedule:
+      interval: weekly

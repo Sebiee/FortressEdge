@@ -1,0 +1,33 @@
+{
+  "legitimate": {
+    "altered": 1342,
+    "forwarded": 1038870,
+    "refused 400": 1,
+    "refused 414": 27,
+    "refused 431": 2
+  },
+  "malicious/cmdexe": {
+    "forwarded": 2468
+  },
+  "malicious/log4shell": {
+    "forwarded": 220
+  },
+  "malicious/shellshock": {
+    "forwarded": 48
+  },
+  "malicious/sqli": {
+    "altered": 11,
+    "forwarded": 905
+  },
+  "malicious/traversal": {
+    "altered": 4633,
+    "forwarded": 23681
+  },
+  "malicious/xss": {
+    "forwarded": 41888
+  },
+  "malicious/xxe": {
+    "altered": 18,
+    "forwarded": 52
+  }
+}

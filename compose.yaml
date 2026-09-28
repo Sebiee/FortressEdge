@@ -1,0 +1,19 @@
+services:
+  dev:
+    build: .
+    image: fortressedge-dev
+    volumes:
+      - .:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+    working_dir: /src
+    environment:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /src
+    network_mode: host
+    privileged: true
+
+volumes:
+  gomod:
+  gocache:

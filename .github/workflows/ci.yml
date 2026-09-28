@@ -1,0 +1,141 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Modules tidy
+        run: make tidy-check
+      - name: Unit tests
+        run: make test
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Cache apt packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .apt-cache
+          key: apt-${{ hashFiles('os/ci-apt.sh') }}
+      - name: Install QEMU and syslinux
+        run: os/ci-apt.sh
+      - name: Cache Alpine kernel
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/alpine
+          key: alpine-${{ hashFiles('os/alpine.sh') }}
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: System tests
+        env:
+          GOTESTSUM_FORMAT: github-actions
+        run: make e2e
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e
+          path: out/e2e/
+
+  # What a request costs the edge in CPU and allocations, against the
+  # commit this one builds on, at a rate a 2-core runner sustains; see
+  # docs/development.md#perf-guard. Throughput on such a runner measures
+  # the runner, so it is not what this checks.
+  perf-guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Cache apt packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .apt-cache
+          key: apt-${{ hashFiles('os/ci-apt.sh') }}
+      - name: Install QEMU and syslinux
+        run: os/ci-apt.sh
+      - name: Cache Alpine kernel
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/alpine
+          key: alpine-${{ hashFiles('os/alpine.sh') }}
+      - name: Cache open-appsec datasets
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/openappsec
+          key: openappsec-${{ hashFiles('test/e2e/testdata/openappsec.sha256') }}
+      # os/netns.sh makes the bench's tap in an unprivileged user namespace,
+      # which Ubuntu 24.04's AppArmor forbids by default.
+      - name: Enable KVM, user namespaces and vhost-net
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo modprobe vhost_net
+          sudo chmod 0666 /dev/vhost-net
+      - name: Perf guard
+        env:
+          # A pull request against its base; a push against the tip before it.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          case "$BASE" in 0000000000000000000000000000000000000000) BASE= ;; esac
+          make perf-guard BASE="$BASE"
+      - name: Summary
+        if: always()
+        run: cat out/waf-bench/perf-guard-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-guard-${{ github.sha }}
+          path: out/waf-bench/
+          retention-days: 30

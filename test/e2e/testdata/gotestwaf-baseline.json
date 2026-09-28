@@ -1,0 +1,376 @@
+{
+  "true_negative_tests": {
+    "score": 100,
+    "summary": {
+      "total_sent": 141,
+      "resolved_tests": 141,
+      "blocked_tests": 0,
+      "bypassed_tests": 141,
+      "unresolved_tests": 0,
+      "failed_tests": 0
+    },
+    "app_sec": {
+      "total_sent": 141,
+      "resolved_tests": 141,
+      "blocked_tests": 0,
+      "bypassed_tests": 141,
+      "unresolved_tests": 0,
+      "failed_tests": 0
+    },
+    "api_sec": {
+      "total_sent": 0,
+      "resolved_tests": 0,
+      "blocked_tests": 0,
+      "bypassed_tests": 0,
+      "unresolved_tests": 0,
+      "failed_tests": 0
+    },
+    "test_sets": {
+      "false-pos": {
+        "texts": {
+          "sent": 141,
+          "blocked": 0,
+          "bypassed": 141,
+          "unresolved": 0,
+          "failed": 0
+        }
+      }
+    }
+  },
+  "true_positive_tests": {
+    "score": 0,
+    "summary": {
+      "total_sent": 675,
+      "resolved_tests": 670,
+      "blocked_tests": 0,
+      "bypassed_tests": 670,
+      "unresolved_tests": 5,
+      "failed_tests": 0
+    },
+    "app_sec": {
+      "total_sent": 661,
+      "resolved_tests": 656,
+      "blocked_tests": 0,
+      "bypassed_tests": 656,
+      "unresolved_tests": 5,
+      "failed_tests": 0
+    },
+    "api_sec": {
+      "total_sent": 14,
+      "resolved_tests": 14,
+      "blocked_tests": 0,
+      "bypassed_tests": 14,
+      "unresolved_tests": 0,
+      "failed_tests": 0
+    },
+    "test_sets": {
+      "community": {
+        "community-128kb-rce": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-128kb-sqli": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-128kb-xss": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-16kb-rce": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-16kb-sqli": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-16kb-xss": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-32kb-rce": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-32kb-sqli": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-32kb-xss": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-64kb-rce": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-64kb-sqli": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-64kb-xss": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-8kb-rce": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-8kb-sqli": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-8kb-xss": {
+          "sent": 1,
+          "blocked": 0,
+          "bypassed": 1,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-lfi": {
+          "sent": 8,
+          "blocked": 0,
+          "bypassed": 8,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-lfi-multipart": {
+          "sent": 2,
+          "blocked": 0,
+          "bypassed": 2,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-rce": {
+          "sent": 4,
+          "blocked": 0,
+          "bypassed": 4,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-rce-rawrequests": {
+          "sent": 3,
+          "blocked": 0,
+          "bypassed": 3,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-sqli": {
+          "sent": 12,
+          "blocked": 0,
+          "bypassed": 12,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-user-agent": {
+          "sent": 9,
+          "blocked": 0,
+          "bypassed": 9,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-xss": {
+          "sent": 104,
+          "blocked": 0,
+          "bypassed": 104,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "community-xxe": {
+          "sent": 2,
+          "blocked": 0,
+          "bypassed": 2,
+          "unresolved": 0,
+          "failed": 0
+        }
+      },
+      "owasp": {
+        "crlf": {
+          "sent": 7,
+          "blocked": 0,
+          "bypassed": 7,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "ldap-injection": {
+          "sent": 24,
+          "blocked": 0,
+          "bypassed": 24,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "mail-injection": {
+          "sent": 24,
+          "blocked": 0,
+          "bypassed": 24,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "nosql-injection": {
+          "sent": 50,
+          "blocked": 0,
+          "bypassed": 50,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "path-traversal": {
+          "sent": 20,
+          "blocked": 0,
+          "bypassed": 18,
+          "unresolved": 2,
+          "failed": 0
+        },
+        "rce": {
+          "sent": 6,
+          "blocked": 0,
+          "bypassed": 6,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "rce-urlparam": {
+          "sent": 9,
+          "blocked": 0,
+          "bypassed": 9,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "rce-urlpath": {
+          "sent": 3,
+          "blocked": 0,
+          "bypassed": 3,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "shell-injection": {
+          "sent": 32,
+          "blocked": 0,
+          "bypassed": 32,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "sql-injection": {
+          "sent": 48,
+          "blocked": 0,
+          "bypassed": 48,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "ss-include": {
+          "sent": 24,
+          "blocked": 0,
+          "bypassed": 24,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "sst-injection": {
+          "sent": 24,
+          "blocked": 0,
+          "bypassed": 23,
+          "unresolved": 1,
+          "failed": 0
+        },
+        "xml-injection": {
+          "sent": 7,
+          "blocked": 0,
+          "bypassed": 7,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "xss-scripting": {
+          "sent": 224,
+          "blocked": 0,
+          "bypassed": 222,
+          "unresolved": 2,
+          "failed": 0
+        }
+      },
+      "owasp-api": {
+        "graphql": {
+          "sent": 0,
+          "blocked": 0,
+          "bypassed": 0,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "graphql-post": {
+          "sent": 0,
+          "blocked": 0,
+          "bypassed": 0,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "grpc": {
+          "sent": 0,
+          "blocked": 0,
+          "bypassed": 0,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "non-crud": {
+          "sent": 2,
+          "blocked": 0,
+          "bypassed": 2,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "rest": {
+          "sent": 7,
+          "blocked": 0,
+          "bypassed": 7,
+          "unresolved": 0,
+          "failed": 0
+        },
+        "soap": {
+          "sent": 5,
+          "blocked": 0,
+          "bypassed": 5,
+          "unresolved": 0,
+          "failed": 0
+        }
+      }
+    }
+  }
+}

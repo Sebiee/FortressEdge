@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+if [ $# -eq 0 ]; then
+	set -- bash
+fi
+if ! docker image inspect fortressedge-dev >/dev/null 2>&1; then
+	docker compose build
+fi
+exec docker compose run --rm dev "$@"

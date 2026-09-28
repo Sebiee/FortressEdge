@@ -1,0 +1,99 @@
+name: waf-bench
+
+# make waf-bench: open-appsec's WAF comparison datasets and GoTestWAF
+# through an edge VM. What becomes of each request is held to the
+# baselines; the throughput and latency in its reports (the artifact
+# waf-bench-<sha>) are information only, since on a 2-core runner the
+# load generator is the limit. ci's perf-guard job is what keeps the edge
+# from getting slower. Run it on any branch from the Actions tab.
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      cpus:
+        description: vCPUs of the edge VM
+        type: number
+        default: 2
+      mem:
+        description: Memory of the edge VM, in MiB
+        type: number
+        default: 2048
+      workers:
+        description: Connections the open-appsec replay sends over
+        type: number
+        default: 32
+      net:
+        description: The VM's network, tap (vhost-net) or user (QEMU's user-mode, slower)
+        type: choice
+        options: [tap, user]
+        default: tap
+
+concurrency:
+  group: waf-bench-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  waf-bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Cache apt packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .apt-cache
+          key: apt-${{ hashFiles('os/ci-apt.sh') }}
+      - name: Install QEMU and syslinux
+        run: os/ci-apt.sh
+      - name: Cache Alpine kernel
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/alpine
+          key: alpine-${{ hashFiles('os/alpine.sh') }}
+      - name: Cache open-appsec datasets
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/openappsec
+          key: openappsec-${{ hashFiles('test/e2e/testdata/openappsec.sha256') }}
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # os/netns.sh makes the bench's tap device in an unprivileged user
+      # namespace, which Ubuntu 24.04's AppArmor forbids by default.
+      - name: Enable user namespaces and vhost-net
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo modprobe vhost_net
+          sudo chmod 0666 /dev/vhost-net
+      - name: WAF bench
+        env:
+          WAF_CPUS: ${{ inputs.cpus || 2 }}
+          WAF_MEM: ${{ inputs.mem || 2048 }}
+          WAF_WORKERS: ${{ inputs.workers || 32 }}
+          WAF_NET: ${{ inputs.net || 'tap' }}
+        run: make waf-bench WAF_CPUS="$WAF_CPUS" WAF_MEM="$WAF_MEM" WAF_WORKERS="$WAF_WORKERS" WAF_NET="$WAF_NET"
+      - name: Summary
+        if: always()
+        run: cat out/waf-bench/*-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: waf-bench-${{ github.sha }}
+          path: out/waf-bench/
+          retention-days: 90

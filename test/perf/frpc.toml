@@ -1,0 +1,30 @@
+serverAddr = "{{ .Envs.EDGE_ADDR }}"
+serverPort = 443
+transport.protocol = "quic"
+transport.wireProtocol = "v2"
+transport.tls.certFile = "/tls/clients/node/node1.crt"
+transport.tls.keyFile = "/tls/clients/node/node1.key"
+transport.tls.trustedCaFile = "/tls/ca.crt"
+transport.tls.serverName = "tunnel.example.com"
+loginFailExit = false
+
+[[proxies]]
+name = "a"
+type = "http"
+localIP = "origin-a"
+localPort = 8080
+customDomains = ["a.example.com"]
+
+[[proxies]]
+name = "b"
+type = "http"
+localIP = "origin-b"
+localPort = 8080
+customDomains = ["b.example.com"]
+
+[[proxies]]
+name = "c"
+type = "http"
+localIP = "origin-c"
+localPort = 8080
+customDomains = ["c.example.com"]
