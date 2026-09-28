@@ -238,11 +238,11 @@ Encrypt, leave it out), and `--connect host:port` dials an address DNS
 does not point at yet. `apply` checks the file before it sends it, the
 edge checks it again, and a refused policy changes nothing. `block`,
 `exempt`, and most limits apply at once; `max_connections`,
-`max_header_size`, and `max_http2_streams` reboot the edge into the new
-policy. The policy replaces the previous one whole, is kept on the data
-disk, and survives reboots and new ISOs. `GET /~!ops/policy` returns it
-as applied, with its SHA-256 as the ETag; a new data disk starts from the
-defaults until the next apply.
+`max_header_size`, `max_http2_streams`, and `response_header_timeout`
+reboot the edge into the new policy. The policy replaces the previous
+one whole, is kept on the data disk, and survives reboots and new ISOs.
+`GET /~!ops/policy` returns it as applied, with its SHA-256 as the ETag;
+a new data disk starts from the defaults until the next apply.
 
 ## When an edge cannot start
 

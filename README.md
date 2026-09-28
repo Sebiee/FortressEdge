@@ -254,9 +254,9 @@ in `user-data` is read.
 | --- | --- | --- |
 | `block` | none | Addresses or CIDRs dropped in XDP |
 | `exempt` | none | Addresses or CIDRs the visitor limits and bans skip, such as a monitoring probe |
-| `limits` | see [operations](docs/operations.md#limits) | Per-source connection, request, and SYN rates, the ban length, and header and URI sizes; `0` turns one off |
+| `limits` | see [operations](docs/operations.md#limits) | Per-source connection, request, and SYN rates, the ban length, header and URI sizes, and how long an origin may take to answer; `0` turns one off |
 
-`block`, `exempt`, and most `limits` apply at once; three limits reboot
+`block`, `exempt`, and most `limits` apply at once; four limits reboot
 the edge. Certificates and trust are in [docs/certificates.md](docs/certificates.md).
 
 ## Dark nodes

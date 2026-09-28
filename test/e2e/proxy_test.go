@@ -34,7 +34,7 @@ import (
 func TestProxyingToDarkNodes(t *testing.T) {
 	t.Parallel()
 	e := lab.BootEdge(t, lab.EdgeOptions{Config: "access_log: true\n",
-		Policy: "limits:\n  request_burst: 1000\n  new_connections_per_second: 200\n"})
+		Policy: "limits:\n  request_burst: 1000\n  new_connections_per_second: 200\n  response_header_timeout: 5s\n"})
 	vm, web, caFile, pki := e.VM, e.Web, e.Roots, e.PKI
 	lab.Ctl(t, "ca", "client", pki, ca.ID(lab.Tunnel, ca.RoleNode, "node2"))
 	node1Crt, node1Key := e.Cert(ca.RoleNode, "node1")
@@ -258,12 +258,14 @@ func TestProxyingToDarkNodes(t *testing.T) {
 				assert.Equal(t, msg, got)
 			}
 		}},
-		{"a site that never answers times out with 504", func(t *testing.T) {
+		{"a site that never answers times out with 504 after the policy's response_header_timeout", func(t *testing.T) {
 			start := time.Now()
 			resp, _, err := lab.Get(&http.Client{Transport: web.Transport, Timeout: 3 * lab.Attempt}, "https://echo.example.com/hang")
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
-			assert.Less(t, time.Since(start), 2*lab.Attempt)
+			took := time.Since(start)
+			assert.GreaterOrEqual(t, took, 4500*time.Millisecond, "5s, not sooner")
+			assert.Less(t, took, 9*time.Second, "5s, not frp's 10s nor the 60s default")
 		}},
 		{"a site goes silent when its dark node leaves and serves again when it returns", func(t *testing.T) {
 			stop := vm.Tunnel(t, web, "wss", "flap.example.com", caFile, node1Crt, node1Key)

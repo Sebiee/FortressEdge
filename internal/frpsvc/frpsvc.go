@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,12 +51,13 @@ type Frps struct {
 }
 
 // Start runs frps on loopback. A non-nil quic also opens QUIC on public
-// UDP 443.
-func Start(ctx context.Context, quic *QUIC, onDomain func(domain string, added bool)) (*Frps, error) {
+// UDP 443. headerTimeout is how long a visitor's request waits for the
+// origin's response headers, in whole seconds; 0 is frp's default.
+func Start(ctx context.Context, quic *QUIC, headerTimeout time.Duration, onDomain func(domain string, added bool)) (*Frps, error) {
 	// frp's own lines use a different clock. Fold them into slog so they
 	// cannot land in the middle of a console line.
 	setLogger.Do(func() {
-		flog.Logger = glog.New(glog.WithOutput(logx.Forward("frp")), glog.WithLevel(glog.InfoLevel))
+		flog.Logger = glog.New(glog.WithOutput(logx.Forward("frp").Quiet(visitorLeft)), glog.WithLevel(glog.InfoLevel))
 	})
 	cfg := &v1.ServerConfig{
 		BindAddr:      config.FrpsBindAddr,
@@ -71,9 +73,11 @@ func Start(ctx context.Context, quic *QUIC, onDomain func(domain string, added b
 		OnDomain:             onDomain,
 		// frp's own 404 page names frp. An empty one names nothing.
 		Custom404Page: os.DevNull,
-		// How long a visitor waits for the origin's response headers.
-		// This used to be the edge's loopback hop; it is the only hop now.
-		VhostHTTPTimeout: 10,
+		// How long a visitor waits for the origin's response headers
+		// (policy.yml's response_header_timeout). A stream whose headers
+		// come with its first event, such as server-sent events, is cut
+		// with a 504 if that event takes longer.
+		VhostHTTPTimeout: int64(headerTimeout / time.Second),
 		Auth: v1.AuthServerConfig{
 			Method: "token",
 		},
@@ -115,8 +119,17 @@ func Start(ctx context.Context, quic *QUIC, onDomain func(domain string, added b
 		stop()
 		return nil, err
 	}
-	slog.Info("frps up", "control", config.ControlAddr(), "quic", cfg.QUICBindPort != 0)
+	slog.Info("frps up", "control", config.ControlAddr(), "quic", cfg.QUICBindPort != 0,
+		"response_header_timeout", time.Duration(cfg.VhostHTTPTimeout)*time.Second)
 	return &Frps{Control: controlHandler(control), Vhost: trustVhost(svr.VhostHTTP()), Stop: stop}, nil
+}
+
+// visitorLeft matches frp's line for a request whose visitor went away
+// (a reload, a closed tab, a stream closed) before the origin answered:
+// the visitor's choice, not an error. frp logs it at warn.
+func visitorLeft(msg string) bool {
+	rest, ok := strings.CutPrefix(msg, "do http proxy request [host: ")
+	return ok && strings.HasSuffix(rest, "] error: "+context.Canceled.Error())
 }
 
 // trustVhost tells frps the edge already set X-Forwarded-* from the visitor,

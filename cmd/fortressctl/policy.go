@@ -30,8 +30,8 @@ func newApply() *cobra.Command {
 		Long: `Replaces the edge's policy (block, exempt, limits) with policy.yml, over
 the ops API with an operator certificate. The same file again changes
 nothing, so a pipeline can apply on every merge. block, exempt, and most
-limits apply at once; max_connections, max_header_size, and
-max_http2_streams reboot the edge.`,
+limits apply at once; max_connections, max_header_size,
+max_http2_streams, and response_header_timeout reboot the edge.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			e.Name = args[0]

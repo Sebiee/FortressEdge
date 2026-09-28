@@ -366,6 +366,8 @@ func TestPolicyRebootFrom(t *testing.T) {
 		"max_connections":   func(l *Limits) { l.MaxConns = 7 },
 		"max_header_size":   func(l *Limits) { l.MaxHeaderBytes = 7 },
 		"max_http2_streams": func(l *Limits) { l.MaxHTTP2Streams = 7 },
+		// frps fixes it when it starts.
+		"response_header_timeout": func(l *Limits) { l.ResponseHeaderTimeout = time.Hour },
 	} {
 		next := cur
 		boot(&next.Limits)
@@ -386,7 +388,8 @@ func TestParseLimits(t *testing.T) {
 	}
 	c, err = parse([]byte("limits:\n  requests_per_second: 0\n  connections_per_source: 1000\n  ban: 0\n  ban_after: 5\n  ban_window: 1m\n" +
 		"  new_connections_per_second: 500\n  new_connection_burst: 1000\n  max_connections: 50000\n" +
-		"  max_header_size: 128KiB\n  max_uri_size: 32KiB\n  max_body_size: 0\n  max_http2_streams: 250\n"))
+		"  max_header_size: 128KiB\n  max_uri_size: 32KiB\n  max_body_size: 0\n  max_http2_streams: 250\n" +
+		"  response_header_timeout: 5m\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +399,7 @@ func TestParseLimits(t *testing.T) {
 	want.NewConnsPerSecond, want.NewConnBurst, want.MaxConns = 500, 1000, 50000
 	want.MaxHeaderBytes, want.MaxURIBytes = 128<<10, 32<<10
 	want.MaxBodyBytes, want.MaxHTTP2Streams = 0, 250
+	want.ResponseHeaderTimeout = 5 * time.Minute
 	if c.Limits != want {
 		t.Fatalf("limits: %+v", c.Limits)
 	}
@@ -410,6 +414,11 @@ func TestParseLimits(t *testing.T) {
 		"limits:\n  max_uri_size: 64\n",
 		"limits:\n  max_body_size: 12\n",
 		"limits:\n  max_http2_streams: 0\n",
+		"limits:\n  response_header_timeout: 0\n",
+		"limits:\n  response_header_timeout: 500ms\n",
+		"limits:\n  response_header_timeout: 1.5s\n",
+		"limits:\n  response_header_timeout: 11m\n",
+		"limits:\n  response_header_timeout: 60\n",
 	} {
 		if _, err := parse([]byte(bad)); err == nil {
 			t.Fatalf("%q: want error", bad)
@@ -418,6 +427,12 @@ func TestParseLimits(t *testing.T) {
 	// A burst of 0 is fine once its rate is off.
 	if _, err := parse([]byte("limits:\n  requests_per_second: 0\n  request_burst: 0\n")); err != nil {
 		t.Fatal(err)
+	}
+	// The bounds of response_header_timeout are in.
+	for _, ok := range []string{"1s", "10m"} {
+		if _, err := parse([]byte("limits:\n  response_header_timeout: " + ok + "\n")); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
