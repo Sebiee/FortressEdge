@@ -1,0 +1,54 @@
+# Dependabot updates one module's go.mod at a time, but test/e2e builds
+# against the root module, so a root update leaves test/e2e untidy and CI
+# fails. This tidies every module on a Dependabot Go branch, pushes the
+# result, and starts CI on it: a push made with GITHUB_TOKEN starts no
+# workflow by itself.
+name: dependabot tidy
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  tidy:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      startsWith(github.head_ref, 'dependabot/go_modules/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the tidied go.mod and go.sum
+      actions: write # start CI on the result
+    steps:
+      # The branch itself, with credentials kept, to push to it.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: Tidy
+        id: tidy
+        run: |
+          make tidy
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Push and run CI
+        if: steps.tidy.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "go mod tidy in every module"
+          git push origin "HEAD:$BRANCH"
+          gh workflow run ci.yml --ref "$BRANCH" -f base="$BASE"
