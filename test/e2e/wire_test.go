@@ -173,8 +173,10 @@ func (o *wireOrigin) serve(c net.Conn) {
 				continue
 			}
 		}
-		if raw := tp.take(br.Buffered()); len(raw) > 0 || !errors.Is(err, io.EOF) {
-			// EOF with nothing read is a pooled connection closing: not a request.
+		if raw := tp.take(br.Buffered()); len(raw) > 0 {
+			// A connection that ends with nothing read is not a request: a
+			// pooled connection closing, or one frpc resets when the edge
+			// aborts a stream before any of it reached the site.
 			a := arrival{Raw: raw, Err: err.Error()}
 			if line, _, ok := bytes.Cut(raw, []byte("\r\n")); ok {
 				if f := strings.Fields(string(line)); len(f) == 3 {
