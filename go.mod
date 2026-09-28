@@ -3,7 +3,7 @@ module github.com/Sebiee/fortressedge
 go 1.27.0
 
 require (
-	github.com/beevik/ntp v1.5.0
+	github.com/beevik/ntp v1.6.0
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/cilium/ebpf v0.22.0
 	github.com/diskfs/go-diskfs v1.9.4
@@ -13,9 +13,9 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/zap v1.28.0
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
-	golang.org/x/time v0.10.0
+	golang.org/x/time v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
