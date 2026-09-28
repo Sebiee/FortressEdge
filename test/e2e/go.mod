@@ -9,11 +9,11 @@ require (
 	github.com/fatedier/golib v0.8.2
 	github.com/letsencrypt/challtestsrv v1.4.2
 	github.com/letsencrypt/pebble/v2 v2.10.1
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.63.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
