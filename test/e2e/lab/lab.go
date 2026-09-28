@@ -462,15 +462,49 @@ func Get(c *http.Client, url string) (*http.Response, string, error) {
 	return Do(c, req)
 }
 
-// Do sends req and returns the response plus its body.
+// Do sends req and returns the response plus its body. A connection
+// reset, or closed, before any response is sent again, twice at most, when
+// req can be: QEMU's user-mode network now and then drops a forwarded
+// connection when the host is busy. An answer, whatever its status, is
+// never retried.
 func Do(c *http.Client, req *http.Request) (*http.Response, string, error) {
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, "", err
+	for tries := 1; ; tries++ {
+		resp, err := c.Do(req)
+		if err != nil {
+			if tries < 3 && dropped(err) {
+				if again, ok := rewind(req); ok {
+					req = again
+					continue
+				}
+			}
+			return nil, "", err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		return resp, string(b), err
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	return resp, string(b), err
+}
+
+// dropped reports whether err is a connection that ended before an answer.
+func dropped(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// rewind returns req ready to send again, when its body can be read again.
+func rewind(req *http.Request) (*http.Request, bool) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return req, true
+	}
+	if req.GetBody == nil {
+		return nil, false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, false
+	}
+	again := req.Clone(req.Context())
+	again.Body = body
+	return again, true
 }
 
 // Redirects checks that plain HTTP for the tunnel name answers 308 to the

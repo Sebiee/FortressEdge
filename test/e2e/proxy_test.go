@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,9 +91,8 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			req, err := http.NewRequest(http.MethodGet, "https://echo.example.com/", nil)
 			require.NoError(t, err)
 			req.Host = "echo.example.com."
-			resp, err := web.Do(req)
+			resp, _, err := lab.Do(web, req)
 			require.NoError(t, err)
-			resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 		}},
 		{"a hostname no dark node published gets no answer on either port", func(t *testing.T) {
@@ -223,15 +223,15 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			assert.Equal(t, "HTTP/2.0", resp.Proto)
 		}},
 		{"a large upload and a large download arrive intact", func(t *testing.T) {
-			resp, err := web.Post("https://echo.example.com/sum", "application/octet-stream", bytes.NewReader(blob))
+			req, err := http.NewRequest(http.MethodPost, "https://echo.example.com/sum", bytes.NewReader(blob))
 			require.NoError(t, err)
-			got, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			assert.Equal(t, sum(bytes.NewReader(blob)), string(got), "upload")
-			resp, err = web.Get("https://echo.example.com/blob")
+			req.Header.Set("Content-Type", "application/octet-stream")
+			_, got, err := lab.Do(web, req)
 			require.NoError(t, err)
-			defer resp.Body.Close()
-			assert.Equal(t, sum(bytes.NewReader(blob)), sum(resp.Body), "download")
+			assert.Equal(t, sum(bytes.NewReader(blob)), got, "upload")
+			_, got, err = lab.Get(web, "https://echo.example.com/blob")
+			require.NoError(t, err)
+			assert.Equal(t, sum(bytes.NewReader(blob)), sum(strings.NewReader(got)), "download")
 		}},
 		{"a streamed response reaches the visitor before the origin finishes", func(t *testing.T) {
 			resp, err := web.Get("https://echo.example.com/stream")
@@ -328,9 +328,8 @@ func TestProxyingToDarkNodes(t *testing.T) {
 				"Sec-Websocket-Key":     {base64.StdEncoding.EncodeToString(key)},
 				"Origin":                {"https://" + lab.Tunnel},
 			}
-			resp, err := sniOnly(web, "echo.example.com").Do(req)
+			resp, _, err := lab.Do(sniOnly(web, "echo.example.com"), req)
 			require.NoError(t, err)
-			resp.Body.Close()
 			assert.NotEqual(t, http.StatusSwitchingProtocols, resp.StatusCode, "frps accepted a WebSocket with no client certificate")
 		}},
 		{"the ops API cannot be reached by naming the tunnel only in Host", func(t *testing.T) {

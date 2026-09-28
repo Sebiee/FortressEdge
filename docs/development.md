@@ -317,10 +317,14 @@ HTTP/2. `RATE=0` is unbounded.
 Push an annotated `v*.*.*` tag; a lightweight one fails
 `gh release create --verify-tag`. The release job runs `make ci`, then
 attaches the ISO it just tested, `fortressctl`, `fortresskube`, and
-`SHA256SUMS`, and pushes the `fortresskube` image.
+`SHA256SUMS`, and pushes the `fortresskube` image. Each file and the image
+carry a build provenance attestation, signed by GitHub, naming the
+workflow run and commit that made them.
 
 ```sh
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 sha256sum -c SHA256SUMS
+gh attestation verify fortressedge-v0.1.0.iso --repo Sebiee/fortressedge
+gh attestation verify oci://ghcr.io/sebiee/fortressedge/fortresskube:v0.1.0 --repo Sebiee/fortressedge
 ```
