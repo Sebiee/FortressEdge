@@ -79,7 +79,40 @@ jobs:
   # commit this one builds on, at a rate a 2-core runner sustains; see
   # docs/development.md#perf-guard. Throughput on such a runner measures
   # the runner, so it is not what this checks.
+  # Whether a pull request changes what the edge runs, or how the perf
+  # guard measures it. Anything else (docs, tools, other tests) skips it.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      edge: ${{ steps.diff.outputs.edge }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Paths
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          edge=false
+          if git diff --name-only "$BASE" HEAD | grep -qE \
+            '^(cmd/fortressedge/|internal/|bake/|bpf/|os/|go\.(mod|sum)$|Makefile$|test/e2e/(lab/|go\.(mod|sum)$|testdata/perf-baseline\.json$|(perf|bench|openappsec|wire)_test\.go$)|\.github/workflows/ci\.yml$)'; then
+            edge=true
+          fi
+          echo "edge=$edge" >> "$GITHUB_OUTPUT"
+
+  # What a request costs the edge, against the pull request's base: only
+  # for pull requests, since a merge adds nothing its pull request did not
+  # measure.
   perf-guard:
+    needs: changes
+    if: needs.changes.outputs.edge == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -112,6 +145,11 @@ jobs:
         with:
           path: out/openappsec
           key: openappsec-${{ hashFiles('test/e2e/testdata/openappsec.sha256') }}
+      - name: Cache the base's bench ISO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/base-iso
+          key: perf-base-${{ github.event.pull_request.base.sha }}
       # os/netns.sh makes the bench's tap in an unprivileged user namespace,
       # which Ubuntu 24.04's AppArmor forbids by default.
       - name: Enable KVM, user namespaces and vhost-net
@@ -124,11 +162,8 @@ jobs:
           sudo chmod 0666 /dev/vhost-net
       - name: Perf guard
         env:
-          # A pull request against its base; a push against the tip before it.
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          case "$BASE" in 0000000000000000000000000000000000000000) BASE= ;; esac
-          make perf-guard BASE="$BASE"
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: make perf-guard BASE="$BASE"
       - name: Summary
         if: always()
         run: cat out/waf-bench/perf-guard-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

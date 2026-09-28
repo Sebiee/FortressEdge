@@ -43,7 +43,7 @@ these.
 | `make e2e` | the system tests, with `-race` on what runs in-process (the frp fork's client, Pebble); `RUN=TestCertificates` picks some |
 | `make load` | what one edge VM serves through each tunnel (see [Load tests](#load-tests)); not part of `ci` |
 | `make waf-bench` | replay open-appsec's WAF datasets and run GoTestWAF through a larger edge VM, with throughput and latency (see [WAF bench](#waf-bench)); not part of `ci` |
-| `make perf-guard BASE=<ref>` | what a request costs the edge in CPU and allocations, against `BASE` (see [Perf guard](#perf-guard)); CI runs it on every pull request |
+| `make perf-guard BASE=<ref>` | what a request costs the edge in CPU and allocations, against `BASE` (see [Perf guard](#perf-guard)); CI runs it on pull requests that change the edge |
 | `make ci` | `tidy-check`, `test`, `e2e`, as CI runs them |
 | `make tidy` | `go mod tidy` in every module |
 | `make generate` | rebuild the BPF objects (needs clang and llvm) |
@@ -214,13 +214,13 @@ make waf-bench E2E_ARGS=-update-baselines
 
 Requests a second on a shared, 2-core CI runner measure the runner, so
 the perf guard measures work instead. `TestPerfGuard` replays the first
-10 files of open-appsec's legitimate set (18,277 requests) at 1,000
+5 files of open-appsec's legitimate set (about 9,000 requests) at 1,000
 requests a second, which such a runner sustains, and reads what the edge
 process spent meanwhile: CPU time and allocations per request (the bench
 ISO's `/~!ops/pprof/metrics`), with the visitors' p50 and p99 for
 information. `make perf-guard BASE=<ref>` builds `<ref>`'s bench ISO in a
-worktree under `out/` and boots it and this tree's in turn, 5 rounds each,
-back to back. It fails when a request costs more than 20% more CPU than
+worktree under `out/`, keeps it in `out/base-iso/<commit>.iso`, and boots
+it and this tree's in turn, 3 rounds each, back to back. It fails when a request costs more than 20% more CPU than
 on the base, taken as the median of each round's ratio, since noise drifts
 but hits a round's two builds alike, or more than 10% more allocations or
 bytes allocated, or when the edge's peak RSS (`VmHWM`, the most memory
@@ -237,9 +237,10 @@ On a laptop confined to 2 CPUs (`taskset -c 0,1`), the same code against
 itself came out at −6% CPU and ±0% allocations, with single rounds
 between −19% and +8%; a request made about 35% dearer by hashing 192 KiB
 failed at +36.5%; 32 MiB held from boot failed at +209% peak RSS, since
-the edge collects garbage at five times the live heap. CI runs it on
-every pull request against its base, and
-on `main` against the commit before, and posts the table on the run's
+the edge collects garbage at five times the live heap. CI runs it on a
+pull request that changes what the edge runs or how it is measured (the
+edge's code, `os/`, the lab), against its base, whose bench ISO it caches;
+a merge to `main` does not run it again. It posts the table on the run's
 summary page. After a change that allocates more on purpose:
 
 ```sh

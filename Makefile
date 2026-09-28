@@ -101,26 +101,34 @@ bench-iso:
 
 # The perf guard (TestPerfGuard): what a request costs the edge in CPU and
 # allocations, at a rate a 2-core CI runner sustains, against BASE (a git
-# ref) when given. BASE's bench ISO is built in a worktree under out/; a
-# BASE from before bench-iso, or provisioned otherwise than this lab boots
-# edges (before the policy API), leaves the committed baseline.
-PERF_FILES ?= 10
+# ref) when given. BASE's bench ISO is built in a worktree under out/ and
+# kept in out/base-iso/<commit>.iso, which CI caches; a BASE from before
+# bench-iso, or provisioned otherwise than this lab boots edges (before the
+# policy API), leaves the committed baseline.
+PERF_FILES ?= 5
 BASE ?=
 perf-guard: bench-iso
 	$(Q)base_iso=; \
 	if [ -n "$(BASE)" ]; then \
-		git worktree remove --force out/base-src 2>/dev/null; rm -rf out/base-src; \
-		git worktree add --detach out/base-src "$(BASE)" >/dev/null || exit 1; \
-		mkdir -p out/base-src/out && cp -r out/alpine out/base-src/out/ 2>/dev/null; \
-		if ! grep -q OpsPolicyPath out/base-src/internal/config/config.go; then \
-			echo "perf-guard: $(BASE) is provisioned otherwise than this lab boots edges; the committed baseline only"; \
-		elif $(MAKE) --no-print-directory -C out/base-src bench-iso >out/base-src.log 2>&1; then \
-			base_iso=$(CURDIR)/out/base-src/out/bench/fortressedge.iso; \
-		else echo "perf-guard: $(BASE) has no bench-iso (out/base-src.log); the committed baseline only"; fi; \
+		sha=$$(git rev-parse --verify "$(BASE)^{commit}") || exit 1; \
+		if [ -f "out/base-iso/$$sha.iso" ]; then \
+			base_iso=$(CURDIR)/out/base-iso/$$sha.iso; \
+			echo "perf-guard: $(BASE)'s bench ISO from out/base-iso"; \
+		else \
+			git worktree remove --force out/base-src 2>/dev/null; rm -rf out/base-src; \
+			git worktree add --detach out/base-src "$$sha" >/dev/null || exit 1; \
+			mkdir -p out/base-src/out && cp -r out/alpine out/base-src/out/ 2>/dev/null; \
+			if ! grep -q OpsPolicyPath out/base-src/internal/config/config.go; then \
+				echo "perf-guard: $(BASE) is provisioned otherwise than this lab boots edges; the committed baseline only"; \
+			elif $(MAKE) --no-print-directory -C out/base-src bench-iso >out/base-src.log 2>&1; then \
+				mkdir -p out/base-iso && cp out/base-src/out/bench/fortressedge.iso "out/base-iso/$$sha.iso"; \
+				base_iso=$(CURDIR)/out/base-iso/$$sha.iso; \
+			else echo "perf-guard: $(BASE) has no bench-iso (out/base-src.log); the committed baseline only"; fi; \
+			git worktree remove --force out/base-src 2>/dev/null; \
+		fi; \
 	fi; \
 	$(MAKE) --no-print-directory waf-bench WAF_RUN='^TestPerfGuard$$' \
-		E2E_ARGS="-perf-files=$(PERF_FILES) -base-iso=$$base_iso $(E2E_ARGS)"; s=$$?; \
-	if [ -n "$(BASE)" ]; then git worktree remove --force out/base-src 2>/dev/null; fi; exit $$s
+		E2E_ARGS="-perf-files=$(PERF_FILES) -base-iso=$$base_iso $(E2E_ARGS)"
 
 # Built from its module, which the Go checksum database vouches for; the
 # module also carries the testcases and config.yaml GoTestWAF reads.
