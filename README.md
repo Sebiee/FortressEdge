@@ -57,7 +57,7 @@ published through it. You need `qemu-system-x86_64`, Docker, `openssl`,
 and `cloud-localds` (Debian and Ubuntu: `cloud-image-utils`).
 
 ```sh
-v=v0.1.0
+v=v0.2.0
 base=https://github.com/Sebiee/fortressedge/releases/download/$v
 wget -O fortressedge.iso "$base/fortressedge-$v.iso"
 wget -O fortressctl "$base/fortressctl-$v-linux-amd64" && chmod +x fortressctl
@@ -157,7 +157,6 @@ give it a public address, open TCP 80 and 443, and point
 
 ```sh
 fortressctl ca init tls                    # tls/ca.key stays with you
-{ echo 'client_ca: |'; sed 's/^/  /' tls/ca.crt; } > fortress.yml
 ```
 
 ```terraform
@@ -169,9 +168,9 @@ terraform {
 }
 
 data "fortressedge_iso" "edge" {
-  release_url    = "https://github.com/Sebiee/fortressedge/releases/download/v0.1.0/fortressedge-v0.1.0.iso"
+  release_url    = "https://github.com/Sebiee/fortressedge/releases/download/v0.2.0/fortressedge-v0.2.0.iso"
   release_sha256 = "…" # from the release's SHA256SUMS
-  config         = file("${path.module}/fortress.yml")
+  client_ca      = file("${path.module}/tls/ca.crt")
 }
 
 resource "proxmox_virtual_environment_file" "edge_iso" {
