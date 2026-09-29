@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -50,10 +51,12 @@ func TestStartListensLoopback(t *testing.T) {
 
 // TestVisitorLeftIsDebug writes frp's proxy errors through a logger set
 // up as Start sets frp's: a visitor who left is debug, the rest stay warn.
+// frp logs through slog's default too, from a server an earlier test left
+// stopping, so the test reads only the lines of its own messages.
 func TestVisitorLeftIsDebug(t *testing.T) {
-	var buf bytes.Buffer
+	var out lines
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	l := glog.New(glog.WithOutput(logx.Forward("frp").Quiet(visitorLeft)), glog.WithLevel(glog.InfoLevel))
 
@@ -71,12 +74,39 @@ func TestVisitorLeftIsDebug(t *testing.T) {
 		{proxyErr, []any{"argocd.example.com", errors.New("dial: context canceled")}, "WARN"},
 		{"get a user connection [%s] error: %v", []any{"10.0.0.1", context.Canceled}, "WARN"},
 	} {
-		buf.Reset()
+		msg := fmt.Sprintf(tc.msg, tc.args...)
 		l.Warnf(tc.msg, tc.args...)
-		if want := "level=" + tc.level + " "; !strings.Contains(buf.String(), want) {
-			t.Errorf("%s: want %s", strings.TrimSpace(buf.String()), tc.level)
+		line := out.find(`msg="` + msg + `"`)
+		if want := "level=" + tc.level + " "; !strings.Contains(line, want) {
+			t.Errorf("%s: %q, want %s", msg, line, tc.level)
 		}
 	}
+}
+
+// lines is a log sink safe for concurrent writers: slog writes a record
+// per Write.
+type lines struct {
+	mu  sync.Mutex
+	all []string
+}
+
+func (l *lines) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.all = append(l.all, string(p))
+	return len(p), nil
+}
+
+// find is the last line containing s.
+func (l *lines) find(s string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.all) - 1; i >= 0; i-- {
+		if strings.Contains(l.all[i], s) {
+			return l.all[i]
+		}
+	}
+	return ""
 }
 
 // holdConn blocks in its first Write until release is closed, and records
