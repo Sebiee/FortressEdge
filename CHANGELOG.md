@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 `response_header_timeout` in the policy's `limits`: how long a request
 waits for the origin's response headers before the edge answers `504`,
@@ -10,6 +10,11 @@ which cut server-sent events and long polls (such as Argo CD's
 application stream) whose headers come with their first event. A visitor
 who leaves before the origin answers is logged at debug, no longer as
 frp's `context canceled` warning. `/~!ops/status` shows the limit.
+
+The `bake` package has `Config`, `fortress.yml` as fields, one per key
+the edge reads: `YAML` writes it, leaving defaults out, and `Check`
+checks it. The Terraform provider v0.2.0 builds its `fortressedge_iso`
+attributes on it, one per key, in place of `config`.
 
 ## 0.1.0
 

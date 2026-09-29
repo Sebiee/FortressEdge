@@ -54,7 +54,7 @@ Leave out `acme` and `acme_ca` for Let's Encrypt. Every key is listed in
 the [README](../README.md#configuration). Then bake:
 
 ```sh
-fortressctl bake -o edge-prod.iso -c fortress.yml fortressedge-v0.1.0.iso
+fortressctl bake -o edge-prod.iso -c fortress.yml fortressedge-v0.2.0.iso
 ```
 
 `bake` checks the file first: a missing `client_ca`, a `client_ca` with
@@ -70,7 +70,7 @@ with its checksum:
 ```yaml
 # .github/workflows/edge-iso.yml, on a change to envs/prod/fortress.yml
 - run: |
-    v=v0.1.0
+    v=v0.2.0
     base=https://github.com/sebiee/fortressedge/releases/download/$v
     curl -fsSLo release.iso "$base/fortressedge-$v.iso"
     curl -fsSLo fortressctl "$base/fortressctl-$v-linux-amd64" && chmod +x fortressctl
@@ -124,7 +124,7 @@ cloud do it.
 The `fortressedge` provider bakes on the machine that runs Terraform,
 from a release pinned by its checksum, with no CI job. Bakes are
 reproducible, so the ISO's checksum is known at plan time: the same
-release and `fortress.yml` plan no change, on any machine, and nothing is
+release and settings plan no change, on any machine, and nothing is
 uploaded again. With the [bpg/proxmox](https://registry.terraform.io/providers/bpg/proxmox)
 provider, an edge is then stock resources:
 
@@ -137,9 +137,11 @@ terraform {
 }
 
 data "fortressedge_iso" "prod" {
-  release_url    = "https://github.com/sebiee/fortressedge/releases/download/v0.1.0/fortressedge-v0.1.0.iso"
+  release_url    = "https://github.com/sebiee/fortressedge/releases/download/v0.2.0/fortressedge-v0.2.0.iso"
   release_sha256 = "…"                         # from the release's SHA256SUMS
-  config         = file("${path.module}/fortress.yml")
+  client_ca      = file("${path.module}/tls/ca.crt")
+  acme           = "https://vault.example.com:8200/v1/pki/acme/directory"
+  acme_ca        = file("${path.module}/vault-ca.pem")
 }
 
 resource "proxmox_virtual_environment_file" "edge_iso" {
@@ -186,9 +188,10 @@ resource "proxmox_virtual_environment_vm" "edge1" {
 }
 ```
 
-`fortressedge_iso` takes `config` (the `fortress.yml` text, checked at
-plan time as the edge checks it), and `release_url` with `release_sha256`
-or, for a build of your own, `release_path`. It returns `path`, `sha256`,
+`fortressedge_iso` takes the `fortress.yml` settings as attributes of the
+same names (`client_ca`, `acme`, `acme_ca`, `ntp`, and the rest), checked
+at plan time as the edge checks them, and `release_url` with
+`release_sha256` or, for a build of your own, `release_path`. It returns `path`, `sha256`,
 and `file_name`. Downloads and baked ISOs are kept in the user's cache
 directory, or the provider's `cache_dir`. The DNS record for
 `edge1.example.com` and the edge's operator certificate belong in the
