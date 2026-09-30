@@ -29,7 +29,7 @@ func (f *fakeFilt) Stats() map[string]uint64 { return nil }
 func TestProtectHeaders(t *testing.T) {
 	p := protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "ok")
-	}), &httpStats{}, nil)
+	}), &httpStats{})
 	req := httptest.NewRequest(http.MethodGet, "http://app.example.com/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -101,7 +101,10 @@ func TestBodyAndURILimitsChangeLive(t *testing.T) {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 		}
 	})
-	h := refuseMalformed(protect(echo, nil, lim), nil, lim)
+	h, err := Handler("tunnel.example.com", echo, nil, nil, nil, nil, lim)
+	if err != nil {
+		t.Fatal(err)
+	}
 	send := func(uri, body string) int {
 		req := httptest.NewRequest(http.MethodPost, "http://app.example.com"+uri, strings.NewReader(body))
 		rec := httptest.NewRecorder()

@@ -242,25 +242,84 @@ func TestParseQUIC(t *testing.T) {
 }
 
 func TestParseAccessLog(t *testing.T) {
-	c, err := parse("access_log: true\n")
+	p, err := ParsePolicy([]byte("access_log: true\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.AccessLog || c.AccessLogMaxSize != DefaultAccessLogMaxSize || c.AccessLogMaxFiles != DefaultAccessLogMaxFiles {
-		t.Fatalf("access_log: %v %d %d", c.AccessLog, c.AccessLogMaxSize, c.AccessLogMaxFiles)
+	if want := (AccessLog{On: true, MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles}); p.AccessLog != want {
+		t.Fatalf("access_log: %+v", p.AccessLog)
 	}
-	c, err = parse("access_log: true\naccess_log_max_size: 1GiB\naccess_log_max_files: 10\n")
+	p, err = ParsePolicy([]byte("access_log: true\naccess_log_max_size: 1GiB\naccess_log_max_files: 10\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.AccessLogMaxSize != 1<<30 || c.AccessLogMaxFiles != 10 {
-		t.Fatalf("access_log sizes: %d %d", c.AccessLogMaxSize, c.AccessLogMaxFiles)
+	if p.AccessLog.MaxSize != 1<<30 || p.AccessLog.MaxFiles != 10 {
+		t.Fatalf("access_log sizes: %+v", p.AccessLog)
 	}
 	for _, bad := range []string{"access_log_max_size: 8\n", "access_log_max_size: 512KiB\n", "access_log_max_size: 8MB\n",
 		"access_log_max_size: -8MiB\n", "access_log_max_files: -1\n", "access_log_max_files: 1001\n"} {
-		if _, err := parse(bad); err == nil {
+		if _, err := ParsePolicy([]byte(bad)); err == nil {
 			t.Fatalf("%q: want error", bad)
 		}
+	}
+	// It moved from fortress.yml, which says where it went.
+	if _, err := parse("access_log: true\n"); err == nil || !strings.Contains(err.Error(), "put it in policy.yml") {
+		t.Fatalf("access_log in fortress.yml: %v", err)
+	}
+}
+
+func TestParseSites(t *testing.T) {
+	p, err := ParsePolicy([]byte("access_log: true\nlimits:\n  max_body_size: 1MiB\n  response_header_timeout: 30s\n" +
+		"sites:\n  Upload.Example.com.:\n    max_body_size: 4GiB\n    access_log: false\n" +
+		"  '*.apps.example.com':\n    response_header_timeout: 10m\n    max_body_size: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge := Site{AccessLog: true, MaxBodyBytes: 1 << 20, ResponseHeaderTimeout: 30 * time.Second}
+	for _, tc := range []struct {
+		host, route string
+		want        Site
+	}{
+		{"other.example.com", "other.example.com", edge},
+		{"upload.example.com", "upload.example.com", Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second}},
+		{"argo.apps.example.com", "*.apps.example.com", Site{AccessLog: true, ResponseHeaderTimeout: 10 * time.Minute}},
+		// A name's own entry wins over its wildcard's.
+		{"upload.example.com", "*.example.com", Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second}},
+	} {
+		if got := p.Site(tc.host, tc.route); got != tc.want {
+			t.Errorf("%s via %s: %+v, want %+v", tc.host, tc.route, got, tc.want)
+		}
+	}
+	if !p.AccessLogAnywhere() {
+		t.Fatal("AccessLogAnywhere")
+	}
+	p, _ = ParsePolicy([]byte("sites:\n  a.example.com:\n    access_log: true\n"))
+	if p.AccessLog.On || !p.AccessLogAnywhere() || !p.Site("a.example.com", "a.example.com").AccessLog {
+		t.Fatal("one site's access log")
+	}
+	for _, bad := range []string{
+		"sites:\n  localhost:\n    access_log: true\n",
+		"sites:\n  '*example.com':\n    access_log: true\n",
+		"sites:\n  a.example.com:\n    max_body_size: 12\n",
+		"sites:\n  a.example.com:\n    response_header_timeout: 1h\n",
+		"sites:\n  a.example.com:\n    ban: 1m\n",
+		"sites:\n  a.example.com: {}\n  A.example.com: {}\n",
+	} {
+		if _, err := ParsePolicy([]byte(bad)); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
+func TestParseTrace(t *testing.T) {
+	if p, err := ParsePolicy(nil); err != nil || p.Trace.TrustIncoming {
+		t.Fatalf("default: %+v %v", p.Trace, err)
+	}
+	if p, err := ParsePolicy([]byte("trace:\n  trust_incoming: true\n")); err != nil || !p.Trace.TrustIncoming {
+		t.Fatalf("trust_incoming: %+v %v", p.Trace, err)
+	}
+	if _, err := ParsePolicy([]byte("trace:\n  export: otlp\n")); err == nil {
+		t.Fatal("unknown trace key")
 	}
 }
 
@@ -355,6 +414,8 @@ func TestPolicyRebootFrom(t *testing.T) {
 		"ban_window":                 func(l *Limits) { l.BanWindow = time.Minute },
 		"max_uri_size":               func(l *Limits) { l.MaxURIBytes = 7 },
 		"max_body_size":              func(l *Limits) { l.MaxBodyBytes = 7 },
+		// Each request carries its own to frps.
+		"response_header_timeout": func(l *Limits) { l.ResponseHeaderTimeout = time.Hour },
 	} {
 		next := cur
 		live(&next.Limits)
@@ -366,8 +427,6 @@ func TestPolicyRebootFrom(t *testing.T) {
 		"max_connections":   func(l *Limits) { l.MaxConns = 7 },
 		"max_header_size":   func(l *Limits) { l.MaxHeaderBytes = 7 },
 		"max_http2_streams": func(l *Limits) { l.MaxHTTP2Streams = 7 },
-		// frps fixes it when it starts.
-		"response_header_timeout": func(l *Limits) { l.ResponseHeaderTimeout = time.Hour },
 	} {
 		next := cur
 		boot(&next.Limits)

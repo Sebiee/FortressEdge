@@ -8,9 +8,10 @@ The client certificate's role decides what it may call (see
 | Endpoint | Who | What it does |
 | --- | --- | --- |
 | `GET /~!ops/status` | `ops`, `logs` | JSON: boot id, uptime, network, tunnel, QUIC, open connections, limit and XDP counters, per-site counters, log cursor |
+| `GET /~!ops/metrics` | `ops`, `logs` | the same counters and more in Prometheus's text format, for a scraper; see [Metrics](#metrics) |
 | `GET /~!ops/logs` | `ops`, `logs` | this boot's log as text; `?follow` streams new lines |
 | `GET /~!ops/logs?format=ndjson` | `ops`, `logs` | one `{"line": ...}` object per line, for shippers |
-| `GET /~!ops/access` | `ops`, `logs` | the access log (`access_log: true`), one JSON object per line; `?follow` and `?cursor=` as for logs |
+| `GET /~!ops/access` | `ops`, `logs` | the access log (the policy's `access_log`), one JSON object per line; `?follow` and `?cursor=` as for logs |
 | `GET /~!ops/policy` | `ops`, `logs` | `policy.yml` as last applied (empty: the defaults), its SHA-256 as the ETag |
 | `PUT /~!ops/policy` | `ops` | replaces the policy whole; `fortressctl apply` sends it, see [provisioning.md](provisioning.md#policyyml-apply-while-the-edge-runs) |
 
@@ -81,20 +82,65 @@ filebeat.inputs:
 Vector's `http_client` source cannot carry a cursor. Until the edge can
 push logs, scrape the whole log with it and deduplicate downstream.
 
+### Proxy errors
+
+When frps cannot proxy a site request, the edge logs one warning that
+says where and for whom, and counts it for the site
+(`fortressedge_proxy_errors_total`):
+
+```
+level=WARN msg="proxy error" site=vault.example.com method=GET path=/v1/sys/health ip=203.0.113.7 id=01925f3a-… trace_id=4bf92f35… span_id=00f067aa… reason=eof_body elapsed_ms=812 sent=16384 err="unexpected EOF"
+```
+
+`elapsed_ms` is the time since the request arrived and `sent` the
+response bytes the visitor already had. `reason` is where it failed:
+
+| `reason` | The visitor gets | Usually |
+| --- | --- | --- |
+| `no_route` | `404` | the dark node unpublished the name while the request came in |
+| `dial` | `502` | no work connection to the dark node: it is gone, or its tunnel is broken |
+| `send` | `502` | the request could not be written to the dark node |
+| `header_timeout` | `504` | the origin sent no response headers within `response_header_timeout` |
+| `eof_headers` | `502` | the origin closed the connection before its headers: down, or restarting |
+| `eof_body` | a response cut short | the origin's connection broke mid-response: a pod restarting, say |
+
+A visitor who leaves before the origin answers is not an error; it is a
+debug line, and `499` in the access log. A body over `max_body_size` is
+the visitor's, answered `413`, and counted as a limit hit instead.
+
 ## Access log
 
-With `access_log: true` in `fortress.yml`, every request for a published
-site is one JSON line in `/var/log/fortressedge/access/`, apart from the
-edge's own log. It is off by default: it is large, and visitor addresses
-are personal data.
+With `access_log: true` in the policy (`policy.yml`), every request for
+a published site is one JSON line in `/var/log/fortressedge/access/`,
+apart from the edge's own log. It is off by default: it is large, and
+visitor addresses are personal data. `fortressctl apply` turns it on and
+off while the edge runs, for every site or, under `sites`, for one:
+
+```yaml
+access_log: true            # every site...
+access_log_max_size: 8MiB
+access_log_max_files: 3
+sites:
+  vault.example.com:
+    access_log: false       # ...but this one
+```
+
+With `access_log: false` (or left out) and one site set to `true`, only
+that site is logged.
 
 ```json
-{"time":"2026-09-24T10:02:17.114Z","id":"01925f3a-…","ip":"203.0.113.7","site":"app.example.com","method":"GET","path":"/api/items","proto":"HTTP/2.0","status":200,"in":0,"out":5120,"ms":41,"ua":"Mozilla/5.0 …"}
+{"time":"2026-09-24T10:02:17.114Z","id":"01925f3a-…","ip":"203.0.113.7","site":"app.example.com","method":"GET","path":"/api/items","proto":"HTTP/2.0","status":200,"in":0,"out":5120,"ms":41,"start":"2026-09-24T10:02:17.073Z","us":41237,"headers_us":40112,"ua":"Mozilla/5.0 …","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
 ```
 
 `path` has no query string, which often carries tokens. `status` 499
 means the visitor left before the response; 101 is a WebSocket, whose
 `ms` is how long it stayed open and whose traffic is not in `in`/`out`.
+`start` is when the request arrived, `us` its whole time in
+microseconds, and `headers_us` the time until the response headers went
+to the visitor, which is the origin's answering time plus the tunnel.
+`route` is the published name when a wildcard routed the request, and
+`error` the proxy error's `reason` when there was one. The trace fields
+are under [Tracing](#tracing).
 
 `id` is also sent to the visitor as `Fortress-Request-Id` and to the dark
 node as `X-Request-Id`, replacing any the visitor sent. A visitor who
@@ -106,8 +152,9 @@ The log starts a new file at `access_log_max_size` (default `8MiB`) and
 keeps `access_log_max_files` files (default 3, the current one included),
 deleting the oldest, so it never takes more than their product: 24 MiB
 by default. That fits a 64 MiB data disk,
-which also holds certificates and the edge's log; the edge warns at boot
-when the access log could take more than half of its disk. Each new file
+which also holds certificates and the edge's log; the edge warns when
+the access log could take more than half of its disk. Turning the log
+off keeps its files; a new size or count applies from the next write. Each new file
 gets a new id (`<boot-id>`, then `<boot-id>.1`, `.2`, …), and a rotated
 file is kept as `<id>.log`.
 
@@ -117,6 +164,95 @@ A cursor into any kept file continues through every newer one, so a
 shipper that polls before the oldest file is deleted loses nothing. For
 Filebeat, copy the input above with `url: …/~!ops/access`; each event is
 then the request record itself.
+
+## Tracing
+
+Every site request is one hop of a [W3C trace](https://www.w3.org/TR/trace-context/).
+The edge gives it a span id of its own and sends the origin a
+`traceparent` whose parent is that span, so an app's OpenTelemetry spans
+hang under the edge's, and Envoy passes the header on untouched. The
+visitor gets the trace id as `Fortress-Trace-Id`, next to
+`Fortress-Request-Id`.
+
+By default the edge trusts no visitor's `traceparent`: every request
+starts a trace of its own, sampled, so an outsider cannot choose the
+trace id a request lands in, nor send a `tracestate` on. A valid
+`traceparent` the visitor sent is kept in the access log as
+`link_trace_id` and `link_span_id`, to become a span link. When the
+visitors are your own services, continue their traces instead:
+
+```yaml
+trace:
+  trust_incoming: true
+```
+
+Then a valid `traceparent` keeps its trace id and flags, its span id
+becomes the access log's `parent_id`, and its `tracestate` goes on
+unchanged; a missing or malformed one starts a new trace.
+
+The edge exports no spans: the cluster behind it is dark, so there is no
+collector to reach. The access log line has what a span needs
+(`trace_id`, `span_id`, `parent_id`, `start`, `us`, `status`, `site`,
+`method`, `path`), and a shipper that pulls `/~!ops/access` turns each
+line into the edge's span.
+
+## Metrics
+
+`GET /~!ops/metrics` serves the Prometheus text format to an operator or
+a log-reader certificate. Like the rest of the ops API it is never rate
+limited. Counters start at zero at boot, which
+`fortressedge_boot_time_seconds` dates. A label set that never happened
+is left out, so an edge with a few dozen sites has a few hundred series.
+
+```yaml
+scrape_configs:
+  - job_name: fortressedge
+    scheme: https
+    metrics_path: /~!ops/metrics
+    tls_config:
+      ca_file: /etc/prometheus/acme-root.crt   # leave out for Let's Encrypt
+      cert_file: /etc/prometheus/metrics.crt   # tls/clients/logs/metrics.crt
+      key_file: /etc/prometheus/metrics.key
+    static_configs:
+      - targets: [tunnel.example.com:443]
+```
+
+`site` is the name a dark node published: `*.example.com` for every
+request a wildcard route carried, so the label cannot grow with the
+names visitors make up.
+
+| Metric | Labels | What |
+| --- | --- | --- |
+| `fortressedge_build_info` | `version`, `go_version` | 1 |
+| `fortressedge_boot_time_seconds` | | when the edge started |
+| `fortressedge_http_requests_total` | `site`, `code_class` | site requests by status class |
+| `fortressedge_http_request_duration_seconds` | `site` | histogram of the time to the response headers; buckets 5ms to 60s |
+| `fortressedge_http_request_seconds_total` | `site` | requests' whole time, bodies and WebSockets included |
+| `fortressedge_http_bytes_total` | `site`, `direction` | body bytes `in` and `out` |
+| `fortressedge_http_requests_in_flight` | `site` | requests being served |
+| `fortressedge_proxy_errors_total` | `site`, `reason` | see [Proxy errors](#proxy-errors) |
+| `fortressedge_limit_hits_total` | `site`, `limit` | refusals: `rate`, `uri`, `body`, `malformed`, and `connections` (no site: refused at accept) |
+| `fortressedge_connections`, `fortressedge_visitors` | | open connections; sources tracked |
+| `fortressedge_bans_total`, `fortressedge_banned_sources` | | bans since boot; banned now |
+| `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
+| `fortressedge_tunnel_logins_total`, `fortressedge_tunnel_proxies` | | frpc logins; proxies registered |
+| `fortressedge_published_names` | | names published, wildcards included |
+| `fortressedge_work_connections` | `state` | work connections: `pooled` by frpc ahead of a request, `idle` after one, `active` |
+| `fortressedge_work_connections_discarded_total` | | work connections frpc sent beyond its pool, closed unused |
+| `fortressedge_certificate_not_after_seconds` | `name` | when the served certificate expires: the tunnel name and each site |
+| `fortressedge_certificate_obtains_total`, `fortressedge_certificate_renewals_total` | `name`, `result` | orders, `ok` or `failed` |
+| `fortressedge_xdp_packets_total` | `action`, `reason` | every packet XDP saw; see below |
+| `fortressedge_xdp_ethertype_drops_total` | `ethertype` | non-IP frames by EtherType: `0x88cc` LLDP, `llc` 802.3 (STP) |
+| `fortressedge_kernel_tcp_total` | `counter` | the kernel's TCP counters, as `kernel_tcp` in status |
+
+XDP's reasons: `pass` for `service` (HTTP, HTTPS, QUIC), `reply` (to the
+edge's own connections), `arp`, `icmp6`, `icmp3`, `ntp`, `dns`; `drop` for
+`block` (block list and bans), `port`, `synrate`, `ntprate`, `dnsrate`,
+`ethertype` (not IPv4, IPv6, or ARP), `proto` (an IP protocol other than
+TCP, UDP, ICMP: VRRP, IGMP, GRE…), `icmp` (ICMPv4 other than unreachable),
+`fragment` (an IPv4 fragment after the first), and `truncated` (a header
+cut short). The header size limit (`431`) is enforced by Go's server
+before the edge sees the request, so no counter has it.
 
 ## Limits
 
@@ -131,9 +267,9 @@ holds a whole /64.
 Each limit is a key under `limits:` in the policy (`policy.yml`). A key
 left out keeps its default, and `0` turns a rate or count off. A change
 through `fortressctl apply` applies at once, without dropping
-connections, except for the four keys marked *reboot*: Go's HTTP server,
-the connection cap, and frps fix those when they start, so the edge
-reboots into the new policy.
+connections, except for the three keys marked *reboot*: Go's HTTP server
+and the connection cap fix those when they start, so the edge reboots
+into the new policy.
 
 ```yaml
 limits:
@@ -146,11 +282,24 @@ limits:
   ban_after: 200                    # refusals that earn a ban...
   ban_window: 10s                   # ...within this time
   max_uri_size: 16KiB
-  max_body_size: 512MiB             # 0: no limit (leave it to the gateway)
+  max_body_size: 512MiB             # 0: no limit (leave it to the gateway). Per site too
+  response_header_timeout: 60s      # wait for the origin's response headers; whole seconds, 1s–10m. Per site too
   max_connections: 0                # reboot. All sources, per port; 0: RAM ÷ 64 KiB, 1024–32768
   max_header_size: 64KiB            # reboot. Request line and headers
   max_http2_streams: 100            # reboot. Concurrent streams per HTTP/2 connection
-  response_header_timeout: 60s      # reboot. Wait for the origin's response headers; whole seconds, 1s–10m
+```
+
+`max_body_size` and `response_header_timeout` are the edge's defaults. A
+site that needs large uploads or long polls gets its own under `sites`,
+by the name its dark node publishes (a wildcard such as `*.example.com`
+too; a name's own entry wins over its wildcard's):
+
+```yaml
+sites:
+  upload.example.com:
+    max_body_size: 4GiB
+  argocd.example.com:
+    response_header_timeout: 10m
 ```
 
 A visitor keeps what it has used when a rate changes: its allowance
@@ -164,8 +313,8 @@ a stream's first event (server-sent events, long polling, Argo CD's
 `/api/v1/stream/applications`) has the stream cut with a `504` when no
 event comes within it, so raise it for such sites. It no longer applies
 once the headers arrive. A visitor who leaves before then (a reload, a
-closed tab) is not a warning: frp's `context canceled` line for it is
-logged at debug, below what the edge logs.
+closed tab) is not a warning: it is logged at debug, below what the edge
+logs.
 
 | Over the limit | What the source sees |
 | --- | --- |
@@ -175,7 +324,7 @@ logged at debug, below what the edge logs.
 | `requests_per_second` / `request_burst` | `429` with `Retry-After: 1` |
 | `max_header_size` | `431` |
 | `max_uri_size` | `414` |
-| `max_body_size` | the upload is cut off; the origin sees a short body |
+| `max_body_size` | `413`; a body announced as larger never reaches the origin, a streamed one is cut off there |
 | `max_http2_streams` | the client queues further requests; the server announces the limit when the connection opens |
 | `response_header_timeout` | `504` with an empty body |
 
@@ -247,8 +396,10 @@ refused or reset connections, the cause is outside the edge.
 
 `/~!ops/status` counts all of this: `http_rate_limited`, `conn_limited`,
 `bans`, `visitors` (sources tracked now), `http_rejected` (malformed),
-and for each published site under `sites` its `requests`, `in_flight`,
-`bytes_in`, `bytes_out`, and responses by class (`2xx` … `5xx`).
+and for each published name under `sites` its `requests`, `in_flight`,
+`bytes_in`, `bytes_out`, and responses by class (`2xx` … `5xx`). A
+wildcard route's requests count under the wildcard. `/~!ops/metrics` has
+the same per site, and more.
 
 ## Console
 

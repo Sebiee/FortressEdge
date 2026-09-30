@@ -22,7 +22,10 @@ import (
 // the same marker as the edge's log, "# boot <id>", where the id is the
 // boot id and, after a rotation, a sequence number; a rotated file is
 // named <id>.log. The ops API's cursors name a file by its id.
-func OpenAccess(dir string, maxSize int64, maxFiles int) (io.Writer, error) {
+//
+// Open it once per boot: a second one would start its files with the
+// same ids.
+func OpenAccess(dir string, maxSize int64, maxFiles int) (AccessWriter, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -40,6 +43,14 @@ func OpenAccess(dir string, maxSize int64, maxFiles int) (io.Writer, error) {
 	}
 	warnIfLarge(dir, maxSize*int64(maxFiles))
 	return a, nil
+}
+
+// AccessWriter is the access log's files.
+type AccessWriter interface {
+	io.Writer
+	// SetLimits changes the size at which a file rotates and the files
+	// kept, from the next write; files past maxFiles go now.
+	SetLimits(maxSize int64, maxFiles int)
 }
 
 type accessFile struct {
@@ -67,6 +78,17 @@ func (a *accessFile) Write(p []byte) (int, error) {
 	n, err := a.f.Write(p)
 	a.size += int64(n)
 	return n, err
+}
+
+func (a *accessFile) SetLimits(maxSize int64, maxFiles int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.max == maxSize && a.keep == maxFiles {
+		return
+	}
+	a.max, a.keep = maxSize, maxFiles
+	a.prune()
+	warnIfLarge(a.dir, maxSize*int64(maxFiles))
 }
 
 // rotate renames current.log to <id>.log, deletes the oldest files past

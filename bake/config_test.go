@@ -34,15 +34,12 @@ func testCA(t *testing.T) string {
 // Every field reaches the edge as the setting it names.
 func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 	c := Config{
-		ClientCA:          testCA(t),
-		ACME:              "https://vault.example.com:8200/v1/pki/acme/directory",
-		ACMECA:            testCA(t),
-		NTP:               "10.0.0.1:123",
-		RenewInterval:     "90m",
-		QUIC:              true,
-		AccessLog:         true,
-		AccessLogMaxSize:  "16MiB",
-		AccessLogMaxFiles: 5,
+		ClientCA:      testCA(t),
+		ACME:          "https://vault.example.com:8200/v1/pki/acme/directory",
+		ACMECA:        testCA(t),
+		NTP:           "10.0.0.1:123",
+		RenewInterval: "90m",
+		QUIC:          true,
 	}
 	if err := c.Check(); err != nil {
 		t.Fatal(err)
@@ -53,8 +50,7 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.ACME != c.ACME || string(cfg.ACMECA) != strings.TrimSpace(c.ACMECA) || string(cfg.ClientCA) != strings.TrimSpace(c.ClientCA) ||
-		cfg.NTP != c.NTP || cfg.RenewInterval != 90*time.Minute || !cfg.QUIC || !cfg.AccessLog ||
-		cfg.AccessLogMaxSize != 16<<20 || cfg.AccessLogMaxFiles != 5 {
+		cfg.NTP != c.NTP || cfg.RenewInterval != 90*time.Minute || !cfg.QUIC {
 		t.Fatalf("%+v", cfg)
 	}
 }

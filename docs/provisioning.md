@@ -4,9 +4,9 @@ An edge's config has three parts, and each has one owner:
 
 | Part | Holds | Comes from | Changes by |
 | --- | --- | --- | --- |
-| `fortress.yml` | whom the edge trusts and how it runs: the ACME server and its CA, the client CA, NTP, QUIC, the access log | the ISO, baked with `fortressctl bake` | a new ISO and a restart |
+| `fortress.yml` | whom the edge trusts and how it runs: the ACME server and its CA, the client CA, NTP, QUIC | the ISO, baked with `fortressctl bake` | a new ISO and a restart |
 | `fqdn` and address | the edge's DNS name and static address | the machine's NoCloud (cloud-init) drive: `user-data` and `network-config` | the platform's settings and a restart |
-| `policy.yml` | who may reach the edge and how much: `block`, `exempt`, `limits` | `fortressctl apply`, kept on the data disk | `fortressctl apply`, while the edge runs |
+| `policy.yml` | who may reach the edge and how much, and what it records: `block`, `exempt`, `limits`, `access_log`, `trace`, `sites` | `fortressctl apply`, kept on the data disk | `fortressctl apply`, while the edge runs |
 
 None of them holds a secret, so the ISO can be a build artifact and the
 drive can be what any platform writes. There is no other way to
@@ -243,10 +243,9 @@ fortressctl diff edge1.example.com -f policy.yml ...   # exit 1: the edge differ
 `--cacert` is the root the edge's certificates chain to (for Let's
 Encrypt, leave it out), and `--connect host:port` dials an address DNS
 does not point at yet. `apply` checks the file before it sends it, the
-edge checks it again, and a refused policy changes nothing. `block`,
-`exempt`, and most limits apply at once; `max_connections`,
-`max_header_size`, `max_http2_streams`, and `response_header_timeout`
-reboot the edge into the new policy. The policy replaces the previous
+edge checks it again, and a refused policy changes nothing. Everything
+applies at once except `max_connections`, `max_header_size`, and
+`max_http2_streams`, which reboot the edge into the new policy. The policy replaces the previous
 one whole, is kept on the data disk, and survives reboots and new ISOs.
 `GET /~!ops/policy` returns it as applied, with its SHA-256 as the ETag;
 a new data disk starts from the defaults until the next apply.

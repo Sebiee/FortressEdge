@@ -228,6 +228,40 @@ func TestProvisionedEdge(t *testing.T) {
 		}
 	})
 
+	step(t, "the access log turns on, and off for one site, without a reboot", func(t *testing.T) {
+		must := require.New(t)
+		vm.Tunnel(t, web, "wss", "acc.example.com", caFile, node1Crt, node1Key)
+		// A site request under limits of 2 a second: tried until it passes.
+		visit := func() string {
+			var id string
+			must.EventuallyWithT(func(c *assert.CollectT) {
+				resp, _, err := lab.Get(web, "https://acc.example.com/")
+				require.NoError(c, err)
+				require.Equal(c, http.StatusOK, resp.StatusCode)
+				id = resp.Header.Get("Fortress-Request-Id")
+			}, lab.Until(t), lab.Tick)
+			return id
+		}
+		access := func() string {
+			_, body, err := lab.Get(ops, lab.OpsURL+"access")
+			must.NoError(err)
+			return body
+		}
+		must.Contains(e.Apply(t, limits+"access_log: true\n"), "policy applied")
+		must.Equal(boot, lab.BootID(t, ops), "same boot")
+		logged := visit()
+		must.EventuallyWithT(func(c *assert.CollectT) { assert.Contains(c, access(), logged) }, lab.Until(t), lab.Tick)
+
+		must.Contains(e.Apply(t, limits+"access_log: true\nsites:\n  acc.example.com:\n    access_log: false\n"), "policy applied")
+		quiet := visit()
+		must.Contains(e.Apply(t, limits+"access_log: true\n"), "policy applied")
+		logged = visit()
+		must.EventuallyWithT(func(c *assert.CollectT) { assert.Contains(c, access(), logged) }, lab.Until(t), lab.Tick)
+		assert.NotContains(t, access(), quiet, "logged while the site had it off")
+		must.Contains(e.Apply(t, limits), "policy applied")
+		must.Equal(boot, lab.BootID(t, ops), "same boot")
+	})
+
 	var firstBoot string
 	step(t, "the power button shuts the machine down", func(t *testing.T) {
 		resp, _, err := lab.Get(ops, lab.OpsURL+"logs")

@@ -80,6 +80,19 @@ roots for Let's Encrypt, or an internal ACME server's root. Without it,
 `fortresskube` checks the edge against the system roots;
 `transport.tls.insecureSkipVerify = true` turns the check off.
 
+**Work connections.** Each site request rides a work connection, a
+stream in the tunnel that frpc opens when the edge asks for one. With
+`transport.poolCount = N`, frpc opens N ahead, so a burst does not wait
+for them; the edge keeps at most 5 (frps's `maxPoolCount`), and holds up
+to 10 more that arrive while it asks. frpc answers every request for one,
+so after a burst a few arrive when none is waiting: the edge closes those
+unused, without the error message older edges sent (frpc logged it as
+`StartWorkConn contains error ... discarding`), and counts them in
+`fortressedge_work_connections_discarded_total`. `poolCount = 5` is the
+most that helps. The edge's [metrics](operations.md#metrics) cover `fortresskube`'s
+health: `fortressedge_tunnel_clients{node="<name>"}` is 1 while its
+tunnel is up; it has no admin or metrics port of its own.
+
 An app then declares its names once:
 
 ```yaml

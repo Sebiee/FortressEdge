@@ -34,29 +34,44 @@ const (
 	noticeEvery = time.Minute
 )
 
-// liveLimits are the limits and exempt sources in force. A config change
-// swaps them while the edge runs; every check reads the current ones.
+// liveLimits are the policy in force: limits, exempt sources, and the
+// sites' settings. A policy applied in place swaps them while the edge
+// runs; every check reads the current ones.
 type liveLimits struct{ p atomic.Pointer[edgeLimits] }
 
 type edgeLimits struct {
 	config.Limits
 	Exempt []netip.Prefix
+	Trace  config.Trace
+	policy config.Policy
 }
 
+// Site is the settings for a request to host, published as route.
+func (e *edgeLimits) Site(host, route string) config.Site { return e.policy.Site(host, route) }
+
 func newLiveLimits(lim config.Limits, exempt []netip.Prefix) *liveLimits {
+	return newLivePolicy(config.Policy{Limits: lim, Exempt: exempt})
+}
+
+func newLivePolicy(p config.Policy) *liveLimits {
 	l := &liveLimits{}
-	l.set(lim, exempt)
+	l.setPolicy(p)
 	return l
 }
 
 func (l *liveLimits) set(lim config.Limits, exempt []netip.Prefix) {
-	l.p.Store(&edgeLimits{lim, slices.Clone(exempt)})
+	l.setPolicy(config.Policy{Limits: lim, Exempt: exempt})
+}
+
+func (l *liveLimits) setPolicy(p config.Policy) {
+	p.Exempt = slices.Clone(p.Exempt)
+	l.p.Store(&edgeLimits{Limits: p.Limits, Exempt: p.Exempt, Trace: p.Trace, policy: p})
 }
 
 // get returns the limits in force; the defaults for a nil l (tests).
 func (l *liveLimits) get() *edgeLimits {
 	if l == nil {
-		return &edgeLimits{Limits: config.DefaultLimits()}
+		return &edgeLimits{Limits: config.DefaultLimits(), policy: config.Policy{Limits: config.DefaultLimits()}}
 	}
 	return l.p.Load()
 }
@@ -78,6 +93,9 @@ type visitors struct {
 	known    func(string) bool
 	maxConns int // per listener, all sources together
 	notices  *rate.Limiter
+	// onRate, when set, is told the Host of each request refused for its
+	// rate, to count against the site.
+	onRate func(host string)
 
 	rateLimited, connLimited, bans atomic.Int64
 }
@@ -117,10 +135,11 @@ func visitorKey(a netip.Addr) netip.Prefix {
 	return p
 }
 
-// update puts new limits in force. Each visitor keeps its tokens; they
+// update puts a new policy in force. Each visitor keeps its tokens; they
 // refill at the new rate, up to the new burst.
-func (v *visitors) update(lim config.Limits, exempt []netip.Prefix) {
-	v.lim.set(lim, exempt)
+func (v *visitors) update(p config.Policy) {
+	lim := p.Limits
+	v.lim.setPolicy(p)
 	now := time.Now()
 	v.mu.Lock()
 	for _, vis := range v.m {
@@ -213,6 +232,9 @@ func (v *visitors) limit(h http.Handler) http.Handler {
 			return
 		}
 		v.rateLimited.Add(1)
+		if v.onRate != nil {
+			v.onRate(r.Host)
+		}
 		v.strike(k, "requests_per_second")
 		if v.known != nil && !v.known(r.Host) {
 			hide()
@@ -323,6 +345,20 @@ func (v *visitors) sweep(now time.Time) {
 			delete(v.m, k)
 		}
 	}
+}
+
+// banned counts the sources banned now.
+func (v *visitors) banned() int {
+	now := time.Now()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	n := 0
+	for _, vis := range v.m {
+		if now.Before(vis.banned) {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *visitors) stats() map[string]any {

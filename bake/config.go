@@ -29,13 +29,6 @@ type Config struct {
 	RenewInterval string `yaml:"renew_interval"`
 	// QUIC lets dark nodes connect over QUIC on UDP 443 too.
 	QUIC bool `yaml:"quic"`
-	// AccessLog writes one JSON line per site request.
-	AccessLog bool `yaml:"access_log"`
-	// AccessLogMaxSize is the size at which the access log starts a new
-	// file, such as 8MiB (KiB, MiB, GiB). Empty is 8MiB.
-	AccessLogMaxSize string `yaml:"access_log_max_size"`
-	// AccessLogMaxFiles is how many access log files are kept. 0 is 3.
-	AccessLogMaxFiles int `yaml:"access_log_max_files"`
 }
 
 // Check reports what is wrong with c, as the edge would. An error names the

@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 	"uuid"
+
+	"github.com/fatedier/frp/pkg/util/vhost"
+
+	"github.com/Sebiee/fortressedge/internal/config"
 )
 
 func TestSiteRequestIDStatsAndAccessLog(t *testing.T) {
@@ -23,8 +28,10 @@ func TestSiteRequestIDStatsAndAccessLog(t *testing.T) {
 	}))
 	t.Cleanup(vhost.Close)
 	logc := make(chan []byte, 1)
-	st := &httpStats{access: newAccessLog(chanWriter(logc))}
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, st, nil, nil)
+	st := &httpStats{}
+	st.access.Store(newAccessLog(chanWriter(logc)))
+	lim := newLivePolicy(config.Policy{Limits: config.DefaultLimits(), AccessLog: config.AccessLog{On: true}})
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, st, nil, lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +128,7 @@ func TestSiteCountsBadGateway(t *testing.T) {
 func TestMalformedUnknownNameStaysSilent(t *testing.T) {
 	st := &httpStats{}
 	h, err := Handler("tunnel.example.com", http.NotFoundHandler(), nil, nil, st,
-		func(host string) bool { return host == "app.example.com" }, nil)
+		func(host string) (string, bool) { return host, host == "app.example.com" }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,5 +150,123 @@ func TestMalformedUnknownNameStaysSilent(t *testing.T) {
 	}
 	if s := st.sitesSnapshot()["app.example.com"]; s["4xx"] != 1 || st.rejected.Load() != 1 {
 		t.Fatalf("stats: %v rejected=%d", s, st.rejected.Load())
+	}
+}
+
+// timeoutErr is a net.Error that timed out, as frps's header timeout is.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout awaiting response headers" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// A request frps could not proxy is one warning that names the site, the
+// request, and the stage; the site counts it, and its access line says why.
+func TestProxyErrorLine(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// frps's side: it reports, then answers 504, as its ErrorHandler does.
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ProxyError(r, &vhost.ProxyError{Stage: vhost.StageHeaders, Err: timeoutErr{}})
+		w.WriteHeader(http.StatusGatewayTimeout)
+	})
+	logc := make(chan []byte, 1)
+	st := &httpStats{}
+	st.access.Store(newAccessLog(chanWriter(logc)))
+	lim := newLivePolicy(config.Policy{Limits: config.DefaultLimits(), AccessLog: config.AccessLog{On: true}})
+	route := func(host string) (string, bool) { return "*.example.com", true }
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, route, lim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://vault.example.com/v1/sys/health?token=secret", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status %d", rec.Code)
+	}
+	line := logBuf.String()
+	for _, want := range []string{`level=WARN msg="proxy error"`, "site=vault.example.com", "route=*.example.com", "method=GET",
+		"path=/v1/sys/health", "ip=192.0.2.1", "id=" + rec.Header().Get(requestIDHeader),
+		"trace_id=" + rec.Header().Get(traceIDHeader), "reason=header_timeout", "elapsed_ms=", "sent=0"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("proxy error line lacks %q:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, "secret") {
+		t.Fatalf("the query reached the log: %s", line)
+	}
+	if n := st.site("*.example.com").proxyErrors[reasonHeaderTimeout].Load(); n != 1 {
+		t.Fatalf("header_timeout count %d", n)
+	}
+	var acc map[string]any
+	if err := json.Unmarshal(<-logc, &acc); err != nil {
+		t.Fatal(err)
+	}
+	if acc["error"] != "header_timeout" || acc["route"] != "*.example.com" || acc["trace_id"] != rec.Header().Get(traceIDHeader) ||
+		acc["span_id"] == nil || acc["start"] == nil || acc["us"] == nil || acc["headers_us"] == nil {
+		t.Fatalf("access line: %v", acc)
+	}
+}
+
+// max_body_size is the site's: refused up front when Content-Length says
+// so, and answered 413 when a streamed body goes over on its way to frps.
+func TestSiteBodyLimit(t *testing.T) {
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			// What frps's transport reports when the body read fails.
+			ProxyError(r, &vhost.ProxyError{Stage: vhost.StageSend, Err: err})
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		io.WriteString(w, "ok")
+	})
+	p, err := config.ParsePolicy([]byte("limits:\n  max_body_size: 1MiB\nsites:\n  small.example.com:\n    max_body_size: 1KiB\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &httpStats{}
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, nil, newLivePolicy(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(host string, body io.Reader, size int64) int {
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+"/", body)
+		req.ContentLength = size
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	big := strings.Repeat("x", 4096)
+	for _, tc := range []struct {
+		host string
+		size int64 // -1: streamed, no Content-Length
+		want int
+	}{
+		{"small.example.com", 4096, http.StatusRequestEntityTooLarge},
+		{"small.example.com", -1, http.StatusRequestEntityTooLarge},
+		{"small.example.com", 512, http.StatusOK},
+		{"other.example.com", 4096, http.StatusOK},
+		{"other.example.com", -1, http.StatusOK},
+	} {
+		body := io.Reader(strings.NewReader(big[:max(tc.size, 4096)]))
+		if tc.size == 512 {
+			body = strings.NewReader(big[:512])
+		}
+		if tc.size < 0 {
+			body = io.MultiReader(body) // hides the length
+		}
+		if got := send(tc.host, body, tc.size); got != tc.want {
+			t.Errorf("%s, %d bytes: %d, want %d", tc.host, tc.size, got, tc.want)
+		}
+	}
+	if n := st.site("small.example.com").limitHits[limitBody].Load(); n != 2 {
+		t.Fatalf("body limit hits %d, want 2", n)
+	}
+	if n := st.site("small.example.com").proxyErrors[reasonSend].Load(); n != 0 {
+		t.Fatalf("a body over the limit counted as a proxy error")
 	}
 }

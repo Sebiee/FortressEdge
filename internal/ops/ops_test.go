@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Sebiee/fortressedge/internal/config"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 )
 
 const testBoot = "11111111-2222-3333-4444-555555555555"
@@ -107,6 +108,9 @@ func TestRoles(t *testing.T) {
 		{logsID, http.MethodGet, config.OpsStatusPath, 200},
 		{logsID, http.MethodGet, config.OpsAccessPath, 200},
 		{nodeID, http.MethodGet, config.OpsAccessPath, 403},
+		{logsID, http.MethodGet, config.OpsMetricsPath, 200},
+		{opsID, http.MethodGet, config.OpsMetricsPath, 200},
+		{nodeID, http.MethodGet, config.OpsMetricsPath, 403},
 		{nodeID, http.MethodGet, config.OpsLogsPath, 403},
 		{nodeID, http.MethodGet, config.OpsStatusPath, 403},
 		{"", http.MethodGet, config.OpsStatusPath, 403},
@@ -544,5 +548,27 @@ func TestPolicyGetNone(t *testing.T) {
 	rec := serve(t, h, config.OpsPolicyPath, opsID)
 	if rec.Code != 200 || rec.Body.Len() != 0 || rec.Header().Get("ETag") != config.PolicyETag(nil) {
 		t.Fatalf("status=%d body=%q etag=%q", rec.Code, rec.Body.String(), rec.Header().Get("ETag"))
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	h := New(testConfig(), nil, testBoot, t.TempDir())
+	h.SetMetrics(func(w *metrics.Writer) {
+		w.Family("fortressedge_test_total", "counter", "A test.")
+		w.Int("fortressedge_test_total", 3, "site", "a.example.com")
+	})
+	rec := serve(t, h, config.OpsMetricsPath, logsID)
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != metrics.ContentType {
+		t.Fatalf("status=%d type=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# TYPE fortressedge_build_info gauge\nfortressedge_build_info{version=",
+		"\nfortressedge_boot_time_seconds ",
+		"# TYPE fortressedge_test_total counter\nfortressedge_test_total{site=\"a.example.com\"} 3\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics lack %q:\n%s", want, body)
+		}
 	}
 }

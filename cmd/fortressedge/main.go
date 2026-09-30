@@ -176,7 +176,14 @@ func run() error {
 		}
 		quic = &frpsvc.QUIC{ClientCA: cfg.ClientCAPath, Certificate: cert, Verify: httpsvc.NodeOnly(cfg.Tunnel)}
 	}
-	frps, err := frpsvc.Start(ctx, quic, cfg.Limits.ResponseHeaderTimeout, domains.Domain)
+	frps, err := frpsvc.Start(ctx, frpsvc.Options{
+		QUIC: quic,
+		// The default; each site request carries its site's (httpsvc).
+		HeaderTimeout: cfg.Limits.ResponseHeaderTimeout,
+		OnDomain:      domains.Domain,
+		OnProxyError:  httpsvc.ProxyError,
+		Node:          httpsvc.NodeName(cfg.Tunnel),
+	})
 	if err != nil {
 		return err
 	}
@@ -212,7 +219,7 @@ func run() error {
 	}, func() {
 		wantReboot.Store(true)
 		stop()
-	})
+	}, frps.WriteMetrics)
 	if pid1 && wantReboot.Load() {
 		say("fortressedge: rebooting into the new policy")
 		reboot()

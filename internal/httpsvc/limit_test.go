@@ -235,21 +235,21 @@ func TestVisitorLimitsChangeLive(t *testing.T) {
 
 	// A bigger burst reaches the visitor that already exists.
 	lim.RequestBurst = 50
-	v.update(lim, nil)
+	v.update(config.Policy{Limits: lim})
 	time.Sleep(1100 * time.Millisecond) // one token back at 1/s
 	if rec := hit(h, "203.0.113.9:1", "app.example.com"); rec.Code != 200 {
 		t.Fatalf("after update: %d", rec.Code)
 	}
 
 	// Exempt, then off, both without a new handler.
-	v.update(lim, []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")})
+	v.update(config.Policy{Limits: lim, Exempt: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}})
 	for range 10 {
 		if rec := hit(h, "203.0.113.9:1", "app.example.com"); rec.Code != 200 {
 			t.Fatalf("exempt: %d", rec.Code)
 		}
 	}
 	lim.RequestsPerSecond = 0
-	v.update(lim, nil)
+	v.update(config.Policy{Limits: lim})
 	for range 10 {
 		if rec := hit(h, "198.51.100.1:1", "app.example.com"); rec.Code != 200 {
 			t.Fatalf("off: %d", rec.Code)
@@ -258,13 +258,13 @@ func TestVisitorLimitsChangeLive(t *testing.T) {
 
 	// connections_per_source counts connections opened while it was off.
 	lim.ConnsPerSource = 0
-	v.update(lim, nil)
+	v.update(config.Policy{Limits: lim})
 	conn := func() net.Conn {
 		return v.admit(&addrConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.5"), Port: 1}})
 	}
 	a, b := conn(), conn()
 	lim.ConnsPerSource = 2
-	v.update(lim, nil)
+	v.update(config.Policy{Limits: lim})
 	if conn() != nil {
 		t.Fatal("third connection admitted over a cap of 2")
 	}

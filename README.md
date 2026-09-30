@@ -239,9 +239,6 @@ fortressctl apply edge1.example.com -f policy.yml \
 | `renew_interval` | `4h` | How often ACME certificates are checked and renewed once due |
 | `ntp` | `pool.ntp.org` | Time source for the boot clock sync, `host` or `host:port` |
 | `quic` | `false` | Dark nodes may also connect over QUIC on UDP 443 |
-| `access_log` | `false` | One JSON line per site request, served at `/~!ops/access` |
-| `access_log_max_size` | `8MiB` | Size at which the access log starts a new file (`KiB`, `MiB`, `GiB`) |
-| `access_log_max_files` | `3` | Access log files kept, the current one included; the oldest is deleted |
 
 The cloud-init drive: `fqdn` in `user-data`, a DNS name with a domain,
 which is the tunnel name dark nodes and operators connect to; and a
@@ -254,10 +251,16 @@ in `user-data` is read.
 | --- | --- | --- |
 | `block` | none | Addresses or CIDRs dropped in XDP |
 | `exempt` | none | Addresses or CIDRs the visitor limits and bans skip, such as a monitoring probe |
-| `limits` | see [operations](docs/operations.md#limits) | Per-source connection, request, and SYN rates, the ban length, header and URI sizes, and how long an origin may take to answer; `0` turns one off |
+| `limits` | see [operations](docs/operations.md#limits) | Per-source connection, request, and SYN rates, the ban length, header, URI, and body sizes, and how long an origin may take to answer; `0` turns one off |
+| `access_log` | `false` | One JSON line per site request, served at `/~!ops/access` |
+| `access_log_max_size` | `8MiB` | Size at which the access log starts a new file (`KiB`, `MiB`, `GiB`) |
+| `access_log_max_files` | `3` | Access log files kept, the current one included; the oldest is deleted |
+| `trace` | `trust_incoming: false` | Whether a visitor's W3C `traceparent` is continued, or only logged as a link |
+| `sites` | none | Per published name: `access_log`, `max_body_size`, `response_header_timeout` |
 
-`block`, `exempt`, and most `limits` apply at once; four limits reboot
-the edge. Certificates and trust are in [docs/certificates.md](docs/certificates.md).
+Everything applies at once, except three limits that reboot the edge
+(`max_connections`, `max_header_size`, `max_http2_streams`). Certificates
+and trust are in [docs/certificates.md](docs/certificates.md).
 
 ## Dark nodes
 
@@ -291,8 +294,11 @@ publishes every HTTPRoute a Gateway accepts: see
 
 ## Operations
 
-Operators use a small HTTPS API on the tunnel name: status, logs (live,
-or with resumable cursors for shippers), and the policy. An operator
+Operators use a small HTTPS API on the tunnel name: status, Prometheus
+metrics, logs (live, or with resumable cursors for shippers), and the
+policy. Each site request carries a W3C trace from the edge to the
+origin, and the access log has what a collector needs to rebuild the
+edge's span. An operator
 certificate (`ops/<name>`) may do all of it; a log-reader certificate
 (`logs/<name>`) may only read, so a log host never holds a key that can
 change the edge. The VGA and serial consoles show a status grid and the

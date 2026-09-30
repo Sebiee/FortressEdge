@@ -33,8 +33,9 @@ import (
 // hostname, what reaches the origin, and who may use the tunnel name.
 func TestProxyingToDarkNodes(t *testing.T) {
 	t.Parallel()
-	e := lab.BootEdge(t, lab.EdgeOptions{Config: "access_log: true\n",
-		Policy: "limits:\n  request_burst: 1000\n  new_connections_per_second: 200\n  response_header_timeout: 5s\n"})
+	e := lab.BootEdge(t, lab.EdgeOptions{
+		Policy: "access_log: true\nlimits:\n  request_burst: 1000\n  new_connections_per_second: 200\n  response_header_timeout: 5s\n" +
+			"sites:\n  limits.example.com:\n    response_header_timeout: 1s\n    max_body_size: 1KiB\n"})
 	vm, web, caFile, pki := e.VM, e.Web, e.Roots, e.PKI
 	lab.Ctl(t, "ca", "client", pki, ca.ID(lab.Tunnel, ca.RoleNode, "node2"))
 	node1Crt, node1Key := e.Cert(ca.RoleNode, "node1")
@@ -59,7 +60,7 @@ func TestProxyingToDarkNodes(t *testing.T) {
 	})
 	origin.HandleFunc("/hang", func(_ http.ResponseWriter, r *http.Request) { wait(r, nil) })
 	origin.Handle("/ws", websocket.Handler(func(c *websocket.Conn) { io.Copy(c, c) }))
-	vm.Publish(t, "wss", caFile, node1Crt, node1Key, lab.Origin(t, origin), "echo.example.com")
+	vm.Publish(t, "wss", caFile, node1Crt, node1Key, lab.Origin(t, origin), "echo.example.com", "limits.example.com")
 	vm.Publish(t, "quic", caFile, node2Crt, node2Key, lab.Origin(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "other")
 	})), "other.example.com")
@@ -68,7 +69,9 @@ func TestProxyingToDarkNodes(t *testing.T) {
 		require.NoError(c, err)
 		assert.Equal(c, "other", body)
 		assert.Equal(c, "echo.example.com", echo(c, web, "https://echo.example.com/", nil).Host)
+		assert.Equal(c, "limits.example.com", echo(c, web, "https://limits.example.com/", nil).Host)
 	}, lab.Until(t), lab.Tick)
+	logs := vm.Client(t, caFile, logsCrt, logsKey)
 
 	for _, tc := range []struct {
 		name  string
@@ -168,20 +171,8 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			assert.Equal(t, []string{id}, got.Header["X-Request-Id"], "the origin gets the edge's id, not the visitor's")
 			assert.Empty(t, got.Header["Forwarded"])
 
-			logs := vm.Client(t, caFile, logsCrt, logsKey)
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
-				resp, body, err := lab.Get(logs, lab.OpsURL+"access")
-				require.NoError(c, err)
-				require.Equal(c, http.StatusOK, resp.StatusCode)
-				var line map[string]any
-				for l := range bytes.Lines([]byte(body)) {
-					var m map[string]any
-					require.NoError(c, json.Unmarshal(l, &m), "access line %q", l)
-					if m["id"] == id {
-						line = m
-					}
-				}
-				require.NotNil(c, line, "no access line for %s", id)
+				line := accessLine(c, logs, id)
 				assert.Equal(c, "echo.example.com", line["site"])
 				assert.Equal(c, "/traced", line["path"], "the query string is not logged")
 				assert.Equal(c, "10.0.2.2", line["ip"])
@@ -199,6 +190,99 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			assert.EqualValues(t, 1000, st.Limits["request_burst"], "limits from fortress.yml")
 			assert.EqualValues(t, 200, st.Limits["new_connections_per_second"])
 			assert.EqualValues(t, 150, st.Limits["requests_per_second"], "a key left out keeps its default")
+		}},
+		{"a site's own response_header_timeout and max_body_size, and a proxy error line that names the request", func(t *testing.T) {
+			start := time.Now()
+			resp, _, err := lab.Get(&http.Client{Transport: web.Transport, Timeout: 3 * lab.Attempt}, "https://limits.example.com/hang?token=secret")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
+			took := time.Since(start)
+			assert.GreaterOrEqual(t, took, 900*time.Millisecond, "1s, not sooner")
+			// The timer starts once the request is on its way to the dark
+			// node, so a busy VM adds a little; the edge's 5s cannot be less.
+			assert.Less(t, took, 5*time.Second, "the site's 1s, not the edge's 5s")
+			id := resp.Header.Get("Fortress-Request-Id")
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				_, body, err := lab.Get(logs, lab.OpsURL+"logs")
+				require.NoError(c, err)
+				var line string
+				for l := range strings.Lines(body) {
+					if strings.Contains(l, `msg="proxy error"`) && strings.Contains(l, "id="+id) {
+						line = l
+					}
+				}
+				require.NotEmpty(c, line, "no proxy error line for %s", id)
+				for _, want := range []string{"site=limits.example.com", "method=GET", "path=/hang", "reason=header_timeout", "trace_id="} {
+					assert.Contains(c, line, want)
+				}
+				assert.NotContains(c, line, "secret", "the query string is not logged")
+			}, lab.Until(t), lab.Tick)
+
+			post := func(url string, body io.Reader) int {
+				req, err := http.NewRequest(http.MethodPost, url, body)
+				require.NoError(t, err)
+				resp, _, err := lab.Do(web, req)
+				require.NoError(t, err)
+				return resp.StatusCode
+			}
+			big := bytes.Repeat([]byte("x"), 4096)
+			assert.Equal(t, http.StatusRequestEntityTooLarge, post("https://limits.example.com/sum", bytes.NewReader(big)), "Content-Length over 1KiB")
+			assert.Equal(t, http.StatusRequestEntityTooLarge, post("https://limits.example.com/sum", io.MultiReader(bytes.NewReader(big))),
+				"a streamed body over 1KiB")
+			assert.Equal(t, http.StatusOK, post("https://limits.example.com/sum", bytes.NewReader(big[:512])))
+			assert.Equal(t, http.StatusOK, post("https://echo.example.com/sum", bytes.NewReader(big)), "another site keeps the edge's limit")
+		}},
+		{"the origin continues the edge's trace, which the visitor and the access log name", func(t *testing.T) {
+			const visitor = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+			req, err := http.NewRequest(http.MethodGet, "https://echo.example.com/", nil)
+			require.NoError(t, err)
+			req.Header.Set("Traceparent", visitor)
+			req.Header.Set("Tracestate", "evil=1")
+			resp, body, err := lab.Do(web, req)
+			require.NoError(t, err)
+			var got seen
+			require.NoError(t, json.Unmarshal([]byte(body), &got))
+			tp := strings.Split(got.Header.Get("Traceparent"), "-")
+			require.Len(t, tp, 4, "origin's traceparent %q", got.Header.Get("Traceparent"))
+			traceID := resp.Header.Get("Fortress-Trace-Id")
+			assert.Equal(t, traceID, tp[1], "the visitor is told the trace the origin is in")
+			assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", traceID, "an untrusted visitor does not pick the trace")
+			assert.Empty(t, got.Header["Tracestate"])
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				line := accessLine(c, logs, resp.Header.Get("Fortress-Request-Id"))
+				assert.Equal(c, traceID, line["trace_id"])
+				assert.Equal(c, tp[2], line["span_id"], "the origin's parent is the edge's span")
+				assert.Equal(c, "4bf92f3577b34da6a3ce929d0e0e4736", line["link_trace_id"])
+				assert.NotEmpty(c, line["start"])
+				assert.NotEmpty(c, line["headers_us"])
+			}, lab.Until(t), lab.Tick)
+		}},
+		{"metrics in Prometheus's format, for a log reader and not a dark node", func(t *testing.T) {
+			resp, _, err := lab.Get(vm.Client(t, caFile, node1Crt, node1Key), lab.OpsURL+"metrics")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				resp, body, err := lab.Get(logs, lab.OpsURL+"metrics")
+				require.NoError(c, err)
+				require.Equal(c, http.StatusOK, resp.StatusCode)
+				assert.Contains(c, resp.Header.Get("Content-Type"), "version=0.0.4")
+				for _, want := range []string{
+					"fortressedge_build_info{",
+					"fortressedge_boot_time_seconds ",
+					`fortressedge_http_requests_total{site="echo.example.com",code_class="2xx"} `,
+					`fortressedge_http_request_duration_seconds_bucket{site="echo.example.com",le="+Inf"} `,
+					`fortressedge_tunnel_clients{node="node1"} `,
+					`fortressedge_tunnel_clients{node="node2"} `, // over QUIC
+					"fortressedge_tunnel_logins_total ",
+					`fortressedge_work_connections{state="pooled"} `,
+					`fortressedge_certificate_not_after_seconds{name="echo.example.com"} `,
+					`fortressedge_certificate_obtains_total{name="echo.example.com",result="ok"} `,
+					`fortressedge_xdp_packets_total{action="pass",reason="service"} `,
+					`fortressedge_kernel_tcp_total{counter="passive_opens"} `,
+				} {
+					assert.Contains(c, body, want)
+				}
+			}, lab.Until(t), lab.Tick)
 		}},
 		{"requests no site should get are refused at the edge", func(t *testing.T) {
 			for _, tc := range []struct {
@@ -345,6 +429,23 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			tc.check(t)
 		})
 	}
+}
+
+// accessLine is the access log's line for the request id.
+func accessLine(c *assert.CollectT, logs *http.Client, id string) map[string]any {
+	resp, body, err := lab.Get(logs, lab.OpsURL+"access")
+	require.NoError(c, err)
+	require.Equal(c, http.StatusOK, resp.StatusCode)
+	var line map[string]any
+	for l := range bytes.Lines([]byte(body)) {
+		var m map[string]any
+		require.NoError(c, json.Unmarshal(l, &m), "access line %q", l)
+		if m["id"] == id {
+			line = m
+		}
+	}
+	require.NotNil(c, line, "no access line for %s", id)
+	return line
 }
 
 // seen is what the echo origin reports about the request it received.

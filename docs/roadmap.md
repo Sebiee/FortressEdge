@@ -162,8 +162,6 @@ them. The per-site counters in status show whether this is needed.
   JA4 and forward it as a header, so gateway rules can use it.
 - **IP reputation.** Lists such as Spamhaus DROP loaded into the XDP
   block list on a timer. Needs `max_entries` above 1024 in `bpf/flod.c`.
-- **Metrics.** `/~!ops/metrics` in Prometheus format, from the counters
-  status already has.
 
 ## Silence gaps
 

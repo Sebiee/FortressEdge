@@ -22,19 +22,24 @@ import (
 	"github.com/Sebiee/fortressedge/internal/ca"
 	"github.com/Sebiee/fortressedge/internal/config"
 	"github.com/Sebiee/fortressedge/internal/logx"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 	"github.com/Sebiee/fortressedge/internal/ops"
 )
 
 const drainTimeout = 30 * time.Second
 
 // Handler sends the tunnel name to the ops API and frp control, and a host
-// that routed reports to vhost, which is frps's site proxy in this process.
-// Any other host gets no response at all. A nil routed passes every host
-// to vhost. A nil lim uses the default limits; a nil control leaves frp
-// control out.
-func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, routed func(string) bool, lim *liveLimits) (http.Handler, error) {
+// that route matches to vhost, which is frps's site proxy in this process.
+// route returns the published name that routes host: host itself, or a
+// wildcard. Any other host gets no response at all. A nil route passes
+// every host to vhost as its own site. A nil st counts nothing; a nil lim
+// uses the default limits; a nil control leaves frp control out.
+func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (string, bool), lim *liveLimits) (http.Handler, error) {
 	if vhost == nil {
 		return nil, errors.New("nil vhost")
+	}
+	if st == nil {
+		st = &httpStats{}
 	}
 	site := refuseMalformed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stampForwarded(r)
@@ -48,10 +53,15 @@ func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, ro
 			onTunnel.ServeHTTP(w, r)
 			return
 		}
-		if routed != nil && !routed(host) {
-			hide()
+		published := host
+		if route != nil {
+			var ok bool
+			if published, ok = route(host); !ok {
+				hide()
+			}
 		}
-		st.serveSite(site, host, w, r)
+		p := lim.get()
+		st.serveSite(site, host, published, p.Site(host, published), p.Trace.TrustIncoming, w, r)
 	}), nil
 }
 
@@ -88,15 +98,30 @@ func tunnelHandler(tunnel string, opsH, control http.Handler) http.Handler {
 // dark-node identity of tunnel: spiffe://<tunnel>/node/<name>. It guards
 // frp control on TCP 443 and, through frps, on QUIC.
 func NodeOnly(tunnel string) func(tls.ConnectionState) error {
-	tunnel = hostname(tunnel)
+	node := NodeName(tunnel)
 	return func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			return errors.New("frp: no client certificate")
 		}
-		if role, _, ok := ca.Identify(cs.PeerCertificates[0], tunnel); !ok || role != ca.RoleNode {
+		if node(cs) == "" {
 			return errors.New("frp: not a dark-node certificate")
 		}
 		return nil
+	}
+}
+
+// NodeName names the dark node of a verified client certificate of
+// tunnel: <name> of spiffe://<tunnel>/node/<name>, or "" for any other.
+func NodeName(tunnel string) func(tls.ConnectionState) string {
+	tunnel = hostname(tunnel)
+	return func(cs tls.ConnectionState) string {
+		if len(cs.PeerCertificates) == 0 {
+			return ""
+		}
+		if role, name, ok := ca.Identify(cs.PeerCertificates[0], tunnel); ok && role == ca.RoleNode {
+			return name
+		}
+		return ""
 	}
 }
 
@@ -164,42 +189,57 @@ var (
 
 // Serve runs the HTTP and HTTPS servers until ctx ends. policy is the
 // policy.yml cfg holds, as stored; apply stores and applies a new one.
-func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func()) error {
+// tunnel writes the tunnel's metrics, which frps counts.
+func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), tunnel func(*metrics.Writer)) error {
 	st := &httpStats{}
-	if cfg.AccessLog {
-		w, err := logx.OpenAccess(config.AccessLogDir, cfg.AccessLogMaxSize, cfg.AccessLogMaxFiles)
-		if err != nil {
-			return fmt.Errorf("access log: %w", err)
-		}
-		st.access = newAccessLog(w)
-		slog.Info("access log on", "dir", config.AccessLogDir, "api", config.OpsAccessPath,
-			"max_size_mib", cfg.AccessLogMaxSize>>20, "max_files", cfg.AccessLogMaxFiles)
+	acc := &accessLogs{st: st}
+	if err := acc.apply(cfg.Policy); err != nil {
+		return err
 	}
 	track := newConns()
 	logx.SetConnections(track.Len)
-	lim := newLiveLimits(cfg.Limits, cfg.Exempt)
+	lim := newLivePolicy(cfg.Policy)
 	vis := newVisitors(cfg.Tunnel, lim, filt, domains.Known)
+	vis.onRate = func(host string) {
+		if route, ok := domains.Route(host); ok {
+			st.site(route).limitHits[limitRate].Add(1)
+		}
+	}
 	go vis.run(ctx)
 	// The ops API rides the tunnel SNI's mTLS.
 	oh := ops.New(cfg, policy, logx.BootID(), config.LogDir)
-	oh.SetStatus(func() map[string]any { return statusExtra(st, filt, track, vis) })
+	oh.SetStatus(func() map[string]any {
+		m := statusExtra(st, filt, track, vis)
+		m["access_log"] = acc.on()
+		return m
+	})
+	oh.SetMetrics(func(w *metrics.Writer) {
+		writeMetrics(w, st, filt, track, vis, domains)
+		if tunnel != nil {
+			tunnel(w)
+		}
+	})
 	if apply != nil {
 		oh.SetApply(func(b []byte) (ops.Outcome, error) {
 			out, err := apply(b)
 			if err == nil && !out.Reboot {
 				oh.SetConfig(out.Cfg)
-				vis.update(out.Cfg.Limits, out.Cfg.Exempt)
+				vis.update(out.Cfg.Policy)
+				if aerr := acc.apply(out.Cfg.Policy); aerr != nil {
+					slog.Error("access log", "err", aerr)
+				}
 			}
 			return out, err
 		}, reboot)
 	}
-	slog.Info("ops api up", "logs", config.OpsLogsPath, "status", config.OpsStatusPath, "policy", config.OpsPolicyPath)
+	slog.Info("ops api up", "logs", config.OpsLogsPath, "status", config.OpsStatusPath, "metrics", config.OpsMetricsPath,
+		"policy", config.OpsPolicyPath)
 	// Sites are frps's proxy in this process. The request is already parsed.
-	h, err := Handler(cfg.Tunnel, vhost, control, oh, st, domains.Routed, lim)
+	h, err := Handler(cfg.Tunnel, vhost, control, oh, st, domains.Route, lim)
 	if err != nil {
 		return err
 	}
-	h = vis.limit(protect(h, st, lim))
+	h = vis.limit(protect(h, st))
 	tlsCfg, err := tlsConfig(ctx, cfg, domains)
 	if err != nil {
 		return err
@@ -213,6 +253,48 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		s.HTTP2 = &http.HTTP2Config{MaxConcurrentStreams: cfg.Limits.MaxHTTP2Streams}
 	}
 	return serve(ctx, servers, track, vis, drainTimeout)
+}
+
+// accessLogs turns the access log on and off as policies come. Its files
+// are opened once, the first time a policy turns it on for any site, and
+// stay open: each site's setting decides, per request, whether it writes.
+type accessLogs struct {
+	st      *httpStats
+	mu      sync.Mutex
+	w       logx.AccessWriter
+	cur     config.AccessLog // in force
+	enabled bool             // for any site
+}
+
+func (a *accessLogs) apply(p config.Policy) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	enabled := p.AccessLogAnywhere()
+	if enabled && a.w == nil {
+		w, err := logx.OpenAccess(config.AccessLogDir, p.AccessLog.MaxSize, p.AccessLog.MaxFiles)
+		if err != nil {
+			return fmt.Errorf("access log: %w", err)
+		}
+		a.w = w
+		a.st.access.Store(newAccessLog(w))
+	} else if a.w != nil {
+		a.w.SetLimits(p.AccessLog.MaxSize, p.AccessLog.MaxFiles)
+	}
+	switch {
+	case enabled && (!a.enabled || a.cur != p.AccessLog):
+		slog.Info("access log on", "dir", config.AccessLogDir, "api", config.OpsAccessPath, "every_site", p.AccessLog.On,
+			"max_size_mib", p.AccessLog.MaxSize>>20, "max_files", p.AccessLog.MaxFiles)
+	case !enabled && a.enabled:
+		slog.Info("access log off")
+	}
+	a.cur, a.enabled = p.AccessLog, enabled
+	return nil
+}
+
+func (a *accessLogs) on() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.enabled
 }
 
 // redirectHTTPS answers plain HTTP for the names HTTPS answers, and no
@@ -244,13 +326,15 @@ func newServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Server {
 
 // serverLog is net/http's own error log. A failed TLS handshake is what
 // every scanner, and every name the edge does not serve, produces, so it
-// is a debug line, not a console line.
+// is a debug line, not a console line. So is a GOAWAY a visitor's HTTP/2
+// client sent: the line has neither the client nor the error code, and
+// closing is the client's to do.
 type serverLog struct{}
 
 func (serverLog) Write(p []byte) (int, error) {
 	msg := strings.TrimSpace(string(p))
 	lvl := slog.LevelInfo
-	if strings.HasPrefix(msg, "http: TLS handshake error") {
+	if strings.HasPrefix(msg, "http: TLS handshake error") || strings.HasPrefix(msg, "http2: received GOAWAY") {
 		lvl = slog.LevelDebug
 	}
 	slog.Log(context.Background(), lvl, msg, "src", "http")

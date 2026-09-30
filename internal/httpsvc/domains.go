@@ -34,6 +34,33 @@ type Domains struct {
 
 	acmeMu    sync.Mutex // held while the tunnel certificate is obtained
 	acmeMagic *certmagic.Config
+
+	certMu sync.Mutex
+	orders map[certOrder]int64 // obtains and renewals, by name and result
+}
+
+// certOrder is one kind of certificate order's outcome for one name.
+type certOrder struct {
+	name    string
+	renewal bool
+	ok      bool
+}
+
+// certEvent is certmagic's event hook: it counts obtains and renewals.
+// An error would stop an obtain that is starting, so it returns none.
+func (d *Domains) certEvent(_ context.Context, event string, data map[string]any) error {
+	if event != "cert_obtained" && event != "cert_failed" {
+		return nil
+	}
+	name, _ := data["identifier"].(string)
+	renewal, _ := data["renewal"].(bool)
+	d.certMu.Lock()
+	if d.orders == nil {
+		d.orders = map[certOrder]int64{}
+	}
+	d.orders[certOrder{name: name, renewal: renewal, ok: event == "cert_obtained"}]++
+	d.certMu.Unlock()
+	return nil
 }
 
 func NewDomains(tunnel string) *Domains {
@@ -151,6 +178,7 @@ func (d *Domains) acme(ctx context.Context, cfg config.Config) (*certmagic.Confi
 	if err != nil {
 		return nil, err
 	}
+	magic.OnEvent = d.certEvent
 	if err := manage(ctx, magic, cache, cfg.Tunnel); err != nil {
 		return nil, err
 	}
@@ -182,33 +210,56 @@ func (d *Domains) Allowed(name string) bool {
 	return ok
 }
 
-// Routed reports whether frps has a route for host, matched the way its
-// router matches: the exact name, then each wildcard parent down to three
-// labels (a.b.example.com tries *.b.example.com, then *.example.com), then
-// a catch-all "*".
+// Routed reports whether frps has a route for host.
 func (d *Domains) Routed(host string) bool {
+	_, ok := d.Route(host)
+	return ok
+}
+
+// Route returns the published name frps routes host by, matched the way
+// its router matches: the exact name, then each wildcard parent down to
+// three labels (a.b.example.com tries *.b.example.com, then
+// *.example.com), then a catch-all "*".
+func (d *Domains) Route(host string) (string, bool) {
 	if d == nil {
-		return false
+		return "", false
 	}
 	host = hostname(host)
 	if host == "" {
-		return false
+		return "", false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, ok := d.names[host]; ok {
-		return true
+		return host, true
 	}
 	labels := strings.Split(host, ".")
 	for len(labels) >= 3 {
 		labels[0] = "*"
-		if _, ok := d.names[strings.Join(labels, ".")]; ok {
-			return true
+		if name := strings.Join(labels, "."); d.hasLocked(name) {
+			return name, true
 		}
 		labels = labels[1:]
 	}
-	_, ok := d.names["*"]
+	if d.hasLocked("*") {
+		return "*", true
+	}
+	return "", false
+}
+
+func (d *Domains) hasLocked(name string) bool {
+	_, ok := d.names[name]
 	return ok
+}
+
+// Published counts the names dark nodes publish now.
+func (d *Domains) Published() int {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.names)
 }
 
 // Known is a name the edge answers for: the tunnel or a routed site.

@@ -13,6 +13,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"maps"
@@ -43,6 +44,8 @@ const (
 	OpsLogsPath   = OpsPathPrefix + "logs"
 	OpsAccessPath = OpsPathPrefix + "access"
 	OpsStatusPath = OpsPathPrefix + "status"
+	// OpsMetricsPath is the Prometheus text format of what status counts.
+	OpsMetricsPath = OpsPathPrefix + "metrics"
 	// OpsPolicyPath reads the policy (GET) and replaces it (PUT).
 	OpsPolicyPath = OpsPathPrefix + "policy"
 )
@@ -74,8 +77,8 @@ const (
 	RunClientCA = "/run/fortressedge/client_ca.crt"
 	LogDir      = "/var/log/fortressedge"
 	LogFile     = LogDir + "/current.log"
-	// AccessLogDir holds the access log (access_log: true), one JSON line
-	// per site request, apart from the edge's own log.
+	// AccessLogDir holds the access log (policy.yml's access_log), one JSON
+	// line per site request, apart from the edge's own log.
 	AccessLogDir = LogDir + "/access"
 )
 
@@ -97,11 +100,6 @@ type Config struct {
 	// says so through ARI).
 	RenewInterval time.Duration
 	QUIC          bool // dark-node QUIC on UDP 443
-	// AccessLog writes one line per site request to AccessLogDir, in
-	// files of up to AccessLogMaxSize bytes, keeping AccessLogMaxFiles.
-	AccessLog         bool
-	AccessLogMaxSize  int64
-	AccessLogMaxFiles int
 	// ClientCA is the PEM trust anchor from fortress.yml (client_ca) for
 	// dark-node, operator, and log-reader certificates.
 	ClientCA []byte
@@ -119,6 +117,83 @@ type Policy struct {
 	// generator, a monitoring probe, an office behind one address.
 	Exempt []netip.Prefix
 	Limits Limits
+	// AccessLog is the access log for every site, unless Sites turns it
+	// off or on for one.
+	AccessLog AccessLog
+	Trace     Trace
+	// Sites are settings for one site, by the name its dark node publishes
+	// (app.example.com, *.example.com) or a name a wildcard covers.
+	Sites map[string]SitePolicy
+}
+
+// AccessLog writes one line per site request to AccessLogDir, in files of
+// up to MaxSize bytes, keeping MaxFiles.
+type AccessLog struct {
+	On       bool
+	MaxSize  int64
+	MaxFiles int
+}
+
+// Trace is how the edge joins a request to a W3C trace (traceparent).
+type Trace struct {
+	// TrustIncoming continues a visitor's valid traceparent. Off, every
+	// request starts a new trace, and the visitor's is only logged, as a
+	// link: an outsider cannot choose the trace a request lands in.
+	TrustIncoming bool
+}
+
+// SitePolicy overrides edge-wide settings for one site. A nil or zero
+// field keeps the edge-wide one.
+type SitePolicy struct {
+	AccessLog             *bool
+	MaxBodyBytes          *int64 // 0: no limit
+	ResponseHeaderTimeout time.Duration
+}
+
+// Site is the settings in force for one request.
+type Site struct {
+	AccessLog             bool
+	MaxBodyBytes          int64 // 0: no limit
+	ResponseHeaderTimeout time.Duration
+}
+
+// Site is what applies to a request for host, which frps routed by route,
+// the published name that matched it (host itself, or a wildcard). An
+// entry for host wins over one for route.
+func (p Policy) Site(host, route string) Site {
+	s := Site{AccessLog: p.AccessLog.On, MaxBodyBytes: p.Limits.MaxBodyBytes, ResponseHeaderTimeout: p.Limits.ResponseHeaderTimeout}
+	if len(p.Sites) == 0 {
+		return s
+	}
+	sp, ok := p.Sites[host]
+	if !ok {
+		if sp, ok = p.Sites[route]; !ok {
+			return s
+		}
+	}
+	if sp.AccessLog != nil {
+		s.AccessLog = *sp.AccessLog
+	}
+	if sp.MaxBodyBytes != nil {
+		s.MaxBodyBytes = *sp.MaxBodyBytes
+	}
+	if sp.ResponseHeaderTimeout > 0 {
+		s.ResponseHeaderTimeout = sp.ResponseHeaderTimeout
+	}
+	return s
+}
+
+// AccessLogAnywhere reports whether any site may write the access log.
+func (p Policy) AccessLogAnywhere() bool {
+	if p.AccessLog.On {
+		return true
+	}
+	for _, sp := range p.Sites {
+		if sp.AccessLog != nil && *sp.AccessLog {
+			return true
+		}
+	}
+	return false
 }
 
 // PolicyETag names a policy.yml body: its SHA-256, quoted as an HTTP
@@ -156,11 +231,10 @@ type Limits struct {
 	ResponseHeaderTimeout time.Duration
 }
 
-// BootLimits are the limits the HTTP servers, listeners, and frps fix
-// when they start; a change to any of them reboots. The rest apply at once.
+// BootLimits are the limits the HTTP servers and listeners fix when they
+// start; a change to any of them reboots. The rest apply at once.
 func (l Limits) BootLimits() Limits {
-	return Limits{MaxConns: l.MaxConns, MaxHeaderBytes: l.MaxHeaderBytes, MaxHTTP2Streams: l.MaxHTTP2Streams,
-		ResponseHeaderTimeout: l.ResponseHeaderTimeout}
+	return Limits{MaxConns: l.MaxConns, MaxHeaderBytes: l.MaxHeaderBytes, MaxHTTP2Streams: l.MaxHTTP2Streams}
 }
 
 // DefaultLimits are generous: many people can share one IPv4 address.
@@ -205,31 +279,45 @@ type limitsYAML struct {
 
 // edgeConfig is fortress.yml.
 type edgeConfig struct {
-	ACME      string `yaml:"acme"`
-	ACMECA    string `yaml:"acme_ca"`
-	ClientCA  string `yaml:"client_ca"`
-	NTP       string `yaml:"ntp"`
-	Renew     string `yaml:"renew_interval"`
-	QUIC      bool   `yaml:"quic"`
-	AccessLog bool   `yaml:"access_log"`
-	// A size such as 8MiB; KiB, MiB, and GiB are the units.
-	AccessLogMaxSize  string `yaml:"access_log_max_size"`
-	AccessLogMaxFiles int    `yaml:"access_log_max_files"`
+	ACME     string `yaml:"acme"`
+	ACMECA   string `yaml:"acme_ca"`
+	ClientCA string `yaml:"client_ca"`
+	NTP      string `yaml:"ntp"`
+	Renew    string `yaml:"renew_interval"`
+	QUIC     bool   `yaml:"quic"`
 }
 
 // policyConfig is policy.yml.
 type policyConfig struct {
-	Block  []string    `yaml:"block"`
-	Exempt []string    `yaml:"exempt"`
-	Limits *limitsYAML `yaml:"limits"`
+	Block     []string    `yaml:"block"`
+	Exempt    []string    `yaml:"exempt"`
+	Limits    *limitsYAML `yaml:"limits"`
+	AccessLog bool        `yaml:"access_log"`
+	// A size such as 8MiB; KiB, MiB, and GiB are the units.
+	AccessLogMaxSize  string              `yaml:"access_log_max_size"`
+	AccessLogMaxFiles int                 `yaml:"access_log_max_files"`
+	Trace             *traceYAML          `yaml:"trace"`
+	Sites             map[string]siteYAML `yaml:"sites"`
+}
+
+type traceYAML struct {
+	TrustIncoming bool `yaml:"trust_incoming"`
+}
+
+// siteYAML is one entry of policy.yml's sites. A key left out keeps the
+// edge-wide setting.
+type siteYAML struct {
+	AccessLog             *bool  `yaml:"access_log"`
+	MaxBodySize           string `yaml:"max_body_size"`
+	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 }
 
 // The keys each file takes. A key in the other file's list is refused
 // with a pointer to where it belongs.
 var (
-	edgeKeys = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic",
-		"access_log", "access_log_max_size", "access_log_max_files"}
-	policyKeys = []string{"block", "exempt", "limits"}
+	edgeKeys   = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic"}
+	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
+		"trace", "sites"}
 )
 
 // EdgeKeys lists the keys fortress.yml takes.
@@ -284,10 +372,7 @@ type netv2rt struct {
 // Parse reads the four parts. policy may be nil: an edge nobody has
 // applied a policy to yet runs the defaults (no block list, DefaultLimits).
 func Parse(userData, networkConfig, edge, policy []byte) (Config, error) {
-	c := Config{
-		Iface: "eth0", NTP: DefaultNTP, RenewInterval: DefaultRenewInterval,
-		AccessLogMaxSize: DefaultAccessLogMaxSize, AccessLogMaxFiles: DefaultAccessLogMaxFiles,
-	}
+	c := Config{Iface: "eth0", NTP: DefaultNTP, RenewInterval: DefaultRenewInterval}
 	if err := applyEdge(&c, edge); err != nil {
 		return Config{}, err
 	}
@@ -323,7 +408,10 @@ func CheckEdge(edge []byte) error {
 
 // ParsePolicy reads policy.yml. Empty is the defaults.
 func ParsePolicy(b []byte) (Policy, error) {
-	p := Policy{Limits: DefaultLimits()}
+	p := Policy{
+		Limits:    DefaultLimits(),
+		AccessLog: AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
+	}
 	if err := checkKeys(b, PolicyName, policyKeys, edgeKeys,
 		"belongs in "+EdgeFile+", which is baked into the ISO: bake a new one to change it"); err != nil {
 		return Policy{}, err
@@ -331,6 +419,9 @@ func ParsePolicy(b []byte) (Policy, error) {
 	var y policyConfig
 	if err := yaml.Unmarshal(b, &y); err != nil {
 		return Policy{}, fmt.Errorf("%s: %w", PolicyName, err)
+	}
+	if err := checkNested(b, "trace", "sites"); err != nil {
+		return Policy{}, err
 	}
 	var err error
 	if p.Block, err = parsePrefixes(y.Block, PolicyName+": block"); err != nil {
@@ -342,7 +433,52 @@ func ParsePolicy(b []byte) (Policy, error) {
 	if err := applyLimits(&p.Limits, y.Limits); err != nil {
 		return Policy{}, err
 	}
+	if err := applyAccessLog(&p.AccessLog, y); err != nil {
+		return Policy{}, err
+	}
+	if y.Trace != nil {
+		p.Trace.TrustIncoming = y.Trace.TrustIncoming
+	}
+	if p.Sites, err = parseSites(y.Sites); err != nil {
+		return Policy{}, err
+	}
 	return p, nil
+}
+
+// parseSites reads policy.yml's sites. A key is a DNS name or a wildcard
+// (*.example.com, or * for every name), as a dark node publishes them.
+func parseSites(y map[string]siteYAML) (map[string]SitePolicy, error) {
+	if len(y) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]SitePolicy, len(y))
+	for _, key := range slices.Sorted(maps.Keys(y)) {
+		name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(key)), ".")
+		if rest, ok := strings.CutPrefix(name, "*."); name != "*" && (ok && checkName(rest) != nil || !ok && checkName(name) != nil) {
+			return nil, fmt.Errorf("%s: sites: %q: want a DNS name such as app.example.com, or a wildcard such as *.example.com", PolicyName, key)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("%s: sites: %q twice", PolicyName, name)
+		}
+		sy := y[key]
+		sp := SitePolicy{AccessLog: sy.AccessLog}
+		if s := strings.TrimSpace(sy.MaxBodySize); s != "" {
+			n, err := parseBodySize(s)
+			if err != nil {
+				return nil, fmt.Errorf("%s: sites: %s: %w", PolicyName, name, err)
+			}
+			sp.MaxBodyBytes = &n
+		}
+		if s := strings.TrimSpace(sy.ResponseHeaderTimeout); s != "" {
+			d, err := parseHeaderTimeout(s)
+			if err != nil {
+				return nil, fmt.Errorf("%s: sites: %s: %w", PolicyName, name, err)
+			}
+			sp.ResponseHeaderTimeout = d
+		}
+		out[name] = sp
+	}
+	return out, nil
 }
 
 // checkKeys refuses a top-level key of doc that is not in known, and says
@@ -359,6 +495,36 @@ func checkKeys(doc []byte, file string, known, other []string, elsewhere string)
 			return fmt.Errorf("%s: %s %s", file, k, elsewhere)
 		default:
 			return fmt.Errorf("%s: unknown key %q", file, k)
+		}
+	}
+	return nil
+}
+
+// checkNested refuses a key the blocks named keys do not take, where a
+// typo would otherwise be ignored. limits stays lenient: a stored policy
+// with a key a newer edge dropped must still boot.
+func checkNested(doc []byte, keys ...string) error {
+	var m map[string]yaml.Node
+	if err := yaml.Unmarshal(doc, &m); err != nil {
+		return fmt.Errorf("%s: %w", PolicyName, err)
+	}
+	for _, k := range keys {
+		n, ok := m[k]
+		if !ok {
+			continue
+		}
+		b, err := yaml.Marshal(&n)
+		if err != nil {
+			return fmt.Errorf("%s: %s: %w", PolicyName, k, err)
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(b))
+		dec.KnownFields(true)
+		var out any = &traceYAML{}
+		if k == "sites" {
+			out = &map[string]siteYAML{}
+		}
+		if err := dec.Decode(out); err != nil {
+			return fmt.Errorf("%s: %s: %w", PolicyName, k, err)
 		}
 	}
 	return nil
@@ -433,9 +599,6 @@ func applyEdge(c *Config, edge []byte) error {
 	if s := strings.TrimSpace(e.NTP); s != "" {
 		c.NTP = s
 	}
-	if err := applyAccessLog(c, e); err != nil {
-		return err
-	}
 	pemText := strings.TrimSpace(e.ClientCA)
 	if pemText == "" {
 		return fmt.Errorf("%s: client_ca is required (fortressctl bake adds one)", EdgeFile)
@@ -471,20 +634,20 @@ func applyACME(c *Config, e edgeConfig) error {
 	return nil
 }
 
-func applyAccessLog(c *Config, e edgeConfig) error {
-	c.AccessLog = e.AccessLog
-	if s := strings.TrimSpace(e.AccessLogMaxSize); s != "" {
+func applyAccessLog(a *AccessLog, y policyConfig) error {
+	a.On = y.AccessLog
+	if s := strings.TrimSpace(y.AccessLogMaxSize); s != "" {
 		n, err := parseSize(s)
 		if err != nil || n < 1<<20 {
-			return fmt.Errorf("%s: access_log_max_size: want a size of at least 1MiB, such as 8MiB", EdgeFile)
+			return fmt.Errorf("%s: access_log_max_size: want a size of at least 1MiB, such as 8MiB", PolicyName)
 		}
-		c.AccessLogMaxSize = n
+		a.MaxSize = n
 	}
-	if n := e.AccessLogMaxFiles; n != 0 {
+	if n := y.AccessLogMaxFiles; n != 0 {
 		if n < 1 || n > 1000 {
-			return fmt.Errorf("%s: access_log_max_files: want 1 to 1000", EdgeFile)
+			return fmt.Errorf("%s: access_log_max_files: want 1 to 1000", PolicyName)
 		}
-		c.AccessLogMaxFiles = n
+		a.MaxFiles = n
 	}
 	return nil
 }
@@ -561,12 +724,10 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 			*f.dst = int(n)
 		}
 	}
-	if s := strings.TrimSpace(y.MaxBodySize); s == "0" {
-		l.MaxBodyBytes = 0
-	} else if s != "" {
-		n, err := parseSize(s)
-		if err != nil || n < 1<<10 {
-			return fmt.Errorf("%s: limits: max_body_size: want a size of at least 1KiB, such as 512MiB, or 0 for no limit", PolicyName)
+	if s := strings.TrimSpace(y.MaxBodySize); s != "" {
+		n, err := parseBodySize(s)
+		if err != nil {
+			return fmt.Errorf("%s: limits: %w", PolicyName, err)
 		}
 		l.MaxBodyBytes = n
 	}
@@ -577,14 +738,34 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 		l.MaxHTTP2Streams = *v
 	}
 	if s := strings.TrimSpace(y.ResponseHeaderTimeout); s != "" {
-		// frps counts it in whole seconds.
-		d, err := time.ParseDuration(s)
-		if err != nil || d < time.Second || d > 10*time.Minute || d%time.Second != 0 {
-			return fmt.Errorf("%s: limits: response_header_timeout: want whole seconds from 1s to 10m, such as 60s", PolicyName)
+		d, err := parseHeaderTimeout(s)
+		if err != nil {
+			return fmt.Errorf("%s: limits: %w", PolicyName, err)
 		}
 		l.ResponseHeaderTimeout = d
 	}
 	return nil
+}
+
+// parseBodySize reads max_body_size: a size, or 0 for no limit.
+func parseBodySize(s string) (int64, error) {
+	if s == "0" {
+		return 0, nil
+	}
+	n, err := parseSize(s)
+	if err != nil || n < 1<<10 {
+		return 0, fmt.Errorf("max_body_size: want a size of at least 1KiB, such as 512MiB, or 0 for no limit")
+	}
+	return n, nil
+}
+
+// parseHeaderTimeout reads response_header_timeout.
+func parseHeaderTimeout(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d < time.Second || d > 10*time.Minute || d%time.Second != 0 {
+		return 0, fmt.Errorf("response_header_timeout: want whole seconds from 1s to 10m, such as 60s")
+	}
+	return d, nil
 }
 
 // parseSize reads a whole number with a KiB, MiB, or GiB suffix.

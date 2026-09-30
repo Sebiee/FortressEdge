@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+**Observability.** `GET /~!ops/metrics` serves Prometheus's text format
+to operator and log-reader certificates, never rate limited: per site
+(the published name, so a wildcard is one site) requests by status
+class, a histogram of the time to the response headers, bytes, requests
+in flight, proxy errors by reason, and limit hits; tunnel sessions by
+dark node, logins, and work connections; each certificate's expiry and
+its obtains and renewals; XDP's packets by action and reason; bans; and
+the kernel's TCP counters. `fortressedge_boot_time_seconds` and
+`fortressedge_build_info` date and name the build.
+
+- A request frps could not proxy is one warning that names the site,
+  method, path (no query), visitor, request and trace ids, the time since
+  the request arrived, the bytes already sent, and a reason: `no_route`,
+  `dial`, `send`, `header_timeout`, `eof_headers`, or `eof_body`. frp's
+  own lines for it, which named only the host, are gone.
+- Each site request is a hop of a W3C trace: the origin gets a
+  `traceparent` under the edge's own span, the visitor gets
+  `Fortress-Trace-Id`, and the access log line gets `trace_id`, `span_id`,
+  `start`, `us`, and `headers_us`, from which a collector rebuilds the
+  edge's span. A visitor's `traceparent` is continued only with
+  `trace: {trust_incoming: true}`; otherwise it is logged as a link.
+- XDP's `drop_other` is split into `drop_truncated`, `drop_fragment`,
+  `drop_ethertype` (with the dropped EtherTypes counted), and, from
+  `drop_port`, `drop_proto` and `drop_icmp`. `/~!ops/status` keys change
+  with them.
+- Go's `http2: received GOAWAY` line is a debug line.
+- `/~!ops/status` counts `sites` by the published name, as metrics do.
+
+**The policy.** `access_log`, `access_log_max_size`, and
+`access_log_max_files` move from `fortress.yml` to `policy.yml`: the
+access log turns on and off with `fortressctl apply`, without a new ISO
+or a reboot. `bake` refuses them in `fortress.yml` and says where they
+went; `bake.Config` loses its three fields, so the Terraform provider
+needs its 0.3 release. A new `sites` block sets `access_log`,
+`max_body_size`, and `response_header_timeout` for one published name or
+wildcard. `response_header_timeout` applies at once and no longer
+reboots. A body over `max_body_size` is answered `413`, before the
+origin when its length says so.
+
+**The tunnel.** A work connection frpc sends beyond its pool is closed
+without an error message, which frpc logged as
+`StartWorkConn contains error`, and counted. The frp fork has the hooks
+all of this needs: the proxy's failures by stage, a response header
+timeout per request, the work connection counts, and QUIC connections.
+
 **Booting.** The documentation and `os/qemu.sh` put the boot CD on
 virtio-scsi instead of IDE: SeaBIOS reads the kernel and initramfs about
 2 seconds faster (about 1s from power-on to the edge's first line under

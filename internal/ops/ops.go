@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/Sebiee/fortressedge/internal/ca"
 	"github.com/Sebiee/fortressedge/internal/config"
 	"github.com/Sebiee/fortressedge/internal/logx"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 )
 
 // bootPrefix starts the first line logx writes into every log file: the
@@ -78,8 +80,10 @@ type Handler struct {
 	bootID string
 	dir    string
 	extra  func() map[string]any
-	apply  ApplyFunc
-	reboot func()
+	// metrics writes the edge's metrics; the ops API adds its own.
+	metrics func(*metrics.Writer)
+	apply   ApplyFunc
+	reboot  func()
 	// applyMu keeps a PUT's compare, apply, and swap of policy together.
 	applyMu sync.Mutex
 }
@@ -91,6 +95,10 @@ func New(cfg config.Config, policy []byte, bootID, dir string) *Handler {
 }
 
 func (h *Handler) SetStatus(fn func() map[string]any) { h.extra = fn }
+
+// SetMetrics registers what /~!ops/metrics writes after the build and
+// boot time.
+func (h *Handler) SetMetrics(fn func(*metrics.Writer)) { h.metrics = fn }
 
 // SetApply registers the policy PUT. reboot runs after the response is
 // flushed when the change cannot be applied in place.
@@ -126,11 +134,12 @@ var (
 
 // routes is keyed by method and path, as "GET /~!ops/status".
 var routes = map[string]route{
-	"GET " + config.OpsStatusPath: {readers, (*Handler).status},
-	"GET " + config.OpsLogsPath:   {readers, (*Handler).logs},
-	"GET " + config.OpsAccessPath: {readers, (*Handler).access},
-	"GET " + config.OpsPolicyPath: {readers, (*Handler).getPolicy},
-	"PUT " + config.OpsPolicyPath: {operators, (*Handler).putPolicy},
+	"GET " + config.OpsStatusPath:  {readers, (*Handler).status},
+	"GET " + config.OpsMetricsPath: {readers, (*Handler).serveMetrics},
+	"GET " + config.OpsLogsPath:    {readers, (*Handler).logs},
+	"GET " + config.OpsAccessPath:  {readers, (*Handler).access},
+	"GET " + config.OpsPolicyPath:  {readers, (*Handler).getPolicy},
+	"PUT " + config.OpsPolicyPath:  {operators, (*Handler).putPolicy},
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -456,6 +465,21 @@ func (h *Handler) status(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(m)
+}
+
+// serveMetrics writes the Prometheus text format. Counters start at zero
+// at boot, which fortressedge_boot_time_seconds dates.
+func (h *Handler) serveMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", metrics.ContentType)
+	mw := metrics.NewWriter(w)
+	mw.Family("fortressedge_build_info", "gauge", "The edge's build: 1, with its version and Go's as labels.")
+	mw.Int("fortressedge_build_info", 1, "version", metrics.Version(), "go_version", runtime.Version())
+	mw.Family("fortressedge_boot_time_seconds", "gauge", "When the edge started, in Unix seconds. Counters start at zero then.")
+	mw.Sample("fortressedge_boot_time_seconds", float64(metrics.Started.UnixMilli())/1e3)
+	if h.metrics != nil {
+		h.metrics(mw)
+	}
+	_ = mw.Flush()
 }
 
 // serveRange writes bytes [off, end) of f, either raw or wrapped as one

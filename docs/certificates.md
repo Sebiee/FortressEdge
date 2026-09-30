@@ -80,6 +80,14 @@ renew_interval: 1h
 `acme_ca` replaces the system roots for the directory connection only.
 Dark nodes then need that directory's issuing CA in `trustedCaFile`.
 
+The ACME account and every certificate are stored per directory URL
+(`/var/fortressedge/certs/acme/<directory>/` and
+`certs/certificates/<directory>/`). An ISO baked with another `acme`
+therefore registers a new account at boot and obtains a new certificate
+for the tunnel name and each published site, as their dark nodes
+reconnect: mind the directory's rate limits when an edge serves many
+names. The old directory's files stay on the data disk, unused.
+
 ## Which names get an answer
 
 The edge answers the tunnel name and each hostname a dark node currently

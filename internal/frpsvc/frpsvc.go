@@ -7,14 +7,18 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	frpmetrics "github.com/fatedier/frp/pkg/metrics"
 	flog "github.com/fatedier/frp/pkg/util/log"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/vhost"
@@ -24,9 +28,12 @@ import (
 
 	"github.com/Sebiee/fortressedge/internal/config"
 	"github.com/Sebiee/fortressedge/internal/logx"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 )
 
-var setLogger sync.Once
+// setup hands frp's logger and metrics to the edge's, once per process:
+// both are frp globals.
+var setup sync.Once
 
 // QUIC is frps's public listener on UDP 443.
 type QUIC struct {
@@ -35,6 +42,24 @@ type QUIC struct {
 	// Verify runs after the client certificate chain verified; an error
 	// refuses the connection.
 	Verify func(tls.ConnectionState) error
+}
+
+// Options are how frps runs in the edge.
+type Options struct {
+	// QUIC, when set, opens frp control on public UDP 443.
+	QUIC *QUIC
+	// HeaderTimeout is how long a visitor's request waits for the
+	// origin's response headers when the request does not say
+	// (vhost.WithResponseHeaderTimeout), in whole seconds; 0 is frp's
+	// default.
+	HeaderTimeout time.Duration
+	// OnDomain is told when a name gains its first route and loses its last.
+	OnDomain func(domain string, added bool)
+	// OnProxyError gets each site request frps could not proxy.
+	OnProxyError func(*http.Request, error)
+	// Node names the dark node of a tunnel connection's verified client
+	// certificate, for the per-node session count.
+	Node func(tls.ConnectionState) string
 }
 
 // Frps is a running frps.
@@ -48,16 +73,18 @@ type Frps struct {
 	Vhost http.Handler
 	// Stop shuts frps down.
 	Stop func()
+
+	svr *server.Service
 }
 
-// Start runs frps on loopback. A non-nil quic also opens QUIC on public
-// UDP 443. headerTimeout is how long a visitor's request waits for the
-// origin's response headers, in whole seconds; 0 is frp's default.
-func Start(ctx context.Context, quic *QUIC, headerTimeout time.Duration, onDomain func(domain string, added bool)) (*Frps, error) {
-	// frp's own lines use a different clock. Fold them into slog so they
-	// cannot land in the middle of a console line.
-	setLogger.Do(func() {
-		flog.Logger = glog.New(glog.WithOutput(logx.Forward("frp").Quiet(visitorLeft)), glog.WithLevel(glog.InfoLevel))
+// Start runs frps on loopback, and QUIC on public UDP 443 with opts.QUIC.
+func Start(ctx context.Context, opts Options) (*Frps, error) {
+	quic, headerTimeout := opts.QUIC, opts.HeaderTimeout
+	setup.Do(func() {
+		// frp's own lines use a different clock. Fold them into slog so
+		// they cannot land in the middle of a console line.
+		flog.Logger = glog.New(glog.WithOutput(logx.Forward("frp").Quiet(quietLine)), glog.WithLevel(glog.InfoLevel))
+		frpmetrics.Add(tunnel)
 	})
 	cfg := &v1.ServerConfig{
 		BindAddr:      config.FrpsBindAddr,
@@ -70,7 +97,11 @@ func Start(ctx context.Context, quic *QUIC, headerTimeout time.Duration, onDomai
 		VhostHTTPPort: config.FrpsTCPPort,
 		// httpsvc terminates TLS and sets X-Forwarded-*.
 		VhostHTTPBehindProxy: true,
-		OnDomain:             onDomain,
+		OnDomain:             opts.OnDomain,
+		OnProxyError:         opts.OnProxyError,
+		// A surplus work connection is a burst's leftover: counted, and
+		// closed without the error frpc would log.
+		OnWorkConnDiscarded: func() { tunnel.discards.Add(1) },
 		// frp's own 404 page names frp. An empty one names nothing.
 		Custom404Page: os.DevNull,
 		// How long a visitor waits for the origin's response headers
@@ -90,6 +121,7 @@ func Start(ctx context.Context, quic *QUIC, headerTimeout time.Duration, onDomai
 		cfg.Transport.TLS.GetCertificate = quic.Certificate
 		cfg.Transport.TLS.TrustedCaFile = quic.ClientCA
 		cfg.Transport.TLS.VerifyConnection = quic.Verify
+		cfg.OnQUICConn = func(cs tls.ConnectionState) func() { return tunnel.session(nodeName(opts.Node, cs)) }
 	}
 	if err := cfg.Complete(); err != nil {
 		return nil, err
@@ -121,7 +153,14 @@ func Start(ctx context.Context, quic *QUIC, headerTimeout time.Duration, onDomai
 	}
 	slog.Info("frps up", "control", config.ControlAddr(), "quic", cfg.QUICBindPort != 0,
 		"response_header_timeout", time.Duration(cfg.VhostHTTPTimeout)*time.Second)
-	return &Frps{Control: controlHandler(control), Vhost: trustVhost(svr.VhostHTTP()), Stop: stop}, nil
+	return &Frps{Control: controlHandler(control, opts.Node), Vhost: trustVhost(svr.VhostHTTP()), Stop: stop, svr: svr}, nil
+}
+
+// quietLine is a frp line an operator does not need at info or warn: a
+// visitor who left, and a response body cut short, which OnProxyError
+// logs with the request it belongs to.
+func quietLine(msg string) bool {
+	return visitorLeft(msg) || strings.HasPrefix(msg, "httputil: ReverseProxy read error during body copy")
 }
 
 // visitorLeft matches frp's line for a request whose visitor went away
@@ -142,9 +181,13 @@ func trustVhost(h http.Handler) http.Handler {
 
 // controlHandler upgrades frp control's WebSocket as frps's own listener
 // does, then gives the connection to frps through ln and holds the
-// request until frps closes it.
-func controlHandler(ln *connListener) http.Handler {
+// request until frps closes it. node names the dark node, for the
+// session count.
+func controlHandler(ln *connListener, node func(tls.ConnectionState) string) http.Handler {
 	return websocket.Handler(func(c *websocket.Conn) {
+		if r := c.Request(); r.TLS != nil {
+			defer tunnel.session(nodeName(node, *r.TLS))()
+		}
 		// The tunnel is yamux, bytes: binary frames, as frps sends them.
 		c.PayloadType = websocket.BinaryFrame
 		closed := make(chan struct{})
@@ -334,4 +377,83 @@ func waitRun(ctx context.Context, d time.Duration) error {
 		last = fmt.Errorf("timeout")
 	}
 	return fmt.Errorf("wait run %s: %w", config.ControlAddr(), last)
+}
+
+// tunnel counts what frps does for dark nodes. frps's metrics hook is a
+// process global, so this is one too.
+var tunnel = &tunnelStats{}
+
+// tunnelStats is frps's ServerMetrics: logins and proxies, from frps;
+// sessions and discards, from the edge's hooks.
+type tunnelStats struct {
+	logins, clients, proxies, discards atomic.Int64
+
+	mu       sync.Mutex
+	sessions map[string]int // open tunnel connections, by dark node
+}
+
+func (t *tunnelStats) NewClient() {
+	t.logins.Add(1)
+	t.clients.Add(1)
+}
+
+func (t *tunnelStats) CloseClient()                            { t.clients.Add(-1) }
+func (t *tunnelStats) NewProxy(_, _, _, _ string)              { t.proxies.Add(1) }
+func (t *tunnelStats) CloseProxy(_, _ string)                  { t.proxies.Add(-1) }
+func (*tunnelStats) OpenConnection(_, _ string)                {}
+func (*tunnelStats) CloseConnection(_, _ string)               {}
+func (*tunnelStats) AddTrafficIn(_ string, _ string, _ int64)  {}
+func (*tunnelStats) AddTrafficOut(_ string, _ string, _ int64) {}
+
+// session counts one open tunnel connection of node until done.
+func (t *tunnelStats) session(node string) (done func()) {
+	t.mu.Lock()
+	if t.sessions == nil {
+		t.sessions = map[string]int{}
+	}
+	t.sessions[node]++
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			if t.sessions[node]--; t.sessions[node] <= 0 {
+				delete(t.sessions, node)
+			}
+			t.mu.Unlock()
+		})
+	}
+}
+
+func nodeName(node func(tls.ConnectionState) string, cs tls.ConnectionState) string {
+	if node == nil {
+		return ""
+	}
+	return node(cs)
+}
+
+// WriteMetrics writes the tunnel's metrics: dark nodes, logins, and the
+// work connections that carry site requests.
+func (f *Frps) WriteMetrics(w *metrics.Writer) {
+	tunnel.mu.Lock()
+	sessions := maps.Clone(tunnel.sessions)
+	tunnel.mu.Unlock()
+	w.Family("fortressedge_tunnel_clients", "gauge",
+		"Open tunnel connections (WebSocket or QUIC), by the dark node's SPIFFE name (node/<name>).")
+	for _, node := range slices.Sorted(maps.Keys(sessions)) {
+		w.Int("fortressedge_tunnel_clients", int64(sessions[node]), "node", node)
+	}
+	w.Family("fortressedge_tunnel_logins_total", "counter", "frpc logins frps accepted.")
+	w.Int("fortressedge_tunnel_logins_total", tunnel.logins.Load())
+	w.Family("fortressedge_tunnel_proxies", "gauge", "Proxies dark nodes have registered with frps now.")
+	w.Int("fortressedge_tunnel_proxies", tunnel.proxies.Load())
+	pooled, idle, active := f.svr.WorkConns()
+	w.Family("fortressedge_work_connections", "gauge",
+		"Work connections to dark nodes, by state: pooled (sent ahead by frpc), idle (kept after a request), active (carrying one).")
+	w.Int("fortressedge_work_connections", int64(pooled), "state", "pooled")
+	w.Int("fortressedge_work_connections", int64(idle), "state", "idle")
+	w.Int("fortressedge_work_connections", int64(active), "state", "active")
+	w.Family("fortressedge_work_connections_discarded_total", "counter",
+		"Work connections frpc sent beyond its pool (transport.poolCount, at most 5, plus 10), closed unused.")
+	w.Int("fortressedge_work_connections_discarded_total", tunnel.discards.Load())
 }

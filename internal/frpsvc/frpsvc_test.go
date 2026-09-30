@@ -26,7 +26,7 @@ import (
 func TestStartListensLoopback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	frps, err := Start(ctx, nil, 0, nil)
+	frps, err := Start(ctx, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

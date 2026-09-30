@@ -55,15 +55,12 @@ func statusExtra(st *httpStats, filt edgeFilter, track *conns, vis *visitors) ma
 	return m
 }
 
-func protect(h http.Handler, st *httpStats, lim *liveLimits) http.Handler {
+// protect counts every request on 443 and sets the security headers. A
+// site request's body limit is its site's (serveSite).
+func protect(h http.Handler, st *httpStats) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if st != nil {
 			st.req.Add(1)
-		}
-		if n := lim.get().MaxBodyBytes; n > 0 {
-			r2 := *r // what http.MaxBytesHandler does, with the size read now
-			r2.Body = http.MaxBytesReader(w, r.Body, n)
-			r = &r2
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -82,6 +79,13 @@ func refuseMalformed(h http.Handler, st *httpStats, lim *liveLimits) http.Handle
 		if code := malformed(r, lim.get().MaxURIBytes); code != 0 {
 			if st != nil {
 				st.rejected.Add(1)
+			}
+			if rs := siteReqOf(r); rs != nil {
+				hit := limitMalformed
+				if code == http.StatusRequestURITooLong {
+					hit = limitURI
+				}
+				rs.site.limitHits[hit].Add(1)
 			}
 			w.WriteHeader(code)
 			return
