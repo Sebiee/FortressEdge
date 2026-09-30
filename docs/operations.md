@@ -165,6 +165,48 @@ shipper that polls before the oldest file is deleted loses nothing. For
 Filebeat, copy the input above with `url: …/~!ops/access`; each event is
 then the request record itself.
 
+## Clock
+
+Boot steps the clock to NTP time before anything that checks a
+certificate starts. After that the edge keeps it there: it polls its
+servers every 64 seconds, lengthening to 1024 seconds while the offset
+stays under half a millisecond. For the first ten minutes it leaves the
+clock alone and measures how fast it drifts, then tells the kernel that
+frequency error, as ntpd does without a drift file, and slews away the
+few milliseconds that built up meanwhile; from then on it hands
+each offset to the kernel's NTP discipline (the same PLL ntpd drives),
+which slews it away and follows the frequency as it wanders. Time never
+jumps. An offset over 128 ms
+behind is stepped forward, and logged; a clock ahead is slewed back, and
+stepped only when more than a second ahead, which normal running never
+is. Traces need the edge's clock to agree with the cluster's: the access
+log's `start` is only as good as it.
+
+Name several servers in `fortress.yml`, so one that is wrong is outvoted:
+
+```yaml
+ntp: [ntp11.metas.ch, ntp12.metas.ch, ntp13.metas.ch]
+```
+
+Each poll takes four samples from each server, two seconds apart, and
+keeps each server's fastest, whose offset the network distorts least.
+The servers' offsets, each within its root distance, must then overlap
+for a majority of all the servers named: the edge follows their weighted
+mean, and ignores a server that disagrees (a falseticker, logged and
+counted). With fewer agreeing than a majority, whether the others are
+silent or wrong, nothing moves, and the clock runs on the frequency the
+kernel learned. `pool.ntp.org` (the default) and its subdomains are
+pools: their first four addresses are servers of their own. The servers
+stay in `fortress.yml` rather than the policy: the clock decides whether
+a certificate is valid, so moving it is a matter of trust, like the CAs.
+
+Warnings: no majority for 30 minutes, an offset still over 10 ms after a
+correction, a step, and a falseticker. `/~!ops/status` has `clock`
+(`offset` in seconds, `synced_at`, `server`, `stratum`, `poll`, `steps`,
+`frequency_ppm`, and `frequency_measured`, false for those first ten
+minutes), and `/~!ops/metrics` the `fortressedge_clock_*` and
+`fortressedge_ntp_*` metrics below.
+
 ## Tracing
 
 Every site request is one hop of a [W3C trace](https://www.w3.org/TR/trace-context/).
@@ -244,6 +286,14 @@ names visitors make up.
 | `fortressedge_xdp_packets_total` | `action`, `reason` | every packet XDP saw; see below |
 | `fortressedge_xdp_ethertype_drops_total` | `ethertype` | non-IP frames by EtherType: `0x88cc` LLDP, `llc` 802.3 (STP) |
 | `fortressedge_kernel_tcp_total` | `counter` | the kernel's TCP counters, as `kernel_tcp` in status |
+| `fortressedge_clock_offset_seconds` | | the clock's offset from NTP time at the last poll, before its correction; positive: behind |
+| `fortressedge_clock_sync_timestamp_seconds` | | when the servers last agreed |
+| `fortressedge_clock_steps_total` | | steps after boot's |
+| `fortressedge_clock_poll_seconds`, `fortressedge_clock_frequency_ppm` | | the poll interval; the frequency correction the kernel learned |
+| `fortressedge_clock_stratum` | `server` | the stratum of the server the clock follows most closely |
+| `fortressedge_ntp_queries_total` | `server`, `result` | queries: `ok`, `error` (no answer), `invalid` (unsynchronized, a kiss of death), `dns` |
+| `fortressedge_ntp_round_trip_seconds` | `server` | each server's least round trip in its last poll |
+| `fortressedge_ntp_falsetickers_total` | `server` | polls that found a server's time off from the others' |
 
 XDP's reasons: `pass` for `service` (HTTP, HTTPS, QUIC), `reply` (to the
 edge's own connections), `arp`, `icmp6`, `icmp3`, `ntp`, `dns`; `drop` for

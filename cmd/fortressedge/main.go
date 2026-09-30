@@ -27,6 +27,7 @@ import (
 	"github.com/Sebiee/fortressedge/internal/httpsvc"
 	"github.com/Sebiee/fortressedge/internal/initos"
 	"github.com/Sebiee/fortressedge/internal/logx"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 	"github.com/Sebiee/fortressedge/internal/netup"
 	"github.com/Sebiee/fortressedge/internal/ops"
 )
@@ -152,12 +153,16 @@ func run() error {
 		return err
 	}
 	consoleStatus(false, true, cfg)
+	// The clock is stepped before anything that checks a certificate
+	// starts, then kept in step while the edge runs.
+	clk := clock.New(cfg.NTP, ipNetwork(cfg))
 	syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	err = clock.Sync(syncCtx, cfg.NTP)
+	err = clk.Sync(syncCtx)
 	cancel()
 	if err != nil {
 		return err
 	}
+	go clk.Run(ctx)
 	syn := flod.SYNRate{PerSecond: cfg.Limits.NewConnsPerSecond, Burst: cfg.Limits.NewConnBurst}
 	filt, err := flod.Attach(cfg.Iface, cfg.Block, cfg.QUIC, syn)
 	if err != nil {
@@ -219,7 +224,10 @@ func run() error {
 	}, func() {
 		wantReboot.Store(true)
 		stop()
-	}, frps.WriteMetrics)
+	}, httpsvc.Extras{
+		Metrics: []func(*metrics.Writer){frps.WriteMetrics, clk.WriteMetrics},
+		Status:  map[string]func() any{"clock": func() any { return clk.Status() }},
+	})
 	if pid1 && wantReboot.Load() {
 		say("fortressedge: rebooting into the new policy")
 		reboot()
@@ -252,7 +260,7 @@ func consoleStatus(ready, connected bool, cfg config.Config) {
 		ACME:      acmeName(cfg),
 		QUIC:      quic,
 		Disk:      cfg.Disk,
-		NTP:       cfg.NTP,
+		NTP:       ntpName(cfg.NTP),
 		Iface:     cfg.Iface,
 		Addr:      cfg.Addr.String(),
 		Gateway:   cfg.Gateway.String(),
@@ -261,6 +269,23 @@ func consoleStatus(ready, connected bool, cfg config.Config) {
 		Listen:    ":80 :443",
 		Blocked:   strconv.Itoa(len(cfg.Block)),
 	})
+}
+
+// ntpName fits the servers in a console cell: the first, and how many more.
+func ntpName(servers []string) string {
+	if len(servers) < 2 {
+		return strings.Join(servers, "")
+	}
+	return fmt.Sprintf("%s +%d", servers[0], len(servers)-1)
+}
+
+// ipNetwork is the address family the edge reaches NTP servers over: its
+// own address's.
+func ipNetwork(cfg config.Config) string {
+	if cfg.Addr.Addr().Is4() {
+		return "ip4"
+	}
+	return "ip6"
 }
 
 // acmeName is the host of the ACME directory, for the console and log.

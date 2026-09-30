@@ -46,7 +46,7 @@ acme_ca: |
   -----BEGIN CERTIFICATE-----
   ...the CA that signed the ACME server's own HTTPS certificate...
   -----END CERTIFICATE-----
-ntp: ntp.internal.example
+ntp: [ntp1.internal.example, ntp2.internal.example, ntp3.internal.example]
 quic: true
 client_ca: |
   -----BEGIN CERTIFICATE-----

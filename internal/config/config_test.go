@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestParseProxmoxSeed(t *testing.T) {
 		t.Fatalf("dns: %v", c.DNS)
 	}
 	// user-data's mounts and ntp are not read; nor is any policy there.
-	if c.Disk != "" || c.NTP != DefaultNTP || c.QUIC || c.ACME != "" {
+	if c.Disk != "" || !slices.Equal(c.NTP, []string{DefaultNTP}) || c.QUIC || c.ACME != "" {
 		t.Fatalf("user-data keys other than fqdn applied: %+v", c)
 	}
 	if c.Limits != DefaultLimits() || c.Block != nil || c.Exempt != nil {
@@ -187,8 +188,24 @@ func TestParseNetworkWrapper(t *testing.T) {
 
 func TestParseNTP(t *testing.T) {
 	c, err := parse("ntp: 10.0.0.1:123\n")
-	if err != nil || c.NTP != "10.0.0.1:123" {
+	if err != nil || !slices.Equal(c.NTP, []string{"10.0.0.1:123"}) {
 		t.Fatalf("ntp: %q %v", c.NTP, err)
+	}
+	c, err = parse("ntp: [ntp11.metas.ch, ntp12.metas.ch, '[2001:db8::1]:4123']\n")
+	if err != nil || !slices.Equal(c.NTP, []string{"ntp11.metas.ch", "ntp12.metas.ch", "[2001:db8::1]:4123"}) {
+		t.Fatalf("ntp list: %q %v", c.NTP, err)
+	}
+	for _, bad := range []string{
+		"ntp: [a.example.com, a.example.com]\n",
+		"ntp: time.example.com:ntp\n",
+		"ntp: time.example.com:70000\n",
+		"ntp: not a name\n",
+		"ntp: {server: a.example.com}\n",
+		"ntp: [a1.example.com, a2.example.com, a3.example.com, a4.example.com, a5.example.com, a6.example.com, a7.example.com, a8.example.com, a9.example.com]\n",
+	} {
+		if _, err := parse(bad); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
 	}
 }
 

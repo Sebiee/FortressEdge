@@ -45,6 +45,7 @@ these.
 | `make test` | unit tests, with `-race`, in both code modules |
 | `make e2e` | the system tests, with `-race` on what runs in-process (the frp fork's client, Pebble); `RUN=TestCertificates` picks some |
 | `make load` | what one edge VM serves through each tunnel (see [Load tests](#load-tests)); not part of `ci` |
+| `make clock-soak` | an edge VM kept to real NTP servers (`CLOCK_NTP`, METAS's by default) for `CLOCK_FOR` (60m), printing its offset each minute; needs the internet, not part of `ci` |
 | `make waf-bench` | replay open-appsec's WAF datasets and run GoTestWAF through a larger edge VM, with throughput and latency (see [WAF bench](#waf-bench)); not part of `ci` |
 | `make perf-guard BASE=<ref>` | what a request costs the edge in CPU and allocations, against `BASE` (see [Perf guard](#perf-guard)); CI runs it on pull requests that change the edge |
 | `make ci` | `tidy-check`, `test`, `e2e`, as CI runs them |

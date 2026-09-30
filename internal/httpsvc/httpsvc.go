@@ -187,10 +187,16 @@ var (
 	stamped = append(slices.Clone(forwarding), requestIDHeaderOut)
 )
 
+// Extras are what the rest of the edge adds to the ops API: metrics
+// writers (the tunnel, the clock), and status keys with their values.
+type Extras struct {
+	Metrics []func(*metrics.Writer)
+	Status  map[string]func() any
+}
+
 // Serve runs the HTTP and HTTPS servers until ctx ends. policy is the
 // policy.yml cfg holds, as stored; apply stores and applies a new one.
-// tunnel writes the tunnel's metrics, which frps counts.
-func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), tunnel func(*metrics.Writer)) error {
+func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), more Extras) error {
 	st := &httpStats{}
 	acc := &accessLogs{st: st}
 	if err := acc.apply(cfg.Policy); err != nil {
@@ -211,12 +217,15 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	oh.SetStatus(func() map[string]any {
 		m := statusExtra(st, filt, track, vis)
 		m["access_log"] = acc.on()
+		for k, f := range more.Status {
+			m[k] = f()
+		}
 		return m
 	})
 	oh.SetMetrics(func(w *metrics.Writer) {
 		writeMetrics(w, st, filt, track, vis, domains)
-		if tunnel != nil {
-			tunnel(w)
+		for _, f := range more.Metrics {
+			f(w)
 		}
 	})
 	if apply != nil {

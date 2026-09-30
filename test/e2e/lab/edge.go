@@ -27,8 +27,9 @@ type EdgeOptions struct {
 	Config       string // fortress.yml lines after testdata's
 	Policy       string // applied with fortressctl apply once the edge is up
 	Pebble       PebbleOptions
-	FQDN         string // user-data's fqdn; empty is Tunnel
-	NoDrive      bool   // boot without the NoCloud drive
+	FQDN         string   // user-data's fqdn; empty is Tunnel
+	NoDrive      bool     // boot without the NoCloud drive
+	NTP          []string // fortress.yml's ntp; empty is the lab's server
 }
 
 // Edge is an edge VM as an operator deploys one: a release ISO baked with
@@ -62,10 +63,14 @@ func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 	}
 	e.Pebble = StartPebble(t, e.VM, o.Pebble)
 	e.Roots = e.Pebble.Roots
+	ntp := e.VM.NTP()
+	if len(o.NTP) > 0 {
+		ntp = "[" + strings.Join(o.NTP, ", ") + "]"
+	}
 	edge := []byte(string(Read(t, "fortress.yml")) + o.Config +
 		"acme: " + e.Pebble.URL + "\n" +
 		"acme_ca: |\n" + Indent(e.Pebble.TLSCA) +
-		"ntp: " + e.VM.NTP() + "\n" +
+		"ntp: " + ntp + "\n" +
 		"client_ca: |\n" + Indent(readFile(t, filepath.Join(e.PKI, "ca.crt"))))
 	e.VM.ISO = Bake(t, e.Dir, cmp.Or(o.ISO, *iso), edge)
 	if drive != "" {

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**The clock stays in step.** Boot still steps the clock once; the edge
+then polls its NTP servers every 64 seconds, up to 1024 while the offset
+stays under half a millisecond. It measures the clock's frequency error
+over the first ten minutes and sets it, as ntpd does, then hands each offset
+to the kernel's NTP discipline, which slews it away and follows the
+frequency: time never jumps, and a clock ahead is never stepped back unless more
+than a second ahead. It was set once at boot and drifted from there,
+some 25 ms in an hour on one VM, which put the edge's spans out of line
+with the cluster's.
+
+- `ntp` in `fortress.yml` takes a list, and `bake.Config.NTP` is a
+  `[]string`: the Terraform provider needs its 0.4 release. Each poll
+  keeps each server's fastest of four samples, and follows the servers
+  only when a majority of them agree; one that disagrees is ignored and
+  logged. `pool.ntp.org`, still the default, counts as four servers.
+- `/~!ops/status` has `clock`, and `/~!ops/metrics` the offset, the last
+  sync, steps, the poll interval, the learned frequency, the followed
+  server's stratum, and per server queries by result, round trips, and
+  falsetickers.
+- A warning when no majority answers for 30 minutes, or an offset is
+  still over 10 ms after a correction.
+- `make clock-soak` keeps an edge VM on real NTP servers and prints its
+  offset each minute.
+
 ## 0.3.0
 
 **Observability.** `GET /~!ops/metrics` serves Prometheus's text format

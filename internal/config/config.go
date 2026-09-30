@@ -90,7 +90,9 @@ type Config struct {
 	Tunnel  string // the fqdn: SNI dark nodes and operators connect to
 	// Disk is the device boot mounted at /var; not part of the config.
 	Disk string
-	NTP  string
+	// NTP are the time servers, host or host:port, which the clock keeps
+	// to while the edge runs (internal/clock).
+	NTP []string
 	ACME string // ACME directory URL; empty is Let's Encrypt
 	// ACMECA is the PEM trust anchor for the directory's TLS certificate.
 	// Empty uses the system roots. Set, it is the only pool the ACME client trusts.
@@ -282,7 +284,7 @@ type edgeConfig struct {
 	ACME     string `yaml:"acme"`
 	ACMECA   string `yaml:"acme_ca"`
 	ClientCA string `yaml:"client_ca"`
-	NTP      string `yaml:"ntp"`
+	NTP      servers `yaml:"ntp"`
 	Renew    string `yaml:"renew_interval"`
 	QUIC     bool   `yaml:"quic"`
 }
@@ -372,7 +374,7 @@ type netv2rt struct {
 // Parse reads the four parts. policy may be nil: an edge nobody has
 // applied a policy to yet runs the defaults (no block list, DefaultLimits).
 func Parse(userData, networkConfig, edge, policy []byte) (Config, error) {
-	c := Config{Iface: "eth0", NTP: DefaultNTP, RenewInterval: DefaultRenewInterval}
+	c := Config{Iface: "eth0", NTP: []string{DefaultNTP}, RenewInterval: DefaultRenewInterval}
 	if err := applyEdge(&c, edge); err != nil {
 		return Config{}, err
 	}
@@ -596,8 +598,8 @@ func applyEdge(c *Config, edge []byte) error {
 		return err
 	}
 	c.QUIC = e.QUIC
-	if s := strings.TrimSpace(e.NTP); s != "" {
-		c.NTP = s
+	if err := applyNTP(c, e.NTP); err != nil {
+		return err
 	}
 	pemText := strings.TrimSpace(e.ClientCA)
 	if pemText == "" {
@@ -607,6 +609,56 @@ func applyEdge(c *Config, edge []byte) error {
 		return fmt.Errorf("%s: client_ca: %w", EdgeFile, err)
 	}
 	c.ClientCA = []byte(pemText)
+	return nil
+}
+
+// servers is fortress.yml's ntp: one server, or a list of them.
+type servers []string
+
+func (s *servers) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		*s = servers{n.Value}
+		return nil
+	}
+	var list []string
+	if err := n.Decode(&list); err != nil {
+		return fmt.Errorf("ntp: want a server or a list of servers")
+	}
+	*s = list
+	return nil
+}
+
+// maxNTP bounds the ntp list: every poll asks each server.
+const maxNTP = 8
+
+func applyNTP(c *Config, list servers) error {
+	var out []string
+	for _, s := range list {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		host := s
+		if h, port, err := net.SplitHostPort(s); err == nil {
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("%s: ntp: %q: want host or host:port", EdgeFile, s)
+			}
+			host = h
+		}
+		if net.ParseIP(host) == nil && checkName(strings.ToLower(strings.TrimSuffix(host, "."))) != nil {
+			return fmt.Errorf("%s: ntp: %q: want a DNS name or an address, with :port if not 123", EdgeFile, s)
+		}
+		if slices.Contains(out, s) {
+			return fmt.Errorf("%s: ntp: %q twice", EdgeFile, s)
+		}
+		out = append(out, s)
+	}
+	if len(out) > maxNTP {
+		return fmt.Errorf("%s: ntp: at most %d servers", EdgeFile, maxNTP)
+	}
+	if len(out) > 0 {
+		c.NTP = out
+	}
 	return nil
 }
 

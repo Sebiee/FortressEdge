@@ -21,9 +21,10 @@ type Config struct {
 	// ACMECA is the PEM CA that signed the ACME directory's HTTPS
 	// certificate. Empty trusts the system roots.
 	ACMECA string `yaml:"acme_ca"`
-	// NTP is the time source for the boot clock sync, host or host:port.
-	// Empty is pool.ntp.org.
-	NTP string `yaml:"ntp"`
+	// NTP are the time servers the edge keeps its clock to, each host or
+	// host:port: several, so one that is wrong is outvoted. Empty is
+	// pool.ntp.org.
+	NTP []string `yaml:"ntp"`
 	// RenewInterval is how often ACME certificates are checked, a duration
 	// such as 4h. Empty is 4h.
 	RenewInterval string `yaml:"renew_interval"`
@@ -73,6 +74,17 @@ func (c Config) YAML() []byte {
 		case reflect.Int:
 			if f.Int() != 0 {
 				fmt.Fprintf(&b, "%s: %s\n", key, strconv.FormatInt(f.Int(), 10))
+			}
+		case reflect.Slice: // of strings: a flow sequence of JSON strings
+			var items []string
+			for _, item := range f.Interface().([]string) {
+				if item = strings.TrimSpace(item); item != "" {
+					q, _ := json.Marshal(item)
+					items = append(items, string(q))
+				}
+			}
+			if len(items) > 0 {
+				fmt.Fprintf(&b, "%s: [%s]\n", key, strings.Join(items, ", "))
 			}
 		default:
 			panic("bake: Config field " + key + " of a kind YAML does not write")

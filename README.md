@@ -237,7 +237,7 @@ fortressctl apply edge1.example.com -f policy.yml \
 | `acme` | Let's Encrypt | ACME directory URL |
 | `acme_ca` | system roots | PEM CA that signed that directory's HTTPS certificate |
 | `renew_interval` | `4h` | How often ACME certificates are checked and renewed once due |
-| `ntp` | `pool.ntp.org` | Time source for the boot clock sync, `host` or `host:port` |
+| `ntp` | `pool.ntp.org` | Time servers the clock keeps to, `host` or `host:port`, one or a list; three or more outvote one that is wrong. See [the clock](docs/operations.md#clock) |
 | `quic` | `false` | Dark nodes may also connect over QUIC on UDP 443 |
 
 The cloud-init drive: `fqdn` in `user-data`, a DNS name with a domain,

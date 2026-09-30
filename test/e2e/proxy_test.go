@@ -184,8 +184,14 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			var st struct {
 				Sites  map[string]map[string]int64 `json:"sites"`
 				Limits map[string]any              `json:"limits"`
+				Clock  struct {
+					Server   string `json:"server"`
+					SyncedAt string `json:"synced_at"`
+				} `json:"clock"`
 			}
 			require.NoError(t, json.Unmarshal([]byte(body), &st))
+			assert.Equal(t, vm.NTP(), st.Clock.Server, "the clock keeps to the lab's server")
+			assert.NotEmpty(t, st.Clock.SyncedAt)
 			assert.Positive(t, st.Sites["echo.example.com"]["2xx"])
 			assert.EqualValues(t, 1000, st.Limits["request_burst"], "limits from fortress.yml")
 			assert.EqualValues(t, 200, st.Limits["new_connections_per_second"])
@@ -279,6 +285,10 @@ func TestProxyingToDarkNodes(t *testing.T) {
 					`fortressedge_certificate_obtains_total{name="echo.example.com",result="ok"} `,
 					`fortressedge_xdp_packets_total{action="pass",reason="service"} `,
 					`fortressedge_kernel_tcp_total{counter="passive_opens"} `,
+					"fortressedge_clock_offset_seconds ",
+					"fortressedge_clock_sync_timestamp_seconds ",
+					`fortressedge_clock_stratum{server="` + vm.NTP() + `"} 1`,
+					`fortressedge_ntp_queries_total{server="` + vm.NTP() + `",result="ok"} `,
 				} {
 					assert.Contains(c, body, want)
 				}

@@ -156,6 +156,18 @@ its site holds more than an equal share. WebSockets and other long
 streams stay out of the budget; the per-source connection cap bounds
 them. The per-site counters in status show whether this is needed.
 
+## NTS
+
+The clock trusts its NTP servers' answers as they arrive: an attacker on
+the path could shift them, together. NTS (RFC 8915) authenticates them,
+and [beevik/nts](https://github.com/beevik/nts), from the author of the
+NTP client the edge uses, is a small client. It needs servers that speak
+it: METAS's did not answer NTS key exchange in September 2026;
+Cloudflare's `time.cloudflare.com` does. The boot step is the catch: the
+key exchange is TLS, whose certificate check needs the clock NTS is
+about to set, so boot would need a first unauthenticated sample, or a
+certificate check that tolerates a clock off by days.
+
 ## Edge signals and feeds
 
 - **TLS fingerprint.** Only the edge sees the ClientHello. It can compute

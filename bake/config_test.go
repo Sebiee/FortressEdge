@@ -37,7 +37,7 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		ClientCA:      testCA(t),
 		ACME:          "https://vault.example.com:8200/v1/pki/acme/directory",
 		ACMECA:        testCA(t),
-		NTP:           "10.0.0.1:123",
+		NTP:           []string{"10.0.0.1:123", "ntp11.metas.ch"},
 		RenewInterval: "90m",
 		QUIC:          true,
 	}
@@ -50,7 +50,7 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.ACME != c.ACME || string(cfg.ACMECA) != strings.TrimSpace(c.ACMECA) || string(cfg.ClientCA) != strings.TrimSpace(c.ClientCA) ||
-		cfg.NTP != c.NTP || cfg.RenewInterval != 90*time.Minute || !cfg.QUIC {
+		!slices.Equal(cfg.NTP, c.NTP) || cfg.RenewInterval != 90*time.Minute || !cfg.QUIC {
 		t.Fatalf("%+v", cfg)
 	}
 }
