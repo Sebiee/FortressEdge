@@ -41,7 +41,7 @@ struct {
 #define REASON_DROP_PORT 2
 #define REASON_DROP_SYNRATE 3
 #define REASON_DROP_NTPRATE 4
-#define REASON_DROP_OTHER 5
+#define REASON_DROP_TRUNCATED 5 // a header cut short, or an IPv4 header length under 20
 #define REASON_PASS_ARP 6
 #define REASON_PASS_ICMP6 7
 #define REASON_PASS_ICMP3 8
@@ -49,7 +49,14 @@ struct {
 #define REASON_PASS_REPLY 10
 #define REASON_PASS_DNS 11
 #define REASON_DROP_DNSRATE 12
-#define REASON_MAX 13
+#define REASON_DROP_ETHERTYPE 13 // neither IPv4, IPv6, nor ARP: LLDP, STP, ...
+#define REASON_DROP_FRAGMENT 14  // an IPv4 fragment after the first
+#define REASON_DROP_PROTO 15     // an IP protocol other than TCP, UDP, ICMP
+#define REASON_DROP_ICMP 16      // an ICMPv4 type other than destination unreachable
+#define REASON_MAX 17
+
+// LLC marks an IEEE 802.3 frame, whose type field is a length (STP, for one).
+#define ETHERTYPE_LLC 0
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -115,6 +122,31 @@ static __always_inline int count(__u32 reason, int action) {
 		*v += 1;
 	}
 	return action;
+}
+
+// Frames dropped for their EtherType, by EtherType (ETHERTYPE_LLC for an
+// 802.3 frame): what REASON_DROP_ETHERTYPE is. A type past max_entries is
+// counted there only.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u16);
+	__type(value, __u64);
+} ethertypes SEC(".maps");
+
+static __always_inline int drop_ethertype(__u16 proto_be) {
+	__u16 t = bpf_ntohs(proto_be);
+	if (t < 0x0600) {
+		t = ETHERTYPE_LLC;
+	}
+	__u64 *v = bpf_map_lookup_elem(&ethertypes, &t);
+	if (v) {
+		__sync_fetch_and_add(v, 1);
+	} else {
+		__u64 one = 1;
+		bpf_map_update_elem(&ethertypes, &t, &one, BPF_NOEXIST);
+	}
+	return count(REASON_DROP_ETHERTYPE, XDP_DROP);
 }
 
 // ponytail: racy per-IP bucket (nCPU can overshoot burst); atomic add if it shows in drops.
@@ -191,7 +223,7 @@ static __always_inline int ephemeral(__u16 port_be) {
 
 static __always_inline int filter_tcp(struct tcphdr *tcp, void *data_end, struct src_key *src) {
 	if ((void *)(tcp + 1) > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	// ponytail: stateless. Any ACK to an ephemeral port passes, not only a
 	// reply; the kernel answers a stray one with RST. A conntrack map filled
@@ -214,7 +246,7 @@ static __always_inline int filter_tcp(struct tcphdr *tcp, void *data_end, struct
 
 static __always_inline int filter_udp(struct udphdr *udp, void *data_end, struct src_key *src) {
 	if ((void *)(udp + 1) > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	if (udp->dest == bpf_htons(PORT_HTTPS)) {
 		__u32 z = 0;
@@ -222,7 +254,7 @@ static __always_inline int filter_udp(struct udphdr *udp, void *data_end, struct
 		if (on && *on) {
 			__u8 *first = (void *)(udp + 1);
 			if ((void *)(first + 1) > data_end) {
-				return count(REASON_DROP_OTHER, XDP_DROP);
+				return count(REASON_DROP_TRUNCATED, XDP_DROP);
 			}
 			// Long header (first bit set): Initial, 0-RTT, Handshake, Retry.
 			if ((*first & 0x80) && !take_token(&quic_rate, src, QUIC_BURST, QUIC_NS)) {
@@ -253,13 +285,13 @@ static __always_inline int filter_l4(void *l4, void *data_end, __u8 proto, struc
 	if (proto == IPPROTO_UDP) {
 		return filter_udp(l4, data_end, src);
 	}
-	return count(REASON_DROP_PORT, XDP_DROP);
+	return count(REASON_DROP_PROTO, XDP_DROP);
 }
 
 static __always_inline int handle_v6(void *nh, void *data_end) {
 	struct ipv6hdr *ip6 = nh;
 	if ((void *)(ip6 + 1) > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	if (blocked6(&ip6->saddr)) {
 		return count(REASON_DROP_BLOCK, XDP_DROP);
@@ -277,30 +309,30 @@ static __always_inline int handle_v6(void *nh, void *data_end) {
 static __always_inline int handle_v4(void *nh, void *data_end) {
 	struct iphdr *ip = nh;
 	if ((void *)(ip + 1) > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	if (ip->ihl < 5) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	if (blocked4(ip->saddr)) {
 		return count(REASON_DROP_BLOCK, XDP_DROP);
 	}
 	if (bpf_ntohs(ip->frag_off) & IP_OFFMASK) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_FRAGMENT, XDP_DROP);
 	}
 	void *l4 = (void *)ip + ip->ihl * 4;
 	if (l4 > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 	if (ip->protocol == IPPROTO_ICMP) {
 		struct icmphdr *icmp = l4;
 		if ((void *)(icmp + 1) > data_end) {
-			return count(REASON_DROP_OTHER, XDP_DROP);
+			return count(REASON_DROP_TRUNCATED, XDP_DROP);
 		}
 		if (icmp->type == ICMP_DEST_UNREACH) {
 			return count(REASON_PASS_ICMP3, XDP_PASS);
 		}
-		return count(REASON_DROP_PORT, XDP_DROP);
+		return count(REASON_DROP_ICMP, XDP_DROP);
 	}
 	struct src_key src = {};
 	src.family = 4;
@@ -315,7 +347,7 @@ int flod(struct xdp_md *ctx) {
 
 	struct ethhdr *eth = data;
 	if ((void *)(eth + 1) > data_end) {
-		return count(REASON_DROP_OTHER, XDP_DROP);
+		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
 
 	__u16 eth_proto = eth->h_proto;
@@ -323,7 +355,7 @@ int flod(struct xdp_md *ctx) {
 	if (eth_proto == bpf_htons(ETH_P_8021Q)) {
 		struct vlanhdr *vlan = nh;
 		if ((void *)(vlan + 1) > data_end) {
-			return count(REASON_DROP_OTHER, XDP_DROP);
+			return count(REASON_DROP_TRUNCATED, XDP_DROP);
 		}
 		eth_proto = vlan->h_proto;
 		nh = vlan + 1;
@@ -338,5 +370,5 @@ int flod(struct xdp_md *ctx) {
 	if (eth_proto == bpf_htons(ETH_P_IP)) {
 		return handle_v4(nh, data_end);
 	}
-	return count(REASON_DROP_OTHER, XDP_DROP);
+	return drop_ethertype(eth_proto);
 }

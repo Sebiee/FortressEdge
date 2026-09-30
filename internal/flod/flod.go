@@ -22,7 +22,7 @@ var reasonNames = []string{
 	"drop_port",
 	"drop_synrate",
 	"drop_ntprate",
-	"drop_other",
+	"drop_truncated",
 	"pass_arp",
 	"pass_icmp6",
 	"pass_icmp3",
@@ -30,6 +30,10 @@ var reasonNames = []string{
 	"pass_reply",
 	"pass_dns",
 	"drop_dnsrate",
+	"drop_ethertype",
+	"drop_fragment",
+	"drop_proto",
+	"drop_icmp",
 }
 
 // Filter is a loaded XDP program and its maps. Close detaches it.
@@ -228,6 +232,29 @@ func (f *Filter) Stats() map[string]uint64 {
 			sum += v
 		}
 		out[name] = sum
+	}
+	return out
+}
+
+// EtherTypes counts the frames dropped for their EtherType (drop_ethertype),
+// by EtherType as 0x88cc, or llc for an IEEE 802.3 frame, whose type field
+// is a length. The program tracks up to 64 types.
+func (f *Filter) EtherTypes() map[string]uint64 {
+	out := map[string]uint64{}
+	if f == nil {
+		return out
+	}
+	var (
+		t uint16
+		n uint64
+	)
+	it := f.objs.Ethertypes.Iterate()
+	for it.Next(&t, &n) {
+		name := fmt.Sprintf("0x%04x", t)
+		if t == 0 {
+			name = "llc"
+		}
+		out[name] = n
 	}
 	return out
 }

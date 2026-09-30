@@ -26,6 +26,7 @@ enum bpf_map_type {
 
 #define BPF_F_NO_PREALLOC 1
 #define BPF_ANY 0
+#define BPF_NOEXIST 1
 
 struct xdp_md {
 	__u32 data;

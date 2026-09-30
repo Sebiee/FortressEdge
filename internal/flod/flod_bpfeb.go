@@ -54,16 +54,17 @@ type flodSynRateCfg struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	flodMapAllowQuic = "allow_quic"
-	flodMapBlock4    = "block4"
-	flodMapBlock6    = "block6"
-	flodMapCounts    = "counts"
-	flodMapDnsRate   = "dns_rate"
-	flodMapNtpRate   = "ntp_rate"
-	flodMapQuicRate  = "quic_rate"
-	flodMapSynCfg    = "syn_cfg"
-	flodMapSynRate   = "syn_rate"
-	flodProgFlod     = "flod"
+	flodMapAllowQuic  = "allow_quic"
+	flodMapBlock4     = "block4"
+	flodMapBlock6     = "block6"
+	flodMapCounts     = "counts"
+	flodMapDnsRate    = "dns_rate"
+	flodMapEthertypes = "ethertypes"
+	flodMapNtpRate    = "ntp_rate"
+	flodMapQuicRate   = "quic_rate"
+	flodMapSynCfg     = "syn_cfg"
+	flodMapSynRate    = "syn_rate"
+	flodProgFlod      = "flod"
 )
 
 // loadFlod returns the embedded CollectionSpec for flod.
@@ -115,15 +116,16 @@ type flodProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type flodMapSpecs struct {
-	AllowQuic *ebpf.MapSpec `ebpf:"allow_quic"`
-	Block4    *ebpf.MapSpec `ebpf:"block4"`
-	Block6    *ebpf.MapSpec `ebpf:"block6"`
-	Counts    *ebpf.MapSpec `ebpf:"counts"`
-	DnsRate   *ebpf.MapSpec `ebpf:"dns_rate"`
-	NtpRate   *ebpf.MapSpec `ebpf:"ntp_rate"`
-	QuicRate  *ebpf.MapSpec `ebpf:"quic_rate"`
-	SynCfg    *ebpf.MapSpec `ebpf:"syn_cfg"`
-	SynRate   *ebpf.MapSpec `ebpf:"syn_rate"`
+	AllowQuic  *ebpf.MapSpec `ebpf:"allow_quic"`
+	Block4     *ebpf.MapSpec `ebpf:"block4"`
+	Block6     *ebpf.MapSpec `ebpf:"block6"`
+	Counts     *ebpf.MapSpec `ebpf:"counts"`
+	DnsRate    *ebpf.MapSpec `ebpf:"dns_rate"`
+	Ethertypes *ebpf.MapSpec `ebpf:"ethertypes"`
+	NtpRate    *ebpf.MapSpec `ebpf:"ntp_rate"`
+	QuicRate   *ebpf.MapSpec `ebpf:"quic_rate"`
+	SynCfg     *ebpf.MapSpec `ebpf:"syn_cfg"`
+	SynRate    *ebpf.MapSpec `ebpf:"syn_rate"`
 }
 
 // flodVariableSpecs contains global variables before they are loaded into the kernel.
@@ -152,15 +154,16 @@ func (o *flodObjects) Close() error {
 //
 // It can be passed to loadFlodObjects or ebpf.CollectionSpec.LoadAndAssign.
 type flodMaps struct {
-	AllowQuic *ebpf.Map `ebpf:"allow_quic"`
-	Block4    *ebpf.Map `ebpf:"block4"`
-	Block6    *ebpf.Map `ebpf:"block6"`
-	Counts    *ebpf.Map `ebpf:"counts"`
-	DnsRate   *ebpf.Map `ebpf:"dns_rate"`
-	NtpRate   *ebpf.Map `ebpf:"ntp_rate"`
-	QuicRate  *ebpf.Map `ebpf:"quic_rate"`
-	SynCfg    *ebpf.Map `ebpf:"syn_cfg"`
-	SynRate   *ebpf.Map `ebpf:"syn_rate"`
+	AllowQuic  *ebpf.Map `ebpf:"allow_quic"`
+	Block4     *ebpf.Map `ebpf:"block4"`
+	Block6     *ebpf.Map `ebpf:"block6"`
+	Counts     *ebpf.Map `ebpf:"counts"`
+	DnsRate    *ebpf.Map `ebpf:"dns_rate"`
+	Ethertypes *ebpf.Map `ebpf:"ethertypes"`
+	NtpRate    *ebpf.Map `ebpf:"ntp_rate"`
+	QuicRate   *ebpf.Map `ebpf:"quic_rate"`
+	SynCfg     *ebpf.Map `ebpf:"syn_cfg"`
+	SynRate    *ebpf.Map `ebpf:"syn_rate"`
 }
 
 func (m *flodMaps) Close() error {
@@ -170,6 +173,7 @@ func (m *flodMaps) Close() error {
 		m.Block6,
 		m.Counts,
 		m.DnsRate,
+		m.Ethertypes,
 		m.NtpRate,
 		m.QuicRate,
 		m.SynCfg,

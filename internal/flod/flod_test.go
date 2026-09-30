@@ -7,6 +7,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 func TestAttachLoopback(t *testing.T) {
@@ -117,4 +119,48 @@ func TestSetSYNRate(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 1) // off
+}
+
+// Each kind of frame drop_other used to hide lands under a reason of its
+// own, and EtherTypes names what the non-IP frames were.
+func TestDropReasons(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	f, err := Attach("lo", nil, false, SYNRate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	eth := func(typ uint16, payload ...byte) []byte {
+		b := make([]byte, 12, 14+len(payload))
+		b = append(b, byte(typ>>8), byte(typ))
+		return append(b, payload...)
+	}
+	ipv4 := func(proto byte, fragOff uint16, l4 ...byte) []byte {
+		h := []byte{0x45, 0, 0, 0, 0, 0, byte(fragOff >> 8), byte(fragOff), 64, proto, 0, 0, 192, 0, 2, 1, 192, 0, 2, 2}
+		return append(h, l4...)
+	}
+	for _, tc := range []struct {
+		name, reason string
+		frame        []byte
+	}{
+		{"LLDP", "drop_ethertype", eth(0x88cc, make([]byte, 46)...)},
+		{"STP (802.3)", "drop_ethertype", eth(0x0026, make([]byte, 46)...)},
+		{"an IPv4 fragment", "drop_fragment", eth(0x0800, ipv4(17, 185, make([]byte, 8)...)...)},
+		{"GRE", "drop_proto", eth(0x0800, ipv4(47, 0, make([]byte, 8)...)...)},
+		{"an ICMP echo", "drop_icmp", eth(0x0800, ipv4(1, 0, 8, 0, 0, 0, 0, 0, 0, 0)...)},
+		{"a cut IPv4 header", "drop_truncated", eth(0x0800, 0x45, 0, 0, 0)},
+	} {
+		before := f.Stats()[tc.reason]
+		if _, err := f.objs.Flod.Run(&ebpf.RunOptions{Data: tc.frame}); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := f.Stats()[tc.reason]; got != before+1 {
+			t.Errorf("%s: %s went from %d to %d", tc.name, tc.reason, before, got)
+		}
+	}
+	if et := f.EtherTypes(); et["0x88cc"] != 1 || et["llc"] != 1 {
+		t.Fatalf("ethertypes: %v", et)
+	}
 }
