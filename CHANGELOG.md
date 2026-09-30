@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 **Observability.** `GET /~!ops/metrics` serves Prometheus's text format
 to operator and log-reader certificates, never rate limited: per site
