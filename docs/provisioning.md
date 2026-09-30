@@ -58,7 +58,7 @@ Leave out `acme` and `acme_ca` for Let's Encrypt. Every key is listed in
 the [README](../README.md#configuration). Then bake:
 
 ```sh
-fortressctl bake -o edge-prod.iso -c fortress.yml fortressedge-v0.3.0.iso
+fortressctl bake -o edge-prod.iso -c fortress.yml fortressedge-v0.4.0.iso
 ```
 
 `bake` checks the file first: a missing `client_ca`, a `client_ca` with
@@ -74,7 +74,7 @@ with its checksum:
 ```yaml
 # .github/workflows/edge-iso.yml, on a change to envs/prod/fortress.yml
 - run: |
-    v=v0.3.0
+    v=v0.4.0
     base=https://github.com/sebiee/fortressedge/releases/download/$v
     curl -fsSLo release.iso "$base/fortressedge-$v.iso"
     curl -fsSLo fortressctl "$base/fortressctl-$v-linux-amd64" && chmod +x fortressctl
@@ -141,7 +141,7 @@ terraform {
 }
 
 data "fortressedge_iso" "prod" {
-  release_url    = "https://github.com/sebiee/fortressedge/releases/download/v0.3.0/fortressedge-v0.3.0.iso"
+  release_url    = "https://github.com/sebiee/fortressedge/releases/download/v0.4.0/fortressedge-v0.4.0.iso"
   release_sha256 = "…"                         # from the release's SHA256SUMS
   client_ca      = file("${path.module}/tls/ca.crt")
   acme           = "https://vault.example.com:8200/v1/pki/acme/directory"

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 **The clock stays in step.** Boot still steps the clock once; the edge
 then polls its NTP servers every 64 seconds, up to 1024 while the offset
