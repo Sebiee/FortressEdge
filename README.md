@@ -102,9 +102,10 @@ EOF
 cloud-localds --network-config=network-config seed.iso user-data
 truncate -s 64M data.img
 
-qemu-system-x86_64 -nographic -m 512 -boot order=d \
+qemu-system-x86_64 -nographic -m 512 \
   -drive file=data.img,format=raw,if=virtio \
-  -drive file=edge.iso,media=cdrom,readonly=on,if=ide,index=0 \
+  -device virtio-scsi-pci -drive file=edge.iso,media=cdrom,readonly=on,if=none,id=cd \
+  -device scsi-cd,drive=cd,bootindex=0 \
   -drive file=seed.iso,media=cdrom,readonly=on,if=ide,index=1 \
   $([ -w /dev/kvm ] && echo -accel kvm -cpu host) \
   -netdev user,id=n0,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443 \
@@ -187,11 +188,11 @@ resource "proxmox_virtual_environment_file" "edge_iso" {
 resource "proxmox_virtual_environment_vm" "edge1" {
   node_name  = "pve"
   name       = "edge1"
-  boot_order = ["ide0"]
+  boot_order = ["scsi0"]
   memory { dedicated = 1024 }
   cdrom {
     file_id   = proxmox_virtual_environment_file.edge_iso.id
-    interface = "ide0"
+    interface = "scsi0" # virtio-scsi; IDE boots about 2s slower
   }
   disk {
     datastore_id = "local-lvm"

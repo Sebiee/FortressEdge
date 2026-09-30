@@ -14,7 +14,11 @@ configure an edge: no maintenance mode, no config upload, no shell.
 
 The machine needs:
 
-- the baked ISO as its boot CD (BIOS boot; the ISO is not a UEFI image);
+- the baked ISO as its boot CD (BIOS boot; the ISO is not a UEFI image),
+  on a SCSI or SATA controller rather than IDE: the boot loader reads
+  the kernel and initramfs through the BIOS, which takes about 3s from an
+  emulated IDE CD and about 1s from virtio-scsi. The edge reads nothing
+  from the CD once the kernel starts;
 - one blank data disk, `/dev/vda` (VirtIO) or else `/dev/sda` (SCSI),
   which the edge formats ext4 on the first boot. Certificates, the policy,
   and logs live there;
@@ -162,14 +166,14 @@ resource "proxmox_virtual_environment_vm" "edge1" {
   memory { dedicated = 1024 }
   cdrom {
     file_id   = proxmox_virtual_environment_file.edge_iso.id
-    interface = "ide0"
+    interface = "scsi0" # virtio-scsi; IDE boots about 2s slower
   }
   disk {
     datastore_id = "local-lvm"
     interface    = "virtio0"
     size         = 1
   }
-  boot_order = ["ide0"]
+  boot_order = ["scsi0"]
   network_device { bridge = "vmbr0" }
   initialization {
     datastore_id = "local-lvm"

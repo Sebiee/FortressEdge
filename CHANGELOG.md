@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Booting.** The documentation and `os/qemu.sh` put the boot CD on
+virtio-scsi instead of IDE: SeaBIOS reads the kernel and initramfs about
+2 seconds faster (about 1s from power-on to the edge's first line under
+KVM, from 3s). On Proxmox, attach the ISO as `scsi0`.
+
 ## 0.2.0
 
 `response_header_timeout` in the policy's `limits`: how long a request

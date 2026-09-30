@@ -14,10 +14,14 @@ ctl_fwd=${CTL_FWD:-17000}
 # DHCP address (10.0.2.15); set it when network-config pins another one.
 guest=${GUEST_ADDR:-}
 
+# The boot CD is on virtio-scsi: SeaBIOS reads the kernel and initramfs
+# from an IDE CD about 2s slower. The NoCloud drive stays on IDE, where
+# Proxmox puts it.
 set -- -accel "$accel" -nographic -smp "${QEMU_SMP:-1}" -m "${QEMU_MEM:-512}" -rtc base=utc \
-	-boot order=d \
 	-drive "file=${disk},format=raw,if=virtio" \
-	-drive "file=${iso},media=cdrom,readonly=on,if=ide,index=0"
+	-device virtio-scsi-pci,id=scsi0 \
+	-drive "id=iso,file=${iso},media=cdrom,readonly=on,if=none" \
+	-device scsi-cd,drive=iso,bus=scsi0.0,bootindex=0
 if [ -n "$cidata" ]; then
 	# id=cidata lets QMP eject it (Proxmox "detach cloud-init drive").
 	set -- "$@" -drive "id=cidata,file=${cidata},media=cdrom,readonly=on,if=ide,index=1"
