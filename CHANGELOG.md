@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 **Restarts cost less ingress.** When the edge restarts, dark nodes come
 back within a fraction of a second of it listening, and visitors get an
