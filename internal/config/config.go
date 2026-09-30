@@ -57,6 +57,10 @@ const (
 	// DefaultRenewInterval is how often ACME certificates are checked for
 	// renewal when fortress.yml sets no renew_interval.
 	DefaultRenewInterval = 4 * time.Hour
+	// DefaultTunnelGrace covers a reboot of the edge, and a dark node
+	// restarting or upgraded; maxTunnelGrace bounds it at a month.
+	DefaultTunnelGrace = 10 * time.Minute
+	maxTunnelGrace     = 720 * time.Hour
 	// The access log's defaults keep it at 24 MiB, well inside a 64 MiB
 	// data disk.
 	DefaultAccessLogMaxSize  = 8 << 20
@@ -92,7 +96,7 @@ type Config struct {
 	Disk string
 	// NTP are the time servers, host or host:port, which the clock keeps
 	// to while the edge runs (internal/clock).
-	NTP []string
+	NTP  []string
 	ACME string // ACME directory URL; empty is Let's Encrypt
 	// ACMECA is the PEM trust anchor for the directory's TLS certificate.
 	// Empty uses the system roots. Set, it is the only pool the ACME client trusts.
@@ -123,6 +127,10 @@ type Policy struct {
 	// off or on for one.
 	AccessLog AccessLog
 	Trace     Trace
+	// TunnelGrace is how long a site whose tunnel left, or that a dark
+	// node published before a boot, is answered 503 before it goes silent
+	// like any name the edge does not serve. 0 never answers it.
+	TunnelGrace time.Duration
 	// Sites are settings for one site, by the name its dark node publishes
 	// (app.example.com, *.example.com) or a name a wildcard covers.
 	Sites map[string]SitePolicy
@@ -281,12 +289,12 @@ type limitsYAML struct {
 
 // edgeConfig is fortress.yml.
 type edgeConfig struct {
-	ACME     string `yaml:"acme"`
-	ACMECA   string `yaml:"acme_ca"`
-	ClientCA string `yaml:"client_ca"`
+	ACME     string  `yaml:"acme"`
+	ACMECA   string  `yaml:"acme_ca"`
+	ClientCA string  `yaml:"client_ca"`
 	NTP      servers `yaml:"ntp"`
-	Renew    string `yaml:"renew_interval"`
-	QUIC     bool   `yaml:"quic"`
+	Renew    string  `yaml:"renew_interval"`
+	QUIC     bool    `yaml:"quic"`
 }
 
 // policyConfig is policy.yml.
@@ -299,6 +307,7 @@ type policyConfig struct {
 	AccessLogMaxSize  string              `yaml:"access_log_max_size"`
 	AccessLogMaxFiles int                 `yaml:"access_log_max_files"`
 	Trace             *traceYAML          `yaml:"trace"`
+	TunnelGrace       string              `yaml:"tunnel_grace"`
 	Sites             map[string]siteYAML `yaml:"sites"`
 }
 
@@ -319,7 +328,7 @@ type siteYAML struct {
 var (
 	edgeKeys   = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic"}
 	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
-		"trace", "sites"}
+		"trace", "sites", "tunnel_grace"}
 )
 
 // EdgeKeys lists the keys fortress.yml takes.
@@ -411,8 +420,9 @@ func CheckEdge(edge []byte) error {
 // ParsePolicy reads policy.yml. Empty is the defaults.
 func ParsePolicy(b []byte) (Policy, error) {
 	p := Policy{
-		Limits:    DefaultLimits(),
-		AccessLog: AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
+		Limits:      DefaultLimits(),
+		AccessLog:   AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
+		TunnelGrace: DefaultTunnelGrace,
 	}
 	if err := checkKeys(b, PolicyName, policyKeys, edgeKeys,
 		"belongs in "+EdgeFile+", which is baked into the ISO: bake a new one to change it"); err != nil {
@@ -440,6 +450,13 @@ func ParsePolicy(b []byte) (Policy, error) {
 	}
 	if y.Trace != nil {
 		p.Trace.TrustIncoming = y.Trace.TrustIncoming
+	}
+	if s := strings.TrimSpace(y.TunnelGrace); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d < 0 || d > maxTunnelGrace {
+			return Policy{}, fmt.Errorf("%s: tunnel_grace: want a duration from 0 (never) to 720h, such as 10m", PolicyName)
+		}
+		p.TunnelGrace = d
 	}
 	if p.Sites, err = parseSites(y.Sites); err != nil {
 		return Policy{}, err

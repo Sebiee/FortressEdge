@@ -31,7 +31,7 @@ const requestIDHeaderOut = "X-Request-Id"
 // Why frps could not proxy a request (vhost.ProxyError's stage), as
 // metrics and log lines name it.
 const (
-	reasonNoRoute = iota
+	reasonNoTunnel = iota // frps has no route for the name: its tunnel is away
 	reasonDial
 	reasonSend
 	reasonHeaderTimeout
@@ -40,7 +40,7 @@ const (
 	nReasons
 )
 
-var reasonNames = [nReasons]string{"no_route", "dial", "send", "header_timeout", "eof_headers", "eof_body"}
+var reasonNames = [nReasons]string{"no_tunnel", "dial", "send", "header_timeout", "eof_headers", "eof_body"}
 
 // The limits a request to a site can hit once it is routed. The rest
 // (connections per source, the header size) act before the edge knows
@@ -306,14 +306,28 @@ func ProxyError(r *http.Request, err error) {
 	reason := proxyReason(pe)
 	rs.failure = reasonNames[reason]
 	rs.site.proxyErrors[reason].Add(1)
-	slog.Warn("proxy error", append(attrs, "reason", rs.failure,
+	lvl := slog.LevelWarn
+	switch reason {
+	case reasonNoTunnel, reasonDial:
+		// No tunnel carries the site now: its dark node is away, or
+		// coming back. 503 with Retry-After, which clients retry, not a
+		// 404 or 502 that says the site is broken.
+		rs.rec.Header().Set("Retry-After", "1")
+		rs.rec.override = http.StatusServiceUnavailable
+		if reason == reasonNoTunnel {
+			// Expected while a dark node restarts, and a visitor can ask
+			// for it at will: counted, not a warning each time.
+			lvl = slog.LevelDebug
+		}
+	}
+	slog.Log(context.Background(), lvl, "proxy error", append(attrs, "reason", rs.failure,
 		"elapsed_ms", time.Since(rs.start).Milliseconds(), "sent", rs.rec.n, "err", pe.Err)...)
 }
 
 func proxyReason(pe *vhost.ProxyError) int {
 	switch pe.Stage {
 	case vhost.StageRoute:
-		return reasonNoRoute
+		return reasonNoTunnel
 	case vhost.StageDial:
 		return reasonDial
 	case vhost.StageSend:

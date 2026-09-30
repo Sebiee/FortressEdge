@@ -26,7 +26,9 @@ Dark node --TCP 443-->  frp over WebSocket, with a client certificate
   never its key, and signs nothing.
 - **Invisible to strangers.** Only published hostnames and the tunnel name
   are answered. A scan of the address, or a request for any other name,
-  gets no bytes back: no certificate, no error page, no version.
+  gets no bytes back: no certificate, no error page, no version. A site
+  whose dark node is away answers `503` with `Retry-After` for
+  `tunnel_grace` (10 minutes), then goes silent too.
 - **XDP filter.** Inbound traffic other than HTTP and HTTPS, and replies to
   the edge's own connections, is dropped in the kernel's fast path, with
   SYN rate limits and an address block list.
@@ -256,6 +258,7 @@ in `user-data` is read.
 | `access_log_max_size` | `8MiB` | Size at which the access log starts a new file (`KiB`, `MiB`, `GiB`) |
 | `access_log_max_files` | `3` | Access log files kept, the current one included; the oldest is deleted |
 | `trace` | `trust_incoming: false` | Whether a visitor's W3C `traceparent` is continued, or only logged as a link |
+| `tunnel_grace` | `10m` | How long a site whose dark node left, or that was published before a reboot, answers `503` before it goes silent; `0` never answers it |
 | `sites` | none | Per published name: `access_log`, `max_body_size`, `response_header_timeout` |
 
 Everything applies at once, except three limits that reboot the edge

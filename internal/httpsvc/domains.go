@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/caddyserver/certmagic"
 
@@ -37,7 +39,35 @@ type Domains struct {
 
 	certMu sync.Mutex
 	orders map[certOrder]int64 // obtains and renewals, by name and result
+
+	// held are certificates, still valid, of names no dark node publishes
+	// now: from the disk at boot, or taken when a name's last route left.
+	// For grace after that, the edge answers such a name 503, where it
+	// would otherwise close the connection: after a reboot, before the
+	// dark node is back. Only names a dark node published are ever here,
+	// and their certificates are public in CT logs anyway. Under mu.
+	held  map[string]heldCert
+	grace time.Duration
 }
+
+type heldCert struct {
+	cert  *tls.Certificate
+	since time.Time // when its tunnel left, or the edge booted
+}
+
+// SetTunnelGrace sets how long a held name is answered (policy.yml's
+// tunnel_grace).
+func (d *Domains) SetTunnelGrace(grace time.Duration) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.grace = grace
+	d.mu.Unlock()
+}
+
+// maxHeld bounds the certificates read from the disk at boot.
+const maxHeld = 4096
 
 // certOrder is one kind of certificate order's outcome for one name.
 type certOrder struct {
@@ -94,6 +124,7 @@ func (d *Domains) Domain(domain string, added bool) {
 		if cancel, ok := d.names[domain]; ok {
 			cancel()
 			delete(d.names, domain)
+			d.holdLocked(domain)
 			d.unmanageLocked(domain)
 		}
 		return
@@ -128,6 +159,80 @@ func (d *Domains) startLocked(name string) {
 			d.unmanageLocked(name)
 		}
 	}(d.magic, d.cache)
+}
+
+// holdLocked keeps name's newest cached certificate as held, to answer
+// with while its tunnel is away.
+func (d *Domains) holdLocked(name string) {
+	if d.cache == nil || name == d.tunnel {
+		return
+	}
+	var best *tls.Certificate
+	var until time.Time
+	for _, c := range d.cache.AllMatchingCertificates(name) {
+		if c.Leaf != nil && c.Leaf.NotAfter.After(until) && c.Leaf.VerifyHostname(name) == nil {
+			tc := c.Certificate
+			best, until = &tc, c.Leaf.NotAfter
+		}
+	}
+	if best != nil {
+		if d.held == nil {
+			d.held = map[string]heldCert{}
+		}
+		d.held[name] = heldCert{best, time.Now()}
+	}
+}
+
+// heldLocked is name's held certificate while the grace lasts and the
+// certificate is valid.
+func (d *Domains) heldLocked(name string) *tls.Certificate {
+	h, ok := d.held[name]
+	now := time.Now()
+	if !ok || now.Sub(h.since) >= d.grace || h.cert.Leaf == nil || !now.Before(h.cert.Leaf.NotAfter) {
+		return nil
+	}
+	return h.cert
+}
+
+// loadHeld reads the certificates the disk holds from magic's issuer, of
+// exact names, still valid, into held: the names dark nodes published
+// before this boot.
+func (d *Domains) loadHeld(ctx context.Context, magic *certmagic.Config) {
+	if len(magic.Issuers) == 0 {
+		return
+	}
+	issuer := magic.Issuers[0].IssuerKey()
+	keys, err := magic.Storage.List(ctx, certmagic.StorageKeys.CertsPrefix(issuer), false)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("acme: listing certificates", "err", err)
+		}
+		return
+	}
+	held := map[string]heldCert{}
+	boot := time.Now()
+	for _, k := range keys[:min(len(keys), maxHeld)] {
+		name := path.Base(k)
+		if name == d.tunnel || !issueable(name) {
+			continue
+		}
+		crt, err1 := magic.Storage.Load(ctx, certmagic.StorageKeys.SiteCert(issuer, name))
+		key, err2 := magic.Storage.Load(ctx, certmagic.StorageKeys.SitePrivateKey(issuer, name))
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		c, err := tls.X509KeyPair(crt, key)
+		if err != nil || c.Leaf == nil || !time.Now().Before(c.Leaf.NotAfter) || c.Leaf.VerifyHostname(name) != nil {
+			continue
+		}
+		held[name] = heldCert{&c, boot}
+	}
+	d.mu.Lock()
+	d.held = held
+	d.mu.Unlock()
+	if len(held) > 0 {
+		slog.Info("acme: sites to answer 503 until their tunnels are back, or tunnel_grace is up", "names", len(held))
+	}
 }
 
 // unmanageLocked drops name from the cache, so the timer stops renewing it.
@@ -179,6 +284,7 @@ func (d *Domains) acme(ctx context.Context, cfg config.Config) (*certmagic.Confi
 		return nil, err
 	}
 	magic.OnEvent = d.certEvent
+	d.loadHeld(ctx, magic)
 	if err := manage(ctx, magic, cache, cfg.Tunnel); err != nil {
 		return nil, err
 	}
@@ -219,7 +325,9 @@ func (d *Domains) Routed(host string) bool {
 // Route returns the published name frps routes host by, matched the way
 // its router matches: the exact name, then each wildcard parent down to
 // three labels (a.b.example.com tries *.b.example.com, then
-// *.example.com), then a catch-all "*".
+// *.example.com), then a catch-all "*". A name with a held certificate
+// and no route is its own: frps finds no tunnel for it, and the request
+// is answered 503.
 func (d *Domains) Route(host string) (string, bool) {
 	if d == nil {
 		return "", false
@@ -243,6 +351,9 @@ func (d *Domains) Route(host string) (string, bool) {
 	}
 	if d.hasLocked("*") {
 		return "*", true
+	}
+	if d.heldLocked(host) != nil {
+		return host, true
 	}
 	return "", false
 }
@@ -284,10 +395,26 @@ func (d *Domains) certificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 	if magic == nil {
 		return nil, fmt.Errorf("acme: not ready")
 	}
-	if !d.Allowed(hello.ServerName) {
-		return nil, fmt.Errorf("acme: %s is not registered", hello.ServerName)
+	if d.Allowed(hello.ServerName) {
+		c, err := magic.GetCertificate(hello)
+		if err == nil {
+			return c, nil
+		}
+		if h := d.heldCert(hello.ServerName); h != nil {
+			return h, nil // a new certificate on its way: the held one meanwhile
+		}
+		return nil, err
 	}
-	return magic.GetCertificate(hello)
+	if h := d.heldCert(hello.ServerName); h != nil {
+		return h, nil
+	}
+	return nil, fmt.Errorf("acme: %s is not registered", hello.ServerName)
+}
+
+func (d *Domains) heldCert(name string) *tls.Certificate {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.heldLocked(hostname(name))
 }
 
 func issueable(name string) bool {

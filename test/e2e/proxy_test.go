@@ -361,13 +361,14 @@ func TestProxyingToDarkNodes(t *testing.T) {
 			assert.GreaterOrEqual(t, took, 4500*time.Millisecond, "5s, not sooner")
 			assert.Less(t, took, 9*time.Second, "5s, not frp's 10s nor the 60s default")
 		}},
-		{"a site goes silent when its dark node leaves and serves again when it returns", func(t *testing.T) {
+		{"a site whose dark node left answers 503 with Retry-After, and serves again when it returns", func(t *testing.T) {
 			stop := vm.Tunnel(t, web, "wss", "flap.example.com", caFile, node1Crt, node1Key)
 			stop()
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
-				web.CloseIdleConnections()
-				_, _, err := lab.Get(web, "https://flap.example.com/")
-				assert.Error(c, err)
+				resp, _, err := lab.Get(web, "https://flap.example.com/")
+				require.NoError(c, err, "the edge keeps answering a name it has a certificate for")
+				assert.Equal(c, http.StatusServiceUnavailable, resp.StatusCode)
+				assert.Equal(c, "1", resp.Header.Get("Retry-After"))
 			}, lab.Until(t), lab.Tick)
 			vm.Tunnel(t, web, "wss", "flap.example.com", caFile, node1Crt, node1Key)
 		}},

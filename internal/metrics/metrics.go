@@ -123,8 +123,42 @@ func (h *Histogram) Write(w *Writer, name string, labels ...string) {
 	w.Int(name+"_count", cum, labels...)
 }
 
-// Started is when the process started: at boot, on the edge.
+// Started is when the process started: at boot, on the edge. Its wall
+// time is from before boot steps the clock; since(Started) is exact, as
+// Go measures it on the monotonic clock.
 var Started = time.Now()
+
+var ready atomic.Pointer[time.Time]
+
+// MarkReady records the first moment the edge accepts connections.
+func MarkReady() {
+	now := time.Now()
+	ready.CompareAndSwap(nil, &now)
+}
+
+// since is when something that started d ago started, by the clock as it
+// is now: stepped, if boot stepped it since.
+func since(d time.Duration) float64 {
+	return float64(time.Now().Add(-d).UnixMilli()) / 1e3
+}
+
+// BootTime is when the process started, by the clock as it is now.
+func BootTime() float64 { return since(time.Since(Started)) }
+
+// ReadyTime is when the edge first accepted connections, by the clock as
+// it is now, or false before then.
+func ReadyTime() (float64, bool) {
+	r := ready.Load()
+	if r == nil {
+		return 0, false
+	}
+	return since(time.Since(*r)), true
+}
+
+// KernelBootTime is when the kernel started, uptime seconds ago.
+func KernelBootTime(uptime float64) float64 {
+	return since(time.Duration(uptime * float64(time.Second)))
+}
 
 // Version is the edge's module version as the build stamped it: a tag
 // such as v0.3.0, a pseudo-version between tags, or (devel).

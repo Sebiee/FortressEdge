@@ -68,6 +68,11 @@ var (
 	tapFree = make(chan struct{}, 1)
 )
 
+// HasTap reports whether a -tap device was given: VMs that UseTap are then
+// peers of the host's TCP, not behind QEMU's user-mode network, which
+// answers for them while they are down.
+func HasTap() bool { return *tapDev != "" }
+
 // TapHost is the host's address on the -tap device, and TapGuest a VM's.
 const (
 	TapHost  = "10.77.0.1"
@@ -343,6 +348,13 @@ func (vm *VM) PowerDown(t *testing.T) {
 	require.NoError(t, vm.err, "qemu exit status")
 }
 
+// Reset resets the machine, as a hard reset does: no ACPI, no shutdown,
+// nothing closed. QEMU keeps running and the edge boots again.
+func (vm *VM) Reset(t *testing.T) {
+	t.Helper()
+	vm.monitor(t, `{"execute":"system_reset"}`)
+}
+
 func (vm *VM) exited() bool {
 	select {
 	case <-vm.done:
@@ -615,6 +627,9 @@ func (vm *VM) Publish(t *testing.T, proto, caFile, crt, key string, port int, do
 		Transport: v1.ClientTransportConfig{
 			Protocol:     proto,
 			WireProtocol: "v2",
+			// fortresskube's defaults.
+			DeadServerTimeout: 3,
+			DialServerTimeout: 2,
 			TLS: v1.TLSClientConfig{TLSConfig: v1.TLSConfig{
 				CertFile: crt, KeyFile: key, TrustedCaFile: caFile, ServerName: Tunnel,
 			}},

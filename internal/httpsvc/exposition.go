@@ -70,7 +70,7 @@ func (st *httpStats) writeMetrics(w *metrics.Writer) {
 		w.Int("fortressedge_http_requests_in_flight", s.inFlight.Load(), "site", names[i])
 	}
 	w.Family("fortressedge_proxy_errors_total", "counter",
-		"Site requests frps could not proxy, by site and reason: no_route, dial, send, header_timeout, eof_headers, eof_body.")
+		"Site requests frps could not proxy, by site and reason: no_tunnel, dial, send, header_timeout, eof_headers, eof_body.")
 	for i, s := range sites {
 		for r := range nReasons {
 			if n := s.proxyErrors[r].Load(); n > 0 {

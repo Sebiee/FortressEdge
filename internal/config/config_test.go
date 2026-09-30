@@ -328,6 +328,22 @@ func TestParseSites(t *testing.T) {
 	}
 }
 
+func TestParseTunnelGrace(t *testing.T) {
+	if p, err := ParsePolicy(nil); err != nil || p.TunnelGrace != DefaultTunnelGrace {
+		t.Fatalf("default: %s %v", p.TunnelGrace, err)
+	}
+	for in, want := range map[string]time.Duration{"0": 0, "1h": time.Hour, "720h": 720 * time.Hour} {
+		if p, err := ParsePolicy([]byte("tunnel_grace: " + in + "\n")); err != nil || p.TunnelGrace != want {
+			t.Errorf("%s: %s %v", in, p.TunnelGrace, err)
+		}
+	}
+	for _, bad := range []string{"-1m", "721h", "soon"} {
+		if _, err := ParsePolicy([]byte("tunnel_grace: " + bad + "\n")); err == nil {
+			t.Errorf("%s: want error", bad)
+		}
+	}
+}
+
 func TestParseTrace(t *testing.T) {
 	if p, err := ParsePolicy(nil); err != nil || p.Trace.TrustIncoming {
 		t.Fatalf("default: %+v %v", p.Trace, err)

@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+**Restarts cost less ingress.** When the edge restarts, dark nodes come
+back within a fraction of a second of it listening, and visitors get an
+answer meanwhile, not a closed connection.
+
+- A site whose dark node is away answers `503 Service Unavailable`
+  with `Retry-After: 1` and an empty body, for `tunnel_grace`, a new
+  policy key (default `10m`, `0` turns it off), then goes silent like any
+  name the edge does not serve. It covers names whose dark node left, and
+  after a boot the names whose certificates are on the data disk, until
+  their dark node is back. Only names a dark node published, with a valid
+  certificate, are answered. The access log says `error: no_tunnel`.
+- The proxy error reason `no_route` is now `no_tunnel`, answered 503 and
+  logged at debug; `dial` is answered 503 with `Retry-After` too, not 502.
+- The ACPI power button powers the edge off in about 1.25 seconds: a
+  shutdown waits a second for requests in flight, not 30. The edge found
+  the button's device only when its node was the first to appear, so a
+  press was sometimes ignored and Proxmox fell back to stop after 60
+  seconds; it now waits for the button by name.
+- `fortresskube` reconnects fast: every 250 to 375 ms for a minute after
+  it loses the edge, then backing off to 20 s as before; a refused login
+  backs off at once. New defaults for keys its config leaves out:
+  `transport.deadServerTimeout = 3`, `transport.dialServerTimeout = 2`,
+  `loginFailExit = false` (see [kubernetes.md](docs/kubernetes.md)).
+- The frp fork: `transport.deadServerTimeout` (frpc, default 0, off) drops
+  a TCP tunnel whose server stopped acknowledging, with TCP_USER_TIMEOUT
+  and one-second keepalives. frpc no longer drops a work connection that
+  arrives just before its proxy has started, which answered the first
+  request after a reconnect 502. Its per-client logger is safe for
+  concurrent use; a reconnect raced the control's goroutines on it.
+- `fortressedge_boot_time_seconds` is by the clock as boot set it; it
+  moved by the boot step. New: `fortressedge_kernel_boot_time_seconds`
+  and `fortressedge_ready_time_seconds`, when the edge first accepts
+  connections.
+
 ## 0.4.0
 
 **The clock stays in step.** Boot still steps the clock once; the edge

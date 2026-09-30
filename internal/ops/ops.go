@@ -474,8 +474,18 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	mw := metrics.NewWriter(w)
 	mw.Family("fortressedge_build_info", "gauge", "The edge's build: 1, with its version and Go's as labels.")
 	mw.Int("fortressedge_build_info", 1, "version", metrics.Version(), "go_version", runtime.Version())
+	// Times by the clock as it is now, which boot may have stepped since:
+	// each is now less the time since, measured on the monotonic clock.
 	mw.Family("fortressedge_boot_time_seconds", "gauge", "When the edge started, in Unix seconds. Counters start at zero then.")
-	mw.Sample("fortressedge_boot_time_seconds", float64(metrics.Started.UnixMilli())/1e3)
+	mw.Sample("fortressedge_boot_time_seconds", metrics.BootTime())
+	if up := uptime(); up > 0 {
+		mw.Family("fortressedge_kernel_boot_time_seconds", "gauge", "When the kernel started, in Unix seconds.")
+		mw.Sample("fortressedge_kernel_boot_time_seconds", metrics.KernelBootTime(up))
+	}
+	if at, ok := metrics.ReadyTime(); ok {
+		mw.Family("fortressedge_ready_time_seconds", "gauge", "When the edge first accepted connections on 80 and 443, dark nodes' among them, in Unix seconds.")
+		mw.Sample("fortressedge_ready_time_seconds", at)
+	}
 	if h.metrics != nil {
 		h.metrics(mw)
 	}

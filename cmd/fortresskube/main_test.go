@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/fatedier/frp/pkg/config"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,4 +59,37 @@ func TestPublished(t *testing.T) {
 		names = append(names, h.Name)
 	}
 	require.Equal(t, []string{"app.example.com", "blog.example.com", "implicit-ns.example.com"}, names)
+}
+
+// The file's own settings stand; the keys it leaves out get
+// fortresskube's defaults, not frpc's.
+func TestTunnelDefaults(t *testing.T) {
+	dir := t.TempDir()
+	load := func(toml string) *v1.ClientCommonConfig {
+		t.Helper()
+		path := filepath.Join(dir, "frpc.toml")
+		if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := config.LoadClientConfigResult(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var file v1.ClientConfig
+		if err := config.LoadConfigureFromFile(path, &file, false); err != nil {
+			t.Fatal(err)
+		}
+		tunnelDefaults(res.Common, &file.ClientCommonConfig)
+		return res.Common
+	}
+	c := load("serverAddr = \"edge.example.com\"\n")
+	if c.Transport.DeadServerTimeout != deadServerTimeout || c.Transport.DialServerTimeout != dialServerTimeout ||
+		c.LoginFailExit == nil || *c.LoginFailExit {
+		t.Fatalf("defaults: %+v loginFailExit=%v", c.Transport, c.LoginFailExit)
+	}
+	c = load("serverAddr = \"edge.example.com\"\nloginFailExit = true\n" +
+		"transport.deadServerTimeout = 10\ntransport.dialServerTimeout = 5\n")
+	if c.Transport.DeadServerTimeout != 10 || c.Transport.DialServerTimeout != 5 || !*c.LoginFailExit {
+		t.Fatalf("the file's own: %+v loginFailExit=%v", c.Transport, *c.LoginFailExit)
+	}
 }

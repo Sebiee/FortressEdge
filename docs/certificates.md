@@ -98,7 +98,17 @@ no bytes back:
   edge sends a certificate or an alert.
 - Plain HTTP for another name, and plain HTTP on the TLS port, are closed
   without a response. Port 80 redirects only the names HTTPS serves.
-- A name whose dark node left goes silent the same way.
+- A name whose dark node left goes silent the same way, once
+  `tunnel_grace` (in the policy, 10 minutes by default) is up.
+
+Until then, and for that long after a boot for the names whose
+certificates are on the data disk, the edge answers such a name with its
+last certificate and `503 Service Unavailable`, `Retry-After: 1`, and an
+empty body, so browsers and HTTP clients retry while a dark node or the
+edge restarts. Only names a dark node published, whose certificates are
+still valid, are answered: they are public in Certificate Transparency
+logs already, and a name nobody published stays silent. `tunnel_grace:
+0` turns this off.
 
 A published name whose origin does not answer gets `502`, or `504` after
 a minute without response headers (`response_header_timeout` in the

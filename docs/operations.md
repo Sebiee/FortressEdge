@@ -97,8 +97,8 @@ response bytes the visitor already had. `reason` is where it failed:
 
 | `reason` | The visitor gets | Usually |
 | --- | --- | --- |
-| `no_route` | `404` | the dark node unpublished the name while the request came in |
-| `dial` | `502` | no work connection to the dark node: it is gone, or its tunnel is broken |
+| `no_tunnel` | `503`, `Retry-After: 1` | no dark node publishes the name now: its tunnel is away, and the name is within `tunnel_grace` (see [certificates.md](certificates.md#which-names-get-an-answer)); logged at debug, as it is expected while a dark node or the edge restarts |
+| `dial` | `503`, `Retry-After: 1` | no work connection to the dark node: its tunnel is broken, or going |
 | `send` | `502` | the request could not be written to the dark node |
 | `header_timeout` | `504` | the origin sent no response headers within `response_header_timeout` |
 | `eof_headers` | `502` | the origin closed the connection before its headers: down, or restarting |
@@ -267,6 +267,7 @@ names visitors make up.
 | --- | --- | --- |
 | `fortressedge_build_info` | `version`, `go_version` | 1 |
 | `fortressedge_boot_time_seconds` | | when the edge started |
+| `fortressedge_kernel_boot_time_seconds`, `fortressedge_ready_time_seconds` | | when the kernel started; when the edge first accepted connections, dark nodes' among them. With the boot time, a restart's breakdown. All three are by the clock as boot set it |
 | `fortressedge_http_requests_total` | `site`, `code_class` | site requests by status class |
 | `fortressedge_http_request_duration_seconds` | `site` | histogram of the time to the response headers; buckets 5ms to 60s |
 | `fortressedge_http_request_seconds_total` | `site` | requests' whole time, bodies and WebSockets included |
@@ -461,6 +462,16 @@ when up and red when not. The log scrolls below. A config that cannot
 boot (see [provisioning.md](provisioning.md#when-an-edge-cannot-start))
 stays on the console with how to fix it until the power button; any
 other failed boot prints the error and reboots after 30 seconds.
+
+## Shutdown
+
+The ACPI power button (Proxmox's Shutdown and Reboot) stops the edge:
+it waits up to a second for requests in flight, closes every connection,
+tunnels included, so dark nodes start reconnecting at once, and powers
+off, about a second and a quarter after the press. Streams and requests
+still running then are cut, as the reboot would cut them anyway. The
+edge watches the button from early in boot; a press before that, in the
+first second or two after power-on, is lost, as on any machine.
 
 ## Why mutual TLS and not SSO
 

@@ -80,6 +80,23 @@ roots for Let's Encrypt, or an internal ACME server's root. Without it,
 `fortresskube` checks the edge against the system roots;
 `transport.tls.insecureSkipVerify = true` turns the check off.
 
+**Coming back.** `fortresskube` is built to find a lost edge fast and
+get back to it by itself. Where frpc's defaults suit a process on a
+laptop, its own are, for keys the config file leaves out:
+
+| Key | fortresskube | frpc | Why |
+| --- | --- | --- | --- |
+| `transport.deadServerTimeout` | `3` | `0` (off) | A tunnel whose edge went away without closing it (a reset, a crash, a network cut) is dropped after 3 seconds without acknowledgments: TCP_USER_TIMEOUT, and keepalive probes each second while idle. A busy tunnel is not affected, however long its queue: acknowledgments keep coming. Raise it for a link that goes silent for seconds and recovers |
+| `transport.dialServerTimeout` | `2` | `10` | A dial into an edge that is still booting is given up soon, so the next finds it up |
+| `loginFailExit` | `false` | `true` | A first login that fails is retried like any other, never an exit into a crash loop |
+
+After it loses the edge, it dials every quarter to three eighths of a
+second for a minute, then backs off to every 20 seconds; a login the edge
+refuses backs off at once. `transport.deadServerTimeout` is a key of
+FortressEdge's frp fork, which stock frpc does not know; the rest are
+frp's. For QUIC, set `transport.quic.maxIdleTimeout` and
+`keepalivePeriod` instead.
+
 **Work connections.** Each site request rides a work connection, a
 stream in the tunnel that frpc opens when the edge asks for one. With
 `transport.poolCount = N`, frpc opens N ahead, so a burst does not wait

@@ -73,6 +73,13 @@ func run() error {
 		return err
 	}
 	common := res.Common
+	if !res.IsLegacyFormat {
+		// What the file itself sets, before frp's defaults fill the rest.
+		var file v1.ClientConfig
+		if err := config.LoadConfigureFromFile(*cfgPath, &file, false); err == nil {
+			tunnelDefaults(common, &file.ClientCommonConfig)
+		}
+	}
 	pxs, vis := config.FilterClientConfigurers(common, res.Proxies, res.Visitors)
 	if warn, err := validation.ValidateAllClientConfig(common, config.CompleteProxyConfigurers(pxs), config.CompleteVisitorConfigurers(vis), nil); err != nil {
 		return err
@@ -175,6 +182,36 @@ type httpRoute struct {
 // ponytail: a hostname outside the Gateway listener's hostname is still
 // published and gets a certificate, then a 404 from the Gateway; intersect
 // with the listeners if that ever matters.
+// Where frpc's defaults suit a process on a laptop, fortresskube's suit a
+// tunnel that must come back by itself, fast, when the edge restarts:
+const (
+	// deadServerTimeout finds an edge that went away without closing the
+	// tunnel (a reset, a crash, a network cut) in seconds, not minutes.
+	deadServerTimeout = 3
+	// dialServerTimeout gives up on a dial into an edge whose machine is
+	// still starting, whose SYNs go nowhere, so the next dial can find it
+	// up. Two seconds are three round trips of TCP, TLS, and the WebSocket
+	// upgrade over a slow intercontinental link.
+	dialServerTimeout = 2
+)
+
+// tunnelDefaults sets fortresskube's defaults in common for the keys the
+// config file (file) leaves out: the dead-server and dial timeouts, and
+// loginFailExit false, so a first login that fails is retried like any,
+// instead of exiting into a crash loop.
+func tunnelDefaults(common, file *v1.ClientCommonConfig) {
+	if file.Transport.DeadServerTimeout == 0 {
+		common.Transport.DeadServerTimeout = deadServerTimeout
+	}
+	if file.Transport.DialServerTimeout == 0 {
+		common.Transport.DialServerTimeout = dialServerTimeout
+	}
+	if file.LoginFailExit == nil {
+		f := false
+		common.LoginFailExit = &f
+	}
+}
+
 func published(objs []any, gwNS, gwName, host string, port int) []v1.ProxyConfigurer {
 	names := map[string]bool{}
 	for _, o := range objs {

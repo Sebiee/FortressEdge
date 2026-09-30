@@ -71,13 +71,18 @@ func TestCertificatesFromAnACMEServer(t *testing.T) {
 		assert.Equal(t, before, pebble.Issued(), "nothing issued after the reboot")
 	})
 
-	step(t, "a name whose dark node left is not answered, though its certificate is on disk", func(t *testing.T) {
+	step(t, "a name whose dark node left answers 503 with its certificate; one never published, nothing", func(t *testing.T) {
 		stop := vm.Tunnel(t, web, "wss", "gone.example.com", pebble.Roots, nodeCrt, nodeKey)
+		serial := lab.Serial(t, web, "https://gone.example.com/")
 		stop()
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, _, err := lab.Get(web, "https://gone.example.com/")
-			assert.Error(c, err, "TLS handshake for a name no node publishes")
+			resp, _, err := lab.Get(web, "https://gone.example.com/")
+			require.NoError(c, err)
+			assert.Equal(c, http.StatusServiceUnavailable, resp.StatusCode)
+			assert.Equal(c, serial, resp.TLS.PeerCertificates[0].SerialNumber.String(), "the same certificate")
 		}, lab.Until(t), lab.Tick)
+		_, _, err := lab.Get(web, "https://never.example.com/")
+		assert.Error(t, err, "TLS handshake for a name no node ever published")
 	})
 
 	step(t, "when the ACME server asks for early renewal (ARI), the next check renews, once", func(t *testing.T) {

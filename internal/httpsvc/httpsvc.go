@@ -26,7 +26,11 @@ import (
 	"github.com/Sebiee/fortressedge/internal/ops"
 )
 
-const drainTimeout = 30 * time.Second
+// drainTimeout is how long a shutdown waits for requests in flight before
+// it closes every connection, tunnels and streams included: Proxmox's
+// Shutdown and Reboot wait for the machine to power off, and a dark node
+// reconnects to the edge as soon as its tunnel closes.
+const drainTimeout = time.Second
 
 // Handler sends the tunnel name to the ops API and frp control, and a host
 // that route matches to vhost, which is frps's site proxy in this process.
@@ -198,6 +202,7 @@ type Extras struct {
 // policy.yml cfg holds, as stored; apply stores and applies a new one.
 func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), more Extras) error {
 	st := &httpStats{}
+	domains.SetTunnelGrace(cfg.TunnelGrace)
 	acc := &accessLogs{st: st}
 	if err := acc.apply(cfg.Policy); err != nil {
 		return err
@@ -234,6 +239,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			if err == nil && !out.Reboot {
 				oh.SetConfig(out.Cfg)
 				vis.update(out.Cfg.Policy)
+				domains.SetTunnelGrace(out.Cfg.TunnelGrace)
 				if aerr := acc.apply(out.Cfg.Policy); aerr != nil {
 					slog.Error("access log", "err", aerr)
 				}
@@ -367,6 +373,7 @@ func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visit
 			errc <- s.Serve(ln)
 		}(s, ln)
 	}
+	metrics.MarkReady()
 	slog.Info("fortressedge: listening")
 	select {
 	case err := <-errc:
