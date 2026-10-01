@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Boot's clock step no longer waits out a lost NTP answer before the
+  edge listens. It asked each server once and waited for every answer or
+  its 2-second timeout, then, without a majority, a second before asking
+  all again: a reply lost just as the network came up cost a second or
+  two of ingress after a reboot. It now steps as soon as the answers in
+  hand agree, a majority of the servers, re-asks only the servers that
+  have not answered, every 250 ms, and looks the names up together.
+
 ## 0.5.1
 
 - `fortresskube` finds a restarting edge up to a second sooner. A

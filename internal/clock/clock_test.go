@@ -366,11 +366,53 @@ func TestWriteMetrics(t *testing.T) {
 		"fortressedge_clock_boot_step_seconds 0.001\n",
 		"fortressedge_clock_poll_seconds 64\n",
 		`fortressedge_clock_stratum{server="ntp11.metas.ch"} 1`,
-		`fortressedge_ntp_queries_total{server="ntp13.metas.ch",result="error"} 1`,
+		`fortressedge_ntp_queries_total{server="ntp11.metas.ch",result="ok"} 1`,
 		`fortressedge_ntp_round_trip_seconds{server="ntp12.metas.ch"} 0.006`,
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("no %q in\n%s", want, b.String())
 		}
+	}
+}
+
+// Boot decides once a majority has answered and agrees, without waiting
+// for a server whose answer is lost; one that has not answered is asked
+// again soon, and one that has is not asked again.
+func TestSyncDoesNotWaitForStragglers(t *testing.T) {
+	var mu sync.Mutex
+	asked := map[string]int{}
+	c, k := testClock(metas, servers{
+		"192.0.2.1:123": steady(2*time.Millisecond, 3*time.Millisecond),
+		"192.0.2.2:123": func(i int) (*ntp.Response, error) {
+			mu.Lock()
+			asked["ntp12"]++
+			mu.Unlock()
+			if i == 0 { // the first answer is lost
+				return nil, errors.New("i/o timeout")
+			}
+			return answer(2*time.Millisecond, 3*time.Millisecond), nil
+		},
+		"192.0.2.3:123": func(int) (*ntp.Response, error) {
+			time.Sleep(queryTimeout) // never answers within the timeout
+			return nil, errors.New("i/o timeout")
+		},
+	})
+	start := time.Now()
+	if err := c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("took %s: boot waited for a silent server", took)
+	}
+	if len(k.steps) != 1 || !near(k.steps[0], 2*time.Millisecond, time.Microsecond) {
+		t.Fatalf("steps %v", k.steps)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if asked["ntp12"] != 2 {
+		t.Fatalf("ntp12 asked %d times, want 2: once lost, once again", asked["ntp12"])
+	}
+	if n := c.st.queries[queryKey{"ntp11.metas.ch", "ok"}]; n != 1 {
+		t.Fatalf("ntp11, which answered, asked %d times", n)
 	}
 }

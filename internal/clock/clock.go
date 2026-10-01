@@ -176,25 +176,71 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // Sync steps the clock to the servers' time, retrying each second until
 // they agree or ctx ends. It is boot's: one sample a server, for speed.
+//
+// Boot waits on it before anything listens, so it decides as soon as the
+// answers in hand agree, a majority of the servers, not once every
+// server has answered or timed out: a lost packet would hold boot for
+// queryTimeout. A server that has not answered is asked again every
+// bootRetry; the answers already in are kept, so a server that did
+// answer is not asked again within seconds, which ntpd servers answer
+// with a kiss of death.
 func (c *Clock) Sync(ctx context.Context) error {
-	for {
-		sel, err := c.poll(ctx, 1)
-		if err == nil {
-			if err := c.kern.step(sel.offset); err != nil {
-				return fmt.Errorf("clock: step: %w", err)
+	have := map[string]candidate{} // a valid answer, by address
+	pending := map[string]bool{}   // asked, not answered yet
+	// Room for every request out at once, so none blocks after Sync has
+	// returned: at most one per address.
+	results := make(chan candidate, len(c.servers)*poolMembers+1)
+	ask := func() (n int) {
+		srcs, n := c.sources(ctx)
+		for _, s := range srcs {
+			if _, ok := have[s.addr]; ok || pending[s.addr] || len(pending) >= cap(results)-1 {
+				continue
 			}
-			c.record(sel, time.Now())
-			c.mu.Lock()
-			c.st.bootStep = sel.offset
-			c.mu.Unlock()
-			slog.Info("clock synced", "server", sel.server, "offset", sel.offset.Round(time.Microsecond),
-				"servers", len(c.servers))
-			return nil
+			pending[s.addr] = true
+			go func() { results <- candidate{s, c.measure(ctx, s, 1)} }()
 		}
-		if !c.sleep(ctx, time.Second) {
-			return fmt.Errorf("clock: %w", err)
+		return n
+	}
+	n := ask()
+	retry := time.NewTicker(bootRetry)
+	defer retry.Stop()
+	for {
+		if agree, off, ok := intersect(slices.Collect(maps.Values(have)), n); ok {
+			c.falsetickers(agree, off)
+			return c.bootStep(combine(agree))
+		}
+		select {
+		case r := <-results:
+			delete(pending, r.addr)
+			if r.resp != nil {
+				have[r.addr] = r
+				c.mu.Lock()
+				c.st.rtt[r.name] = r.resp.RTT
+				c.mu.Unlock()
+			}
+		case <-retry.C:
+			n = ask()
+		case <-ctx.Done():
+			return fmt.Errorf("clock: %w: %d of %d answered", errNoAgreement, len(have), n)
 		}
 	}
+}
+
+// bootRetry is how soon boot asks again the servers that have not
+// answered.
+const bootRetry = 250 * time.Millisecond
+
+func (c *Clock) bootStep(sel selection) error {
+	if err := c.kern.step(sel.offset); err != nil {
+		return fmt.Errorf("clock: step: %w", err)
+	}
+	c.record(sel, time.Now())
+	c.mu.Lock()
+	c.st.bootStep = sel.offset
+	c.mu.Unlock()
+	slog.Info("clock synced", "server", sel.server, "offset", sel.offset.Round(time.Microsecond),
+		"servers", len(c.servers))
+	return nil
 }
 
 // Run polls and corrects the clock until ctx ends.
@@ -455,26 +501,39 @@ func (c *Clock) falsetickers(agree, off []candidate) {
 
 // sources resolves the configured servers. n is how many there are,
 // answering or not, which is what a majority is counted of.
+//
+// The lookups run together: one slow resolver answer holds them once, not
+// once per server.
 func (c *Clock) sources(ctx context.Context) (srcs []source, n int) {
-	for _, s := range c.servers {
-		host, port, err := net.SplitHostPort(s)
-		if err != nil {
-			host, port = s, "123"
-		}
-		pool := host == "pool.ntp.org" || strings.HasSuffix(host, ".pool.ntp.org")
-		ips, err := c.resolve(ctx, host)
-		if err != nil || len(ips) == 0 {
-			n++
-			c.count(s, "dns")
-			continue
-		}
-		if !pool {
-			ips = ips[:1]
-		}
-		for _, ip := range ips[:min(len(ips), poolMembers)] {
-			srcs = append(srcs, source{s, net.JoinHostPort(ip.String(), port)})
-			n++
-		}
+	type looked struct {
+		srcs []source // nil when the name did not resolve
+	}
+	out := make([]looked, len(c.servers))
+	var wg sync.WaitGroup
+	for i, s := range c.servers {
+		wg.Go(func() {
+			host, port, err := net.SplitHostPort(s)
+			if err != nil {
+				host, port = s, "123"
+			}
+			pool := host == "pool.ntp.org" || strings.HasSuffix(host, ".pool.ntp.org")
+			ips, err := c.resolve(ctx, host)
+			if err != nil || len(ips) == 0 {
+				c.count(s, "dns")
+				return
+			}
+			if !pool {
+				ips = ips[:1]
+			}
+			for _, ip := range ips[:min(len(ips), poolMembers)] {
+				out[i].srcs = append(out[i].srcs, source{s, net.JoinHostPort(ip.String(), port)})
+			}
+		})
+	}
+	wg.Wait()
+	for _, l := range out {
+		srcs = append(srcs, l.srcs...)
+		n += max(len(l.srcs), 1) // a name that did not resolve still counts
 	}
 	return srcs, n
 }
