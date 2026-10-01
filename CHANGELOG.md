@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
 - A first ARP request that goes unanswered no longer holds a reboot a
   second. Boot waits on its clock sync before the edge listens, and Linux
