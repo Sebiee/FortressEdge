@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
 - `fortresskube` finds a restarting edge up to a second sooner. A
   connection attempt sent while the edge's machine is down is lost, and
