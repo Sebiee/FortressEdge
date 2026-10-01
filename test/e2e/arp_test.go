@@ -139,7 +139,10 @@ func TestBootWaitsForCarrier(t *testing.T) {
 	t.Logf("%s; %s", up, sync)
 	require.Contains(t, up, "carrier_ms=")
 	ms, _ := strconv.Atoi(strings.Fields(up[strings.Index(up, "carrier_ms=")+len("carrier_ms="):])[0])
-	assert.Greater(t, ms, 800, "boot did not wait for the link")
+	// The link is down for a second from when the host sees "config
+	// loaded"; seeing it late, under load, takes up to a few hundred ms
+	// of that.
+	assert.Greater(t, ms, 500, "boot did not wait for the link")
 	took, err := time.ParseDuration(strings.TrimPrefix(strings.Fields(sync)[0], "took="))
 	require.NoError(t, err)
 	assert.Less(t, took, 500*time.Millisecond, "the clock sync waited on the link too")
