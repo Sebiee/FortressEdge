@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2
 
 - Boot's clock step no longer waits out a lost NTP answer before the
   edge listens. It asked each server once and waited for every answer or
