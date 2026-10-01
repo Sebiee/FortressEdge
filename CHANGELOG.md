@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - Several frpc can publish the same names: all tunnels of one node
   certificate (`node/<name>`) are one group, and the edge spreads each
