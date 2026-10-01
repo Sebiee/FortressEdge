@@ -335,9 +335,10 @@ func TestEdgeThatCannotStart(t *testing.T) {
 				e.VM.ISO = lab.ReleaseISO()
 			}
 			e.VM.Restart(t)
-			out := e.VM.Console(t, "cannot start")
+			e.VM.Console(t, "cannot start")
+			// Each in full: the console can be read halfway through a line.
 			for _, w := range tc.want {
-				assert.Contains(t, out, w)
+				e.VM.Console(t, w)
 			}
 			e.VM.PowerDown(t)
 		})

@@ -355,6 +355,24 @@ func (vm *VM) Reset(t *testing.T) {
 	vm.monitor(t, `{"execute":"system_reset"}`)
 }
 
+// SetLink takes the machine's network link down or up, as a cable pulled
+// or plugged: its NIC loses or regains carrier.
+//
+// Right after Restart, QEMU's monitor may not listen yet: it is tried
+// until it does.
+func (vm *VM) SetLink(t *testing.T, up bool) {
+	t.Helper()
+	cmd := []byte(fmt.Sprintf(`{"execute":"set_link","arguments":{"name":"n0","up":%t}}`, up))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		mon, err := qmp.NewSocketMonitor("unix", vm.sock, Attempt)
+		require.NoError(c, err)
+		require.NoError(c, mon.Connect())
+		defer mon.Disconnect()
+		_, err = mon.Run(cmd)
+		require.NoError(c, err)
+	}, Until(t), 10*time.Millisecond)
+}
+
 func (vm *VM) exited() bool {
 	select {
 	case <-vm.done:
@@ -376,6 +394,15 @@ func (vm *VM) monitor(t *testing.T, cmd string) {
 
 // Console waits until vm's console shows want, and returns all it shows.
 // QEMU exiting first fails at once.
+// ConsoleCount is how many times vm's console has shown s, across its
+// boots: the serial log keeps every boot's lines.
+func (vm *VM) ConsoleCount(t *testing.T, s string) int {
+	t.Helper()
+	b, err := os.ReadFile(vm.serial)
+	require.NoError(t, err)
+	return strings.Count(string(b), s)
+}
+
 func (vm *VM) Console(t *testing.T, want string) string {
 	t.Helper()
 	for {

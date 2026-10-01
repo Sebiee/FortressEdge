@@ -149,7 +149,8 @@ func run() error {
 	}
 	cfg.ClientCAPath = config.RunClientCA
 	consoleStatus(false, false, cfg)
-	if err := netup.BringUp(cfg); err != nil {
+	restoreNeighbors, err := netup.BringUp(cfg)
+	if err != nil {
 		return err
 	}
 	consoleStatus(false, true, cfg)
@@ -159,6 +160,8 @@ func run() error {
 	syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	err = clk.Sync(syncCtx)
 	cancel()
+	// Boot's first exchanges are done: Linux's own neighbor discovery.
+	restoreNeighbors()
 	if err != nil {
 		return err
 	}

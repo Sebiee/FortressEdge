@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A first ARP request that goes unanswered no longer holds a reboot a
+  second. Boot waits on its clock sync before the edge listens, and Linux
+  asks for the gateway's address again only a second later: during boot
+  the edge now asks every 100 ms, up to 30 times, then puts Linux's
+  defaults back. In the lab, with the edge's first request dropped each
+  boot, the sync took about 110 ms, where it took 1.05 s.
+- Boot waits up to 3 s for the link's carrier, and "network up" says how
+  long it took (`carrier_ms`), or warns when it has none yet.
 - Boot's clock sync logs one line, `clock: boot sync`, with what it took
   and each name lookup and NTP query it made: when, how long, and how it
   ended. "clock synced" is logged after the step, so the time between it
