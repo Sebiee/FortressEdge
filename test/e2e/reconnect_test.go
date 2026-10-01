@@ -4,7 +4,10 @@ package e2e
 
 import (
 	"io"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,8 +82,39 @@ func TestTunnelComesBack(t *testing.T) {
 		assert.Less(t, took, 5*time.Second)
 	})
 	step(t, "after a restart the tunnel is back within a second of the edge listening", func(t *testing.T) {
+		// On a tap, this host sees the edge's own port open: probed with
+		// short dials, so none waits out a SYN retransmission.
+		opened := make(chan time.Time, 1)
+		if lab.HasTap() {
+			go func() {
+				addr := net.JoinHostPort(vm.Addr, strconv.Itoa(vm.HTTPS))
+				for end := time.Now().Add(lab.Until(t)); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+					if c, err := net.DialTimeout("tcp", addr, 50*time.Millisecond); err == nil {
+						opened <- time.Now()
+						c.Close()
+						return
+					}
+				}
+			}()
+		}
 		vm.Restart(t)
 		back(t, 1500*time.Millisecond)
+		if lab.HasTap() {
+			// The edge's ready time, by its clock as boot set it, is when
+			// its port opened, by this host's: the lab's NTP is this host.
+			at := <-opened
+			_, body, err := lab.Get(ops, lab.OpsURL+"metrics")
+			require.NoError(t, err)
+			var ready float64
+			for line := range strings.Lines(body) {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(line), "fortressedge_ready_time_seconds "); ok {
+					ready, _ = strconv.ParseFloat(v, 64)
+				}
+			}
+			diff := at.Sub(time.UnixMilli(int64(ready * 1e3)))
+			t.Logf("port open by this host %s after the edge's ready time", diff.Round(time.Millisecond))
+			assert.Less(t, diff.Abs(), 150*time.Millisecond)
+		}
 	})
 	step(t, "after a hard reset the tunnel comes back too", func(t *testing.T) {
 		// On QEMU's user-mode network, the tunnel ends at QEMU's socket on

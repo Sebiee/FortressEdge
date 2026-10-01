@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- `fortresskube` finds a restarting edge up to a second sooner. A
+  connection attempt sent while the edge's machine is down is lost, and
+  TCP sends it again only after a second; before each login it now
+  starts another attempt every 250 ms until one connects (the frp fork,
+  over tcp, websocket, and wss without a proxy).
+- `fortressedge_clock_boot_step_seconds`, and `boot_step` in the status's
+  `clock`: what boot's step moved the clock by. Until the first poll,
+  64 seconds after boot, the offset gauge shows the same step, which read
+  as an uncorrected clock. It was corrected: boot steps the clock before
+  anything that reads it starts, and the edge's ready time matched when
+  its port opened, as a host on its network saw it, within 11 ms after
+  boot steps of 0.2 to 1.3 s.
+- e2e: on a tap device, `TestTunnelComesBack` checks
+  `fortressedge_ready_time_seconds` against the port opening.
+
 ## 0.5.0
 
 **Restarts cost less ingress.** When the edge restarts, dark nodes come

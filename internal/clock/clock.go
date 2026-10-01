@@ -105,6 +105,7 @@ type state struct {
 	server    string        // the agreeing server with the least root distance
 	stratum   uint8
 	steps     int64
+	bootStep  time.Duration // what boot's step moved the clock by
 	pollExp   int
 	steady    int     // polls in a row within steadyOffset
 	corrected bool    // the last poll slewed: the next one checks it took
@@ -183,6 +184,9 @@ func (c *Clock) Sync(ctx context.Context) error {
 				return fmt.Errorf("clock: step: %w", err)
 			}
 			c.record(sel, time.Now())
+			c.mu.Lock()
+			c.st.bootStep = sel.offset
+			c.mu.Unlock()
 			slog.Info("clock synced", "server", sel.server, "offset", sel.offset.Round(time.Microsecond),
 				"servers", len(c.servers))
 			return nil
@@ -596,6 +600,7 @@ func (c *Clock) Status() map[string]any {
 		"stratum":       c.st.stratum,
 		"poll":          (time.Second << c.st.pollExp).String(),
 		"steps":         c.st.steps,
+		"boot_step":     c.st.bootStep.Seconds(),
 		"frequency_ppm": c.kern.frequencyPPM(),
 		// false for freqWindow after boot, while the offsets are left alone
 		"frequency_measured": c.st.freqSet,
@@ -621,6 +626,9 @@ func (c *Clock) WriteMetrics(w *metrics.Writer) {
 	}
 	w.Family("fortressedge_clock_steps_total", "counter", "Times the clock was stepped after boot's, instead of slewed.")
 	w.Int("fortressedge_clock_steps_total", st.steps)
+	w.Family("fortressedge_clock_boot_step_seconds", "gauge",
+		"What boot's step moved the clock by, before anything that reads it started: the virtual RTC's error, often most of a second.")
+	w.Sample("fortressedge_clock_boot_step_seconds", st.bootStep.Seconds())
 	w.Family("fortressedge_clock_poll_seconds", "gauge", "The interval between polls now: 64s, up to 1024s while the offset stays small.")
 	w.Int("fortressedge_clock_poll_seconds", 1<<st.pollExp)
 	w.Family("fortressedge_clock_frequency_ppm", "gauge", "The frequency correction the kernel's discipline has learned, in parts per million.")

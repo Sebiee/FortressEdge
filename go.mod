@@ -92,4 +92,4 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // headers, the OnDomain callback, 502 for a down origin, a
 // client-certificate VerifyConnection hook, and a site proxy the edge
 // calls in-process that uses work connections on the request's goroutine.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20260930163047-d05d30dbd0f2
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261001003020-083df66a2e75

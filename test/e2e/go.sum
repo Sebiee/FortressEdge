@@ -2,8 +2,8 @@ cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMT
 github.com/Azure/go-ntlmssp v0.1.0 h1:DjFo6YtWzNqNvQdrwEyr/e4nhU3vRiwenz5QX7sFz+A=
 github.com/Azure/go-ntlmssp v0.1.0/go.mod h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
-github.com/Sebiee/frp v0.71.1-0.20260930163047-d05d30dbd0f2 h1:Dwr+8SODFcAJotVtdLLsfscaEOWeC0d5lnrwVQSHRsA=
-github.com/Sebiee/frp v0.71.1-0.20260930163047-d05d30dbd0f2/go.mod h1:331xzwO1dn+7QoHwW65q2FA2Zn/DaYqfxFUM7TUaH8I=
+github.com/Sebiee/frp v0.71.1-0.20261001003020-083df66a2e75 h1:NtyOaKGJdl4T3G3O1dfkJUcx96uSKiCrgUHLy8OVMOE=
+github.com/Sebiee/frp v0.71.1-0.20261001003020-083df66a2e75/go.mod h1:331xzwO1dn+7QoHwW65q2FA2Zn/DaYqfxFUM7TUaH8I=
 github.com/anchore/go-lzo v0.1.0 h1:NgAacnzqPeGH49Ky19QKLBZEuFRqtTG9cdaucc3Vncs=
 github.com/anchore/go-lzo v0.1.0/go.mod h1:3kLx0bve2oN1iDwgM1U5zGku1Tfbdb0No5qp1eL1fIk=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=

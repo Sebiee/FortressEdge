@@ -290,6 +290,7 @@ names visitors make up.
 | `fortressedge_clock_offset_seconds` | | the clock's offset from NTP time at the last poll, before its correction; positive: behind |
 | `fortressedge_clock_sync_timestamp_seconds` | | when the servers last agreed |
 | `fortressedge_clock_steps_total` | | steps after boot's |
+| `fortressedge_clock_boot_step_seconds` | | what boot's step moved the clock by, before anything that reads it started: a VM's clock starts up to a second off. Until the first poll, 64 seconds after boot, `fortressedge_clock_offset_seconds` shows the same |
 | `fortressedge_clock_poll_seconds`, `fortressedge_clock_frequency_ppm` | | the poll interval; the frequency correction the kernel learned |
 | `fortressedge_clock_stratum` | `server` | the stratum of the server the clock follows most closely |
 | `fortressedge_ntp_queries_total` | `server`, `result` | queries: `ok`, `error` (no answer), `invalid` (unsynchronized, a kiss of death), `dns` |

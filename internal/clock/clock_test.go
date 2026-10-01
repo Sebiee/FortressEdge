@@ -363,6 +363,7 @@ func TestWriteMetrics(t *testing.T) {
 		"fortressedge_clock_offset_seconds 0.001\n",
 		"fortressedge_clock_sync_timestamp_seconds ",
 		"fortressedge_clock_steps_total 0\n",
+		"fortressedge_clock_boot_step_seconds 0.001\n",
 		"fortressedge_clock_poll_seconds 64\n",
 		`fortressedge_clock_stratum{server="ntp11.metas.ch"} 1`,
 		`fortressedge_ntp_queries_total{server="ntp13.metas.ch",result="error"} 1`,
