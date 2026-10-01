@@ -109,6 +109,15 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 		// come with its first event, such as server-sent events, is cut
 		// with a 504 if that event takes longer.
 		VhostHTTPTimeout: int64(headerTimeout / time.Second),
+		// A dark node's tunnels are one group: its connections, from as
+		// many frpc as it runs, share its names, and no other node can
+		// take them.
+		Identity: func(c net.Conn) string {
+			if n, ok := c.(*nodeConn); ok {
+				return n.node
+			}
+			return ""
+		},
 		Auth: v1.AuthServerConfig{
 			Method: "token",
 		},
@@ -122,6 +131,7 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 		cfg.Transport.TLS.TrustedCaFile = quic.ClientCA
 		cfg.Transport.TLS.VerifyConnection = quic.Verify
 		cfg.OnQUICConn = func(cs tls.ConnectionState) func() { return tunnel.session(nodeName(opts.Node, cs)) }
+		cfg.QUICIdentity = func(cs tls.ConnectionState) string { return nodeName(opts.Node, cs) }
 	}
 	if err := cfg.Complete(); err != nil {
 		return nil, err
@@ -185,16 +195,26 @@ func trustVhost(h http.Handler) http.Handler {
 // session count.
 func controlHandler(ln *connListener, node func(tls.ConnectionState) string) http.Handler {
 	return websocket.Handler(func(c *websocket.Conn) {
+		var name string
 		if r := c.Request(); r.TLS != nil {
-			defer tunnel.session(nodeName(node, *r.TLS))()
+			name = nodeName(node, *r.TLS)
+			defer tunnel.session(name)()
 		}
 		// The tunnel is yamux, bytes: binary frames, as frps sends them.
 		c.PayloadType = websocket.BinaryFrame
 		closed := make(chan struct{})
-		if ln.push(netpkg.WrapCloseNotifyConn(newBatchConn(c), func(error) { close(closed) })) {
+		conn := netpkg.WrapCloseNotifyConn(newBatchConn(c), func(error) { close(closed) })
+		if ln.push(&nodeConn{Conn: conn, node: name}) {
 			<-closed
 		}
 	})
+}
+
+// nodeConn is a tunnel connection with its dark node's name, for frps's
+// Identity.
+type nodeConn struct {
+	net.Conn
+	node string
 }
 
 // batchConn gathers the writes that arrive while one is on the wire into
@@ -432,6 +452,14 @@ func nodeName(node func(tls.ConnectionState) string, cs tls.ConnectionState) str
 	return node(cs)
 }
 
+// Groups counts each dark node's logged-in frpc: the members of its
+// group, which share its names.
+func (f *Frps) Groups() map[string]int {
+	groups := f.svr.Clients()
+	delete(groups, "") // none, outside tests: the edge admits dark nodes only
+	return groups
+}
+
 // WriteMetrics writes the tunnel's metrics: dark nodes, logins, and the
 // work connections that carry site requests.
 func (f *Frps) WriteMetrics(w *metrics.Writer) {
@@ -442,6 +470,12 @@ func (f *Frps) WriteMetrics(w *metrics.Writer) {
 		"Open tunnel connections (WebSocket or QUIC), by the dark node's SPIFFE name (node/<name>).")
 	for _, node := range slices.Sorted(maps.Keys(sessions)) {
 		w.Int("fortressedge_tunnel_clients", int64(sessions[node]), "node", node)
+	}
+	groups := f.Groups()
+	w.Family("fortressedge_tunnel_group_members", "gauge",
+		"Logged-in frpc of each dark node, by its SPIFFE name (node/<name>): they share its names, and requests are spread across them.")
+	for _, g := range slices.Sorted(maps.Keys(groups)) {
+		w.Int("fortressedge_tunnel_group_members", int64(groups[g]), "group", g)
 	}
 	w.Family("fortressedge_tunnel_logins_total", "counter", "frpc logins frps accepted.")
 	w.Int("fortressedge_tunnel_logins_total", tunnel.logins.Load())

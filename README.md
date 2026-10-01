@@ -18,7 +18,8 @@ Dark node --TCP 443-->  frp over WebSocket, with a client certificate
 - **Certificates.** The edge gets one certificate per hostname, as soon as
   a dark node publishes it, from Let's Encrypt or any ACME directory, such
   as step-ca or Vault. A timer renews them every `renew_interval`
-  (default 4h). The edge holds no other private key.
+  (default 4h). The edge holds no other private key. Edges that serve
+  the same names can share them through Vault.
 - **Mutual TLS, with roles.** Dark nodes, operators, and log shippers
   authenticate with client certificates from your CA. A certificate's
   SPIFFE ID says what it may do: join the tunnel (`node`), manage the edge
@@ -241,6 +242,7 @@ fortressctl apply edge1.example.com -f policy.yml \
 | `renew_interval` | `4h` | How often ACME certificates are checked and renewed once due |
 | `ntp` | `pool.ntp.org` | Time servers the clock keeps to, `host` or `host:port`, one or a list; three or more outvote one that is wrong. See [the clock](docs/operations.md#clock) |
 | `quic` | `false` | Dark nodes may also connect over QUIC on UDP 443 |
+| `vault`, `vault_ca`, `vault_mount`, `vault_path`, `vault_role_id`, `vault_secret_id` | none | A Vault KV v2 path where the edges that serve the same names share their certificates, with the AppRole that may use it. See [several edges](docs/certificates.md#several-edges-for-the-same-names) |
 
 The cloud-init drive: `fqdn` in `user-data`, a DNS name with a domain,
 which is the tunnel name dark nodes and operators connect to; and a
@@ -259,6 +261,7 @@ in `user-data` is read.
 | `access_log_max_files` | `3` | Access log files kept, the current one included; the oldest is deleted |
 | `trace` | `trust_incoming: false` | Whether a visitor's W3C `traceparent` is continued, or only logged as a link |
 | `tunnel_grace` | `10m` | How long a site whose dark node left, or that was published before a reboot, answers `503` before it goes silent; `0` never answers it |
+| `tunnel_dead_timeout` | `3s` | How long a tunnel may go without the dark node acknowledging anything before the edge drops it, in whole seconds; `0` leaves it to frp's heartbeat. A tunnel keeps the one it connected with |
 | `sites` | none | Per published name: `access_log`, `max_body_size`, `response_header_timeout` |
 
 Everything applies at once, except three limits that reboot the edge

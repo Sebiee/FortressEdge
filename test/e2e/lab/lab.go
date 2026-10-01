@@ -79,6 +79,9 @@ const (
 	TapGuest = "10.77.0.2"
 )
 
+// TapDevice is the -tap device's name.
+func TapDevice() string { return *tapDev }
+
 // Tap reports whether -tap names a device.
 func Tap() bool { return *tapDev != "" }
 
@@ -647,13 +650,28 @@ func Origin(t *testing.T, h http.Handler) int {
 // waits for it; cleanup calls it too.
 func (vm *VM) Publish(t *testing.T, proto, caFile, crt, key string, port int, domains ...string) (stop func()) {
 	t.Helper()
+	return vm.PublishAs(t, Member{}, proto, caFile, crt, key, port, domains...)
+}
+
+// Member tells apart frpc that publish the same names with one node
+// certificate, as fortresskube's replicas do.
+type Member struct {
+	User    string // frp's user: each replica's own
+	LocalIP string // the address frpc dials the edge from; "" for any
+}
+
+// PublishAs is Publish as member m.
+func (vm *VM) PublishAs(t *testing.T, m Member, proto, caFile, crt, key string, port int, domains ...string) (stop func()) {
+	t.Helper()
 	svc := FRPC(t, &v1.ClientCommonConfig{
+		User:          m.User,
 		ServerAddr:    vm.Addr,
 		ServerPort:    vm.HTTPS,
 		LoginFailExit: new(false),
 		Transport: v1.ClientTransportConfig{
-			Protocol:     proto,
-			WireProtocol: "v2",
+			Protocol:             proto,
+			WireProtocol:         "v2",
+			ConnectServerLocalIP: m.LocalIP,
 			// fortresskube's defaults.
 			DeadServerTimeout: 3,
 			DialServerTimeout: 2,

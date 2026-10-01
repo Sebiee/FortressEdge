@@ -40,6 +40,12 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		NTP:           []string{"10.0.0.1:123", "ntp11.metas.ch"},
 		RenewInterval: "90m",
 		QUIC:          true,
+		Vault:         "https://130.92.187.120:8200",
+		VaultCA:       testCA(t),
+		VaultMount:    "edge-certs",
+		VaultPath:     "test/private",
+		VaultRoleID:   "role",
+		VaultSecretID: "secret",
 	}
 	if err := c.Check(); err != nil {
 		t.Fatal(err)
@@ -52,6 +58,10 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 	if cfg.ACME != c.ACME || string(cfg.ACMECA) != strings.TrimSpace(c.ACMECA) || string(cfg.ClientCA) != strings.TrimSpace(c.ClientCA) ||
 		!slices.Equal(cfg.NTP, c.NTP) || cfg.RenewInterval != 90*time.Minute || !cfg.QUIC {
 		t.Fatalf("%+v", cfg)
+	}
+	if v := cfg.Vault; v == nil || v.URL != c.Vault || string(v.CA) != strings.TrimSpace(c.VaultCA) || v.Mount != c.VaultMount ||
+		v.Path != c.VaultPath || v.RoleID != c.VaultRoleID || v.SecretID != c.VaultSecretID {
+		t.Fatalf("vault: %+v", cfg.Vault)
 	}
 }
 

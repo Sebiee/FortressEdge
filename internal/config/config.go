@@ -15,11 +15,15 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,6 +65,10 @@ const (
 	// restarting or upgraded; maxTunnelGrace bounds it at a month.
 	DefaultTunnelGrace = 10 * time.Minute
 	maxTunnelGrace     = 720 * time.Hour
+	// DefaultTunnelDeadTimeout matches fortresskube's dead_server_timeout:
+	// neither end of a tunnel gives up on the other first.
+	DefaultTunnelDeadTimeout = 3 * time.Second
+	maxTunnelDeadTimeout     = 10 * time.Minute
 	// The access log's defaults keep it at 24 MiB, well inside a 64 MiB
 	// data disk.
 	DefaultAccessLogMaxSize  = 8 << 20
@@ -106,6 +114,9 @@ type Config struct {
 	// says so through ARI).
 	RenewInterval time.Duration
 	QUIC          bool // dark-node QUIC on UDP 443
+	// Vault, when set, is where the edges that serve the same names share
+	// their certificates, ACME account, and challenges.
+	Vault *Vault
 	// ClientCA is the PEM trust anchor from fortress.yml (client_ca) for
 	// dark-node, operator, and log-reader certificates.
 	ClientCA []byte
@@ -113,6 +124,17 @@ type Config struct {
 	// resolves client_ca; not part of fortress.yml.
 	ClientCAPath string
 	Policy
+}
+
+// Vault is a KV v2 path several edges share their certificates in, and
+// the AppRole that may use it.
+type Vault struct {
+	URL      string // https://vault.example.com:8200
+	CA       []byte // PEM; empty trusts the system roots
+	Mount    string // the KV v2 mount
+	Path     string // the path in it, for these edges only
+	RoleID   string
+	SecretID string
 }
 
 // Policy is policy.yml: what the edge lets through. It is the part an
@@ -131,6 +153,11 @@ type Policy struct {
 	// node published before a boot, is answered 503 before it goes silent
 	// like any name the edge does not serve. 0 never answers it.
 	TunnelGrace time.Duration
+	// TunnelDeadTimeout is how long a tunnel connection may go without the
+	// dark node acknowledging anything before the edge drops it, so a lost
+	// frpc leaves its group and the others carry its share. 0 leaves it to
+	// frps's heartbeat. A tunnel keeps the timeout it connected with.
+	TunnelDeadTimeout time.Duration
 	// Sites are settings for one site, by the name its dark node publishes
 	// (app.example.com, *.example.com) or a name a wildcard covers.
 	Sites map[string]SitePolicy
@@ -295,6 +322,12 @@ type edgeConfig struct {
 	NTP      servers `yaml:"ntp"`
 	Renew    string  `yaml:"renew_interval"`
 	QUIC     bool    `yaml:"quic"`
+	Vault    string  `yaml:"vault"`
+	VaultCA  string  `yaml:"vault_ca"`
+	VMount   string  `yaml:"vault_mount"`
+	VPath    string  `yaml:"vault_path"`
+	VRole    string  `yaml:"vault_role_id"`
+	VSecret  string  `yaml:"vault_secret_id"`
 }
 
 // policyConfig is policy.yml.
@@ -308,6 +341,7 @@ type policyConfig struct {
 	AccessLogMaxFiles int                 `yaml:"access_log_max_files"`
 	Trace             *traceYAML          `yaml:"trace"`
 	TunnelGrace       string              `yaml:"tunnel_grace"`
+	TunnelDeadTimeout string              `yaml:"tunnel_dead_timeout"`
 	Sites             map[string]siteYAML `yaml:"sites"`
 }
 
@@ -326,9 +360,10 @@ type siteYAML struct {
 // The keys each file takes. A key in the other file's list is refused
 // with a pointer to where it belongs.
 var (
-	edgeKeys   = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic"}
+	edgeKeys = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic",
+		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id", "vault_secret_id"}
 	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
-		"trace", "sites", "tunnel_grace"}
+		"trace", "sites", "tunnel_grace", "tunnel_dead_timeout"}
 )
 
 // EdgeKeys lists the keys fortress.yml takes.
@@ -420,9 +455,10 @@ func CheckEdge(edge []byte) error {
 // ParsePolicy reads policy.yml. Empty is the defaults.
 func ParsePolicy(b []byte) (Policy, error) {
 	p := Policy{
-		Limits:      DefaultLimits(),
-		AccessLog:   AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
-		TunnelGrace: DefaultTunnelGrace,
+		Limits:            DefaultLimits(),
+		AccessLog:         AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
+		TunnelGrace:       DefaultTunnelGrace,
+		TunnelDeadTimeout: DefaultTunnelDeadTimeout,
 	}
 	if err := checkKeys(b, PolicyName, policyKeys, edgeKeys,
 		"belongs in "+EdgeFile+", which is baked into the ISO: bake a new one to change it"); err != nil {
@@ -457,6 +493,13 @@ func ParsePolicy(b []byte) (Policy, error) {
 			return Policy{}, fmt.Errorf("%s: tunnel_grace: want a duration from 0 (never) to 720h, such as 10m", PolicyName)
 		}
 		p.TunnelGrace = d
+	}
+	if s := strings.TrimSpace(y.TunnelDeadTimeout); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d < 0 || d > maxTunnelDeadTimeout || d%time.Second != 0 {
+			return Policy{}, fmt.Errorf("%s: tunnel_dead_timeout: want whole seconds from 0 (off) to 10m, such as 3s", PolicyName)
+		}
+		p.TunnelDeadTimeout = d
 	}
 	if p.Sites, err = parseSites(y.Sites); err != nil {
 		return Policy{}, err
@@ -618,6 +661,9 @@ func applyEdge(c *Config, edge []byte) error {
 	if err := applyNTP(c, e.NTP); err != nil {
 		return err
 	}
+	if err := applyVault(c, e); err != nil {
+		return err
+	}
 	pemText := strings.TrimSpace(e.ClientCA)
 	if pemText == "" {
 		return fmt.Errorf("%s: client_ca is required (fortressctl bake adds one)", EdgeFile)
@@ -627,6 +673,65 @@ func applyEdge(c *Config, edge []byte) error {
 	}
 	c.ClientCA = []byte(pemText)
 	return nil
+}
+
+var vaultPathRegex = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
+
+// applyVault reads the vault keys: all of them but vault_ca, or none.
+func applyVault(c *Config, e edgeConfig) error {
+	v := Vault{
+		URL: strings.TrimSpace(e.Vault), Mount: strings.Trim(strings.TrimSpace(e.VMount), "/"),
+		Path: strings.Trim(strings.TrimSpace(e.VPath), "/"), RoleID: strings.TrimSpace(e.VRole), SecretID: strings.TrimSpace(e.VSecret),
+	}
+	ca := strings.TrimSpace(e.VaultCA)
+	if v.URL == "" && v.Mount == "" && v.Path == "" && v.RoleID == "" && v.SecretID == "" && ca == "" {
+		return nil
+	}
+	u, err := url.Parse(v.URL)
+	if v.URL == "" || err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.User != nil {
+		return fmt.Errorf("%s: vault: want the https URL of the Vault server, such as https://vault.example.com:8200", EdgeFile)
+	}
+	v.URL = u.Scheme + "://" + u.Host
+	for _, k := range []struct{ key, val string }{{"vault_mount", v.Mount}, {"vault_path", v.Path}} {
+		if !vaultPathRegex.MatchString(k.val) || slices.Contains(strings.Split(k.val, "/"), "..") {
+			return fmt.Errorf("%s: %s: want a KV v2 path such as edge-certs or prod/public", EdgeFile, k.key)
+		}
+	}
+	if v.RoleID == "" || v.SecretID == "" {
+		return fmt.Errorf("%s: vault_role_id and vault_secret_id: the AppRole the edge logs in with is required", EdgeFile)
+	}
+	if ca != "" {
+		if _, err := pemCerts([]byte(ca)); err != nil {
+			return fmt.Errorf("%s: vault_ca: %w", EdgeFile, err)
+		}
+		v.CA = []byte(ca)
+	}
+	c.Vault = &v
+	return nil
+}
+
+// pemCerts parses one or more PEM certificates.
+func pemCerts(b []byte) ([]*x509.Certificate, error) {
+	var out []*x509.Certificate
+	for {
+		var blk *pem.Block
+		blk, b = pem.Decode(b)
+		if blk == nil {
+			break
+		}
+		if blk.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("want PEM certificates, got %s", blk.Type)
+		}
+		crt, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, crt)
+	}
+	if len(out) == 0 || len(strings.TrimSpace(string(b))) > 0 {
+		return nil, errors.New("want PEM certificates")
+	}
+	return out, nil
 }
 
 // servers is fortress.yml's ntp: one server, or a list of them.

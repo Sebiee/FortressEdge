@@ -137,7 +137,7 @@ func run() error {
 	} else {
 		cfg.Policy = p
 	}
-	slog.Info("config loaded", "tunnel", cfg.Tunnel, "acme", acmeName(cfg), "quic", cfg.QUIC,
+	slog.Info("config loaded", "tunnel", cfg.Tunnel, "acme", acmeName(cfg), "cert_store", certStoreName(cfg), "quic", cfg.QUIC,
 		"disk", cfg.Disk, "ntp", cfg.NTP, "policy", policy != nil, "blocked", len(cfg.Block))
 	// frps reads its trust anchor from a file. The edge holds the CA's
 	// certificate only, never its key.
@@ -229,7 +229,11 @@ func run() error {
 		stop()
 	}, httpsvc.Extras{
 		Metrics: []func(*metrics.Writer){frps.WriteMetrics, clk.WriteMetrics},
-		Status:  map[string]func() any{"clock": func() any { return clk.Status() }},
+		Status: map[string]func() any{
+			"clock":         func() any { return clk.Status() },
+			"tunnel_groups": func() any { return frps.Groups() },
+		},
+		Ready: func() bool { return domains.TunnelCertValid(time.Now()) && len(frps.Groups()) > 0 },
 	})
 	if pid1 && wantReboot.Load() {
 		say("fortressedge: rebooting into the new policy")
@@ -292,6 +296,15 @@ func ipNetwork(cfg config.Config) string {
 }
 
 // acmeName is the host of the ACME directory, for the console and log.
+// certStoreName is where the certificates are kept: the disk, or the
+// disk and a Vault path. Never the AppRole.
+func certStoreName(cfg config.Config) string {
+	if v := cfg.Vault; v != nil {
+		return "vault " + v.URL + "/" + v.Mount + "/" + v.Path
+	}
+	return "disk"
+}
+
 func acmeName(cfg config.Config) string {
 	if cfg.ACME == "" {
 		return "letsencrypt"

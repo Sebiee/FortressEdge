@@ -9,6 +9,8 @@ require (
 	github.com/diskfs/go-diskfs v1.9.4
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
+	github.com/hashicorp/vault/api v1.23.0
+	github.com/hashicorp/vault/api/auth/approle v0.12.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.1
@@ -25,6 +27,7 @@ require (
 	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
+	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
 	github.com/djherbis/times v1.6.0 // indirect
@@ -34,6 +37,15 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
+	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
+	github.com/hashicorp/go-secure-stdlib/parseutil v0.2.0 // indirect
+	github.com/hashicorp/go-secure-stdlib/strutil v0.1.2 // indirect
+	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
+	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
@@ -42,6 +54,8 @@ require (
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
@@ -52,6 +66,7 @@ require (
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
+	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/samber/lo v1.47.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
@@ -92,4 +107,4 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // headers, the OnDomain callback, 502 for a down origin, a
 // client-certificate VerifyConnection hook, and a site proxy the edge
 // calls in-process that uses work connections on the request's goroutine.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261001003020-083df66a2e75
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261001122815-fa8c6219d85c

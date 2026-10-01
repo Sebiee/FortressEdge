@@ -7,8 +7,8 @@ require (
 	github.com/digitalocean/go-qemu v0.0.0-20250212194115-ee9b0668d242
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
-	github.com/letsencrypt/challtestsrv v1.4.2
 	github.com/letsencrypt/pebble/v2 v2.10.1
+	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.63.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/net v0.59.0
@@ -20,6 +20,9 @@ require (
 	github.com/Azure/go-ntlmssp v0.1.0 // indirect
 	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 // indirect
 	github.com/bitfield/gotestdox v0.2.2 // indirect
+	github.com/caddyserver/certmagic v0.25.4 // indirect
+	github.com/caddyserver/zerossl v0.1.5 // indirect
+	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
 	github.com/digitalocean/go-libvirt v0.0.0-20220804181439-8648fbde413e // indirect
 	github.com/diskfs/go-diskfs v1.9.4 // indirect
@@ -32,17 +35,32 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
+	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
+	github.com/hashicorp/go-secure-stdlib/parseutil v0.2.0 // indirect
+	github.com/hashicorp/go-secure-stdlib/strutil v0.1.2 // indirect
+	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
+	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
+	github.com/hashicorp/vault/api v1.23.0 // indirect
+	github.com/hashicorp/vault/api/auth/approle v0.12.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/reedsolomon v1.12.0 // indirect
-	github.com/kr/text v0.2.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/letsencrypt/challtestsrv v1.4.2 // indirect
+	github.com/libdns/libdns v1.1.1 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
+	github.com/mholt/acmez/v3 v3.1.6 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.0 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/samber/lo v1.47.0 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
@@ -53,6 +71,10 @@ require (
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/xtaci/kcp-go/v5 v5.6.13 // indirect
+	github.com/zeebo/blake3 v0.2.4 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.28.0 // indirect
+	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
@@ -87,6 +109,6 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // headers, the OnDomain callback, 502 for a down origin, a
 // client-certificate VerifyConnection hook, and a site proxy the edge
 // calls in-process that uses work connections on the request's goroutine.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261001003020-083df66a2e75
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261001122815-fa8c6219d85c
 
 tool gotest.tools/gotestsum

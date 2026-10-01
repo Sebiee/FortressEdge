@@ -30,6 +30,23 @@ type Config struct {
 	RenewInterval string `yaml:"renew_interval"`
 	// QUIC lets dark nodes connect over QUIC on UDP 443 too.
 	QUIC bool `yaml:"quic"`
+	// Vault is the https URL of a Vault whose KV v2 path the edges that
+	// serve the same names share their certificates in. Empty keeps them
+	// on each edge's disk only. With it, all of VaultMount, VaultPath,
+	// VaultRoleID, and VaultSecretID are required.
+	Vault string `yaml:"vault"`
+	// VaultCA is the PEM CA, or chain, that signed Vault's HTTPS
+	// certificate: the only roots the connection trusts. Empty trusts the
+	// system roots.
+	VaultCA string `yaml:"vault_ca"`
+	// VaultMount is the KV v2 mount, such as edge-certs.
+	VaultMount string `yaml:"vault_mount"`
+	// VaultPath is these edges' path in the mount, such as prod/public.
+	VaultPath string `yaml:"vault_path"`
+	// VaultRoleID and VaultSecretID are the AppRole the edge logs in with;
+	// its policy should allow the path and nothing else.
+	VaultRoleID   string `yaml:"vault_role_id"`
+	VaultSecretID string `yaml:"vault_secret_id"`
 }
 
 // Check reports what is wrong with c, as the edge would. An error names the

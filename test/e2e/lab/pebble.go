@@ -31,13 +31,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/letsencrypt/challtestsrv"
 	"github.com/letsencrypt/pebble/v2/acme"
 	pebbleca "github.com/letsencrypt/pebble/v2/ca"
 	"github.com/letsencrypt/pebble/v2/core"
 	"github.com/letsencrypt/pebble/v2/db"
 	"github.com/letsencrypt/pebble/v2/va"
 	"github.com/letsencrypt/pebble/v2/wfe"
+	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,7 +52,8 @@ type Pebble struct {
 	TLSCA []byte // PEM that signed URL's certificate: the edge's acme_ca
 	Roots string // file with the PEM root that issued certificates chain to
 
-	db *db.MemoryStore
+	db  *db.MemoryStore
+	log string
 
 	mu     sync.Mutex
 	issued []string // certificate IDs the edge downloaded, in order
@@ -81,13 +82,7 @@ func StartPebble(t *testing.T, vm *VM, opts PebbleOptions) *Pebble {
 	t.Cleanup(func() { logf.Close() })
 	logger := log.New(logf, "", log.LstdFlags|log.Lmicroseconds)
 
-	dnsAddr := "127.0.0.1:" + strconv.Itoa(freePort(t))
-	dns, err := challtestsrv.New(challtestsrv.Config{DNSAddrs: []string{dnsAddr}, Log: logger})
-	require.NoError(t, err)
-	dns.SetDefaultDNSIPv4(vm.Addr)
-	dns.SetDefaultDNSIPv6("")
-	dns.Run()
-	t.Cleanup(dns.Shutdown)
+	dnsAddr := startDNS(t, vm.Addr)
 
 	store := db.NewMemoryStore()
 	profile := pebbleca.Profile{ValidityPeriod: uint64(opts.Validity / time.Second)}
@@ -95,7 +90,7 @@ func StartPebble(t *testing.T, vm *VM, opts PebbleOptions) *Pebble {
 	validator := va.New(logger, 0, vm.HTTPS, false, dnsAddr, store)
 	front := wfe.New(logger, store, validator, issuer, []string{"pebble.letsencrypt.org"}, false, false, 0, 0)
 
-	p := &Pebble{db: store}
+	p := &Pebble{db: store, log: logf.Name()}
 	api := front.Handler()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if id, ok := strings.CutPrefix(r.URL.Path, "/certZ/"); ok {
@@ -136,6 +131,41 @@ func StartPebble(t *testing.T, vm *VM, opts PebbleOptions) *Pebble {
 	p.TLSCA = crt
 	p.Roots = Write(t, t.TempDir(), "pebble-root.pem", issuer.GetRootCert(0).PEM())
 	return p
+}
+
+// startDNS answers every A query with addr, for Pebble's validations,
+// and returns where. Its handler is its own: challtestsrv registers on
+// miekg/dns's process-wide mux, so with tests in parallel every one of
+// its servers answered with the address of the last one started.
+func startDNS(t *testing.T, addr string) string {
+	t.Helper()
+	ip := net.ParseIP(addr).To4()
+	h := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		for _, q := range r.Question {
+			if q.Qtype == dns.TypeA {
+				m.Answer = append(m.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET}, A: ip})
+			}
+		}
+		_ = w.WriteMsg(m)
+	})
+	dnsAddr := "127.0.0.1:" + strconv.Itoa(freePort(t))
+	pc, err := net.ListenPacket("udp", dnsAddr)
+	require.NoError(t, err)
+	ln, err := net.Listen("tcp", dnsAddr)
+	require.NoError(t, err)
+	for _, srv := range []*dns.Server{{PacketConn: pc, Handler: h}, {Listener: ln, Handler: h}} {
+		go srv.ActivateAndServe()
+		t.Cleanup(func() { _ = srv.Shutdown() })
+	}
+	return dnsAddr
+}
+
+// Invalid counts the authorizations a validation failed.
+func (p *Pebble) Invalid() int {
+	b, _ := os.ReadFile(p.log)
+	return strings.Count(string(b), "set INVALID by completed challenge")
 }
 
 // Issued lists the names of each certificate the edge has downloaded, in

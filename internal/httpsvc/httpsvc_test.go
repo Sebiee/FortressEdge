@@ -384,7 +384,7 @@ func TestServeDrainsOnCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, []*http.Server{s}, track, nil, time.Second) }()
+	go func() { done <- serve(ctx, []*http.Server{s}, track, nil, &sockets{}, time.Second) }()
 	<-started
 	cancel()
 	select {

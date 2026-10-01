@@ -209,6 +209,47 @@ func TestParseNTP(t *testing.T) {
 	}
 }
 
+func TestParseVault(t *testing.T) {
+	c, err := parse("")
+	if err != nil || c.Vault != nil {
+		t.Fatalf("none: %+v %v", c.Vault, err)
+	}
+	crt, _, err := ca.NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := ca.NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := "vault: https://130.92.187.120:8200/\nvault_mount: edge-certs\nvault_path: test/private\n" +
+		"vault_role_id: r\nvault_secret_id: s\n"
+	c, err = parse(full + "vault_ca: |\n" + indentPEM(string(crt)+string(other)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := c.Vault; v == nil || v.URL != "https://130.92.187.120:8200" || v.Mount != "edge-certs" || v.Path != "test/private" ||
+		v.RoleID != "r" || v.SecretID != "s" || !bytes.Contains(v.CA, []byte("BEGIN CERTIFICATE")) {
+		t.Fatalf("vault: %+v", c.Vault)
+	}
+	if c, err := parse(full); err != nil || c.Vault == nil || c.Vault.CA != nil {
+		t.Fatalf("system roots: %+v %v", c.Vault, err)
+	}
+	for _, bad := range []string{
+		"vault: https://v.example.com:8200\n", // no mount, path, or role
+		strings.Replace(full, "https://130.92.187.120:8200/", "http://130.92.187.120:8200", 1),
+		strings.Replace(full, "https://130.92.187.120:8200/", "https://130.92.187.120:8200/v1", 1),
+		strings.Replace(full, "test/private", "test/../x", 1),
+		strings.Replace(full, "vault_secret_id: s\n", "", 1),
+		full + "vault_ca: not-a-cert\n",
+		"vault_ca: |\n" + indentPEM(string(crt)),
+	} {
+		if _, err := parse(bad); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
 func TestParseACME(t *testing.T) {
 	c, err := parse("acme: https://vault.example.com/v1/pki/acme/directory\n")
 	if err != nil {
@@ -324,6 +365,22 @@ func TestParseSites(t *testing.T) {
 	} {
 		if _, err := ParsePolicy([]byte(bad)); err == nil {
 			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
+func TestParseTunnelDeadTimeout(t *testing.T) {
+	if p, err := ParsePolicy(nil); err != nil || p.TunnelDeadTimeout != DefaultTunnelDeadTimeout {
+		t.Fatalf("default: %s %v", p.TunnelDeadTimeout, err)
+	}
+	for in, want := range map[string]time.Duration{"0": 0, "0s": 0, "1s": time.Second, "30s": 30 * time.Second, "10m": 10 * time.Minute} {
+		if p, err := ParsePolicy([]byte("tunnel_dead_timeout: " + in + "\n")); err != nil || p.TunnelDeadTimeout != want {
+			t.Errorf("%s: %s %v", in, p.TunnelDeadTimeout, err)
+		}
+	}
+	for _, bad := range []string{"-1s", "1500ms", "11m", "soon"} {
+		if _, err := ParsePolicy([]byte("tunnel_dead_timeout: " + bad + "\n")); err == nil {
+			t.Errorf("%s: accepted", bad)
 		}
 	}
 }

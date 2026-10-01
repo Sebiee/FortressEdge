@@ -7,7 +7,7 @@ The client certificate's role decides what it may call (see
 
 | Endpoint | Who | What it does |
 | --- | --- | --- |
-| `GET /~!ops/status` | `ops`, `logs` | JSON: boot id, uptime, network, tunnel, QUIC, open connections, limit and XDP counters, per-site counters, log cursor |
+| `GET /~!ops/status` | `ops`, `logs` | JSON: boot id, uptime, network, tunnel, QUIC, open connections, limit and XDP counters, per-site counters, log cursor; `ready` and `tunnel_groups`, see [Readiness](#readiness) |
 | `GET /~!ops/metrics` | `ops`, `logs` | the same counters and more in Prometheus's text format, for a scraper; see [Metrics](#metrics) |
 | `GET /~!ops/logs` | `ops`, `logs` | this boot's log as text; `?follow` streams new lines |
 | `GET /~!ops/logs?format=ndjson` | `ops`, `logs` | one `{"line": ...}` object per line, for shippers |
@@ -238,6 +238,30 @@ collector to reach. The access log line has what a span needs
 `method`, `path`), and a shipper that pulls `/~!ops/access` turns each
 line into the edge's span.
 
+## Readiness
+
+`ready` in the status, and `fortressedge_ready` (1 or 0) in the metrics,
+say whether the edge can serve sites: it holds a valid certificate for
+the tunnel name, and at least one dark node's frpc is logged in. A
+standby's health check, or a load balancer in front of several edges,
+can follow it.
+
+`tunnel_groups` counts each dark node's logged-in frpc, by the name in
+its SPIFFE ID (`node/<name>`): `{"node1": 2}`. All frpc with one node certificate
+are one group. They publish the same names, and the edge spreads a
+name's requests across them in turn; a dark node with another
+certificate cannot publish a name the group holds. A member that goes
+silent, with no FIN or RST (a lost machine, a network cut), is dropped
+after the policy's `tunnel_dead_timeout`, 3 seconds by default: the edge
+sends a keepalive probe after each second of silence, and drops the
+tunnel when nothing it sent is acknowledged for that long. Its requests
+go to the others. A request whose member gives no work connection goes
+once to the next, whatever its method, as nothing of it has been sent;
+a `GET` or `HEAD` without a body whose pooled work connection turns out
+dead before any answer is tried once more too. A request already sent to
+a member that dies is answered `502`. See
+[kubernetes.md](kubernetes.md) for `fortresskube`'s replicas.
+
 ## Metrics
 
 `GET /~!ops/metrics` serves the Prometheus text format to an operator or
@@ -277,7 +301,9 @@ names visitors make up.
 | `fortressedge_limit_hits_total` | `site`, `limit` | refusals: `rate`, `uri`, `body`, `malformed`, and `connections` (no site: refused at accept) |
 | `fortressedge_connections`, `fortressedge_visitors` | | open connections; sources tracked |
 | `fortressedge_bans_total`, `fortressedge_banned_sources` | | bans since boot; banned now |
+| `fortressedge_ready` | | 1 while the edge can serve sites, see [Readiness](#readiness) |
 | `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
+| `fortressedge_tunnel_group_members` | `group` | logged-in frpc by dark node (`node/<name>`): its group, which shares its names |
 | `fortressedge_tunnel_logins_total`, `fortressedge_tunnel_proxies` | | frpc logins; proxies registered |
 | `fortressedge_published_names` | | names published, wildcards included |
 | `fortressedge_work_connections` | `state` | work connections: `pooled` by frpc ahead of a request, `idle` after one, `active` |

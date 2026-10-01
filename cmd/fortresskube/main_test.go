@@ -87,9 +87,12 @@ func TestTunnelDefaults(t *testing.T) {
 		c.LoginFailExit == nil || *c.LoginFailExit {
 		t.Fatalf("defaults: %+v loginFailExit=%v", c.Transport, c.LoginFailExit)
 	}
-	c = load("serverAddr = \"edge.example.com\"\nloginFailExit = true\n" +
+	if h, _ := os.Hostname(); c.User != h || h == "" {
+		t.Fatalf("user %q, want the host name %q", c.User, h)
+	}
+	c = load("serverAddr = \"edge.example.com\"\nloginFailExit = true\nuser = \"edge-a\"\n" +
 		"transport.deadServerTimeout = 10\ntransport.dialServerTimeout = 5\n")
-	if c.Transport.DeadServerTimeout != 10 || c.Transport.DialServerTimeout != 5 || !*c.LoginFailExit {
-		t.Fatalf("the file's own: %+v loginFailExit=%v", c.Transport, *c.LoginFailExit)
+	if c.Transport.DeadServerTimeout != 10 || c.Transport.DialServerTimeout != 5 || !*c.LoginFailExit || c.User != "edge-a" {
+		t.Fatalf("the file's own: %+v loginFailExit=%v user=%q", c.Transport, *c.LoginFailExit, c.User)
 	}
 }

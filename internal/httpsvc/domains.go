@@ -15,6 +15,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
+	"github.com/Sebiee/fortressedge/internal/certstore"
 	"github.com/Sebiee/fortressedge/internal/config"
 )
 
@@ -48,6 +49,18 @@ type Domains struct {
 	// and their certificates are public in CT logs anyway. Under mu.
 	held  map[string]heldCert
 	grace time.Duration
+
+	store *certstore.Shared // fortress.yml's vault; nil keeps the disk only
+}
+
+// CertStore is the store shared with other edges, or nil.
+func (d *Domains) CertStore() *certstore.Shared {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.store
 }
 
 type heldCert struct {
@@ -284,6 +297,15 @@ func (d *Domains) acme(ctx context.Context, cfg config.Config) (*certmagic.Confi
 		return nil, err
 	}
 	magic.OnEvent = d.certEvent
+	if s, ok := magic.Storage.(*certstore.Shared); ok {
+		// What the disk has that the shared store lacks goes there first,
+		// so nothing on disk is ordered again for want of it.
+		s.Seed(ctx)
+		go s.Run(context.WithoutCancel(ctx))
+		d.mu.Lock()
+		d.store = s
+		d.mu.Unlock()
+	}
 	d.loadHeld(ctx, magic)
 	if err := manage(ctx, magic, cache, cfg.Tunnel); err != nil {
 		return nil, err
@@ -371,6 +393,26 @@ func (d *Domains) Published() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.names)
+}
+
+// TunnelCertValid is whether the edge holds a certificate for the tunnel
+// name that is valid at now.
+func (d *Domains) TunnelCertValid(now time.Time) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	cache := d.cache
+	d.mu.Unlock()
+	if cache == nil {
+		return false
+	}
+	for _, c := range cache.AllMatchingCertificates(d.tunnel) {
+		if c.Leaf != nil && !now.Before(c.Leaf.NotBefore) && now.Before(c.Leaf.NotAfter) {
+			return true
+		}
+	}
+	return false
 }
 
 // Known is a name the edge answers for: the tunnel or a routed site.

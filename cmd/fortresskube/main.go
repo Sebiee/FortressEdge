@@ -196,10 +196,18 @@ const (
 )
 
 // tunnelDefaults sets fortresskube's defaults in common for the keys the
-// config file (file) leaves out: the dead-server and dial timeouts, and
+// config file (file) leaves out: the dead-server and dial timeouts,
 // loginFailExit false, so a first login that fails is retried like any,
-// instead of exiting into a crash loop.
+// instead of exiting into a crash loop, and user the host name. The edge
+// spreads a node's requests across all its replicas, which register the
+// same names; frps tells their proxies apart by user, so each replica
+// needs its own, and a pod's host name is its pod name.
 func tunnelDefaults(common, file *v1.ClientCommonConfig) {
+	if file.User == "" {
+		if h, err := os.Hostname(); err == nil {
+			common.User = h
+		}
+	}
 	if file.Transport.DeadServerTimeout == 0 {
 		common.Transport.DeadServerTimeout = deadServerTimeout
 	}

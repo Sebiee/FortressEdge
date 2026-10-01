@@ -42,9 +42,10 @@ enroll dark nodes, which can publish any hostname.
 HTTPS certificates come from an ACME directory, one per name, over
 TLS-ALPN-01 on TCP 443: Let's Encrypt by default, or the directory
 `fortress.yml` names in `acme`. They are stored under
-`/var/fortressedge/certs`, and no other private key is ever given to the
-edge. TCP 443 and QUIC present the same tunnel certificate; QUIC shows it
-only to the tunnel name.
+`/var/fortressedge/certs` (and, for several edges, in Vault: see
+[below](#several-edges-for-the-same-names)), and no other private key is
+ever given to the edge. TCP 443 and QUIC present the same tunnel
+certificate; QUIC shows it only to the tunnel name.
 
 - **The tunnel name** is issued at boot, before anything listens.
 - **A site** is issued as soon as a dark node publishes the hostname, not
@@ -87,6 +88,69 @@ therefore registers a new account at boot and obtains a new certificate
 for the tunnel name and each published site, as their dark nodes
 reconnect: mind the directory's rate limits when an edge serves many
 names. The old directory's files stay on the data disk, unused.
+
+## Several edges for the same names
+
+Edges that serve the same names (two addresses for one site, or one that
+takes over from another) can share their certificates, ACME account,
+and challenges through a path in Vault's KV v2 engine:
+
+```yaml
+# fortress.yml, the same on each edge but for the AppRole
+vault: https://vault.internal.example:8200
+vault_ca: |
+  -----BEGIN CERTIFICATE-----
+  ...the CA, or chain, that signed Vault's HTTPS certificate...
+  -----END CERTIFICATE-----
+vault_mount: edge-certs   # a KV v2 mount
+vault_path: prod/public   # these edges' path in it, and nothing else's
+vault_role_id: ...        # this edge's AppRole
+vault_secret_id: ...
+```
+
+- **A certificate is ordered once.** The edge that orders a name holds a
+  lock in Vault meanwhile (a check-and-set write, so two cannot both take
+  it); the others wait, then use what it stored. An edge that boots with
+  an empty disk starts with the certificates already there.
+- **A validation can reach any of them.** With two addresses in DNS, the
+  CA's TLS-ALPN-01 connection may reach the edge that did not order. It
+  answers from the challenge the other stored in Vault, as long as it
+  serves the name too: a dark node publishes it there.
+- **Renewals** are shared the same way: whichever edge finds a
+  certificate due renews it, and the others load the new one when their
+  own check comes.
+- **Vault is not in the path of a request.** Each edge keeps every
+  certificate on its data disk too and serves from memory. When Vault
+  cannot be reached, it boots, serves, and renews from its disk alone (an
+  unreachable Vault costs a boot at most two seconds, once), and it
+  writes what Vault missed once Vault answers again. Vault, as the truth,
+  wins on the next read: a certificate another edge renewed or removed
+  meanwhile is not brought back.
+- **An edge that had certificates on disk before** writes them to Vault
+  at its first boot with it, rather than order them again.
+
+The AppRole's policy should allow its path and nothing else:
+
+```hcl
+path "edge-certs/data/prod/public/*"     { capabilities = ["create", "read", "update", "delete", "list"] }
+path "edge-certs/metadata/prod/public/*" { capabilities = ["create", "read", "update", "delete", "list"] }
+```
+
+Its tokens may be short-lived and renewable: the edge renews them, and
+logs in again when Vault forgets them. Binding its secret ID and tokens
+to the edge's address (`secret_id_bound_cidrs`, `token_bound_cidrs`)
+makes a leaked secret ID useless anywhere else. The secret ID is baked
+into the ISO like the rest of `fortress.yml`, and the ops API never shows
+it. Every edge with the AppRole can read the private keys of every name
+on the path: give one path to edges that serve the same names, and keep
+the ISO as you keep the keys.
+
+`cert_store` in the [status](operations.md) says whether Vault is
+`reachable`, when a call last worked (`last_ok`), failed calls by
+operation, the last error, and how many keys wait to be written
+(`pending`); `fortressedge_cert_store_errors_total{op}`,
+`fortressedge_cert_store_last_success_timestamp_seconds`, and
+`fortressedge_cert_store_pending` are the same in the metrics.
 
 ## Which names get an answer
 

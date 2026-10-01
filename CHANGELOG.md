@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- Several frpc can publish the same names: all tunnels of one node
+  certificate (`node/<name>`) are one group, and the edge spreads each
+  name's requests across them in turn. Before, frps refused the second
+  registration of a name. Another node's certificate still cannot
+  publish a name a group holds, a work connection must come over its
+  control's node identity, and a login cannot take over the run id of
+  another node's frpc. A request whose member gives no work connection
+  goes once to the next member, any method: nothing of it was sent yet.
+- The edge drops a tunnel that goes silent, with no FIN or RST, after
+  the policy's new `tunnel_dead_timeout` (3 seconds by default; `0` is
+  off): keepalive probes after each second of silence and
+  TCP_USER_TIMEOUT on the tunnel's socket, as `fortresskube` does on its
+  end. A lost frpc left its names to frps's heartbeat, 90 seconds or
+  more. In the lab, a member cut off without a word left its group after
+  3.5 s, and every GET meanwhile got an answer from the other member.
+- `fortresskube` sets frp's `user` to the host name, the pod's name, when
+  its config file leaves it out, so a Deployment can run several
+  replicas.
+- Edges that serve the same names can share their certificates, ACME
+  account, and challenges through a Vault KV v2 path (fortress.yml's
+  `vault`, `vault_ca`, `vault_mount`, `vault_path`, `vault_role_id`,
+  `vault_secret_id`): a name is ordered once, under a lock in Vault, an
+  edge that boots with an empty disk starts with the others'
+  certificates, and a TLS-ALPN-01 validation that reaches the edge that
+  did not order is answered from the challenge in Vault. Each edge keeps
+  its certificates on disk too: with Vault unreachable it boots, serves,
+  and renews alone, and writes what Vault missed when it is back.
+  `cert_store` in the status and `fortressedge_cert_store_*` in the
+  metrics show Vault's health. On HashiCorp's Vault client, with AppRole
+  login and token renewal.
+- `ready` and `tunnel_groups` in the status, `fortressedge_ready` and
+  `fortressedge_tunnel_group_members{group}` in the metrics: whether the
+  edge can serve sites (a valid tunnel certificate and a dark node logged
+  in), and each dark node's logged-in frpc.
+
 ## 0.5.3
 
 - A first ARP request that goes unanswered no longer holds a reboot a

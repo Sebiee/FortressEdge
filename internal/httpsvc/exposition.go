@@ -136,6 +136,9 @@ func (d *Domains) writeMetrics(w *metrics.Writer) {
 	if d == nil {
 		return
 	}
+	if s := d.CertStore(); s != nil {
+		s.WriteMetrics(w)
+	}
 	w.Family("fortressedge_published_names", "gauge", "Names dark nodes publish now, wildcards included.")
 	w.Int("fortressedge_published_names", int64(d.Published()))
 	d.mu.Lock()

@@ -30,6 +30,9 @@ type EdgeOptions struct {
 	FQDN         string   // user-data's fqdn; empty is Tunnel
 	NoDrive      bool     // boot without the NoCloud drive
 	NTP          []string // fortress.yml's ntp; empty is the lab's server
+	// SharePebble is another edge's Pebble, for edges that share
+	// certificates: one ACME CA, which validates against that edge's VM.
+	SharePebble *Pebble
 }
 
 // Edge is an edge VM as an operator deploys one: a release ISO baked with
@@ -61,7 +64,10 @@ func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 	if o.Tap {
 		e.VM.UseTap(t)
 	}
-	e.Pebble = StartPebble(t, e.VM, o.Pebble)
+	e.Pebble = o.SharePebble
+	if e.Pebble == nil {
+		e.Pebble = StartPebble(t, e.VM, o.Pebble)
+	}
 	e.Roots = e.Pebble.Roots
 	ntp := e.VM.NTP()
 	if len(o.NTP) > 0 {

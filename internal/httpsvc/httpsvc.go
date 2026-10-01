@@ -20,6 +20,7 @@ import (
 	"github.com/caddyserver/certmagic"
 
 	"github.com/Sebiee/fortressedge/internal/ca"
+	"github.com/Sebiee/fortressedge/internal/certstore"
 	"github.com/Sebiee/fortressedge/internal/config"
 	"github.com/Sebiee/fortressedge/internal/logx"
 	"github.com/Sebiee/fortressedge/internal/metrics"
@@ -90,6 +91,9 @@ func tunnelHandler(tunnel string, opsH, control http.Handler) http.Handler {
 				slog.Warn("frp: not a dark node", "remote", r.RemoteAddr)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
+			}
+			if err := keepTunnelAlive(r); err != nil {
+				slog.Warn("frp: tunnel keepalive", "remote", r.RemoteAddr, "err", err)
 			}
 			control.ServeHTTP(w, r)
 			return
@@ -196,13 +200,20 @@ var (
 type Extras struct {
 	Metrics []func(*metrics.Writer)
 	Status  map[string]func() any
+	// Ready is whether the edge can serve: the status's ready and the
+	// fortressedge_ready metric. Nil is never ready.
+	Ready func() bool
 }
+
+func (e Extras) ready() bool { return e.Ready != nil && e.Ready() }
 
 // Serve runs the HTTP and HTTPS servers until ctx ends. policy is the
 // policy.yml cfg holds, as stored; apply stores and applies a new one.
 func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), more Extras) error {
 	st := &httpStats{}
 	domains.SetTunnelGrace(cfg.TunnelGrace)
+	socks := &sockets{}
+	socks.setDeadTimeout(cfg.TunnelDeadTimeout)
 	acc := &accessLogs{st: st}
 	if err := acc.apply(cfg.Policy); err != nil {
 		return err
@@ -222,12 +233,23 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	oh.SetStatus(func() map[string]any {
 		m := statusExtra(st, filt, track, vis)
 		m["access_log"] = acc.on()
+		if s := domains.CertStore(); s != nil {
+			m["cert_store"] = s.Status()
+		}
+		m["ready"] = more.ready()
 		for k, f := range more.Status {
 			m[k] = f()
 		}
 		return m
 	})
 	oh.SetMetrics(func(w *metrics.Writer) {
+		w.Family("fortressedge_ready", "gauge",
+			"1 when the edge can serve sites: a valid certificate for the tunnel name and at least one dark node logged in.")
+		ready := int64(0)
+		if more.ready() {
+			ready = 1
+		}
+		w.Int("fortressedge_ready", ready)
 		writeMetrics(w, st, filt, track, vis, domains)
 		for _, f := range more.Metrics {
 			f(w)
@@ -240,6 +262,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 				oh.SetConfig(out.Cfg)
 				vis.update(out.Cfg.Policy)
 				domains.SetTunnelGrace(out.Cfg.TunnelGrace)
+				socks.setDeadTimeout(out.Cfg.TunnelDeadTimeout)
 				if aerr := acc.apply(out.Cfg.Policy); aerr != nil {
 					slog.Error("access log", "err", aerr)
 				}
@@ -267,7 +290,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		s.MaxHeaderBytes = cfg.Limits.MaxHeaderBytes
 		s.HTTP2 = &http.HTTP2Config{MaxConcurrentStreams: cfg.Limits.MaxHTTP2Streams}
 	}
-	return serve(ctx, servers, track, vis, drainTimeout)
+	return serve(ctx, servers, track, vis, socks, drainTimeout)
 }
 
 // accessLogs turns the access log on and off as policies come. Its files
@@ -356,7 +379,7 @@ func (serverLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visitors, drainFor time.Duration) error {
+func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visitors, socks *sockets, drainFor time.Duration) error {
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
 		raw, err := net.Listen("tcp", s.Addr)
@@ -364,7 +387,8 @@ func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visit
 			drain(servers, track, drainFor)
 			return err
 		}
-		ln := track.listen(vis.listen(raw))
+		ln := track.listen(vis.listen(socks.listen(raw)))
+		s.Handler = socks.handler(s.Handler)
 		go func(s *http.Server, ln net.Listener) {
 			if s.TLSConfig != nil {
 				errc <- s.ServeTLS(tlsOnly{ln}, "", "")
@@ -594,6 +618,16 @@ func acmeConfig(cfg config.Config) (*certmagic.Config, *certmagic.Cache, error) 
 	if err := os.MkdirAll(config.CertsDir, 0o700); err != nil {
 		return nil, nil, err
 	}
+	var storage certmagic.Storage = &certmagic.FileStorage{Path: config.CertsDir}
+	if v := cfg.Vault; v != nil {
+		remote, err := certstore.NewVault(certstore.VaultConfig{
+			URL: v.URL, CA: v.CA, Mount: v.Mount, Path: v.Path, RoleID: v.RoleID, SecretID: v.SecretID,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		storage = certstore.NewShared(storage, remote)
+	}
 	// ACME lifecycle events (issuance, renewal, failures) are edge-relevant;
 	// they go through slog like our own logs.
 	logger := logx.Zap()
@@ -609,7 +643,7 @@ func acmeConfig(cfg config.Config) (*certmagic.Config, *certmagic.Cache, error) 
 	}
 	cache := certmagic.NewCache(cacheOpts)
 	magic := certmagic.New(cache, certmagic.Config{
-		Storage: &certmagic.FileStorage{Path: config.CertsDir},
+		Storage: storage,
 		Logger:  logger,
 	})
 	cacheOpts.GetConfigForCert = func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil }

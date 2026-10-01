@@ -61,12 +61,17 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: fortresskube, namespace: fortress }
 spec:
-  replicas: 1 # a second client registering the same names is refused by frps
+  replicas: 2 # one group: the edge spreads requests across them
   selector: { matchLabels: { app: fortresskube } }
   template:
     metadata: { labels: { app: fortresskube } }
     spec:
       serviceAccountName: fortresskube
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: fortresskube } }
       containers:
         - name: fortresskube
           image: ghcr.io/sebiee/fortressedge/fortresskube:v0.5.3
@@ -89,6 +94,7 @@ laptop, its own are, for keys the config file leaves out:
 | `transport.deadServerTimeout` | `3` | `0` (off) | A tunnel whose edge went away without closing it (a reset, a crash, a network cut) is dropped after 3 seconds without acknowledgments: TCP_USER_TIMEOUT, and keepalive probes each second while idle. A busy tunnel is not affected, however long its queue: acknowledgments keep coming. Raise it for a link that goes silent for seconds and recovers |
 | `transport.dialServerTimeout` | `2` | `10` | A dial into an edge that is still booting is given up soon, so the next finds it up |
 | `loginFailExit` | `false` | `true` | A first login that fails is retried like any other, never an exit into a crash loop |
+| `user` | the host name | none | Each replica's own, so frps tells their proxies apart (see below) |
 
 After it loses the edge, it dials every quarter to three eighths of a
 second for a minute, each dial starting a fresh connection attempt every
@@ -109,8 +115,27 @@ unused, without the error message older edges sent (frpc logged it as
 `StartWorkConn contains error ... discarding`), and counts them in
 `fortressedge_work_connections_discarded_total`. `poolCount = 5` is the
 most that helps. The edge's [metrics](operations.md#metrics) cover `fortresskube`'s
-health: `fortressedge_tunnel_clients{node="<name>"}` is 1 while its
-tunnel is up; it has no admin or metrics port of its own.
+health: `fortressedge_tunnel_clients{node="<name>"}` counts its open
+tunnels; it has no admin or metrics port of its own.
+
+**Several replicas.** Every replica of the Deployment uses the same
+node certificate, so the edge sees them as one dark node,
+`node/<name>`, with several frpc: one group. They publish the same
+names, and the edge spreads each name's requests across them in turn.
+A replica that stops (a rollout, a drain, a deleted pod) closes its
+tunnel, and from then on the others carry its share. One that goes
+silent (a lost node, a network cut) is dropped after the policy's
+`tunnel_dead_timeout`, 3 seconds by default; a request that was
+already sent to it is answered `502`, but one that finds it gives
+no work connection goes to the next replica. A certificate with
+another name cannot publish a name the group holds, as before.
+
+frps tells the replicas' proxies apart by frp's `user`, which
+`fortresskube` sets to the host name, the pod's name, when the
+config file leaves it out; leave it out. `tunnel_groups` in the edge's
+status and `fortressedge_tunnel_group_members{group="<name>"}`
+count the replicas logged in. Spread them across zones, as above, so
+that losing a node or a zone leaves the sites up.
 
 An app then declares its names once:
 
