@@ -29,8 +29,10 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beevik/ntp"
@@ -96,7 +98,38 @@ type Clock struct {
 
 	mu sync.Mutex
 	st state
+
+	// trace is boot's sync's record of its lookups and queries, for one
+	// log line; nil after boot.
+	trace atomic.Pointer[bootTrace]
 }
+
+// bootTrace is what boot's sync did and when: each lookup and query, how
+// long it took and how it ended, so one slow boot shows where its time
+// went (a resolver, a lost reply, the network).
+type bootTrace struct {
+	start  time.Time
+	mu     sync.Mutex
+	events []string
+}
+
+func (t *bootTrace) add(at time.Time, format string, args ...any) {
+	if t == nil {
+		return
+	}
+	e := fmt.Sprintf("+%dms ", at.Sub(t.start).Milliseconds()) + fmt.Sprintf(format, args...)
+	t.mu.Lock()
+	t.events = append(t.events, e)
+	t.mu.Unlock()
+}
+
+func (t *bootTrace) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.events, "; ")
+}
+
+func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) + "ms" }
 
 // state is what the clock reports: status, metrics, and the loop's own.
 type state struct {
@@ -185,6 +218,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // answer is not asked again within seconds, which ntpd servers answer
 // with a kiss of death.
 func (c *Clock) Sync(ctx context.Context) error {
+	tr := &bootTrace{start: time.Now()}
+	c.trace.Store(tr)
+	defer func() {
+		c.trace.Store(nil)
+		slog.Info("clock: boot sync", "took", time.Since(tr.start).Round(time.Millisecond), "events", tr.String())
+	}()
 	have := map[string]candidate{} // a valid answer, by address
 	pending := map[string]bool{}   // asked, not answered yet
 	// Room for every request out at once, so none blocks after Sync has
@@ -544,7 +583,16 @@ func (c *Clock) resolve(ctx context.Context, host string) ([]net.IP, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
-	return c.lookup(ctx, c.network, host)
+	start := time.Now()
+	ips, err := c.lookup(ctx, c.network, host)
+	if tr := c.trace.Load(); tr != nil {
+		outcome := "ok"
+		if err != nil {
+			outcome = err.Error()
+		}
+		tr.add(start, "dns %s %s %s", host, ms(time.Since(start)), outcome)
+	}
+	return ips, err
 }
 
 // measure takes samples from s, gap apart, and returns the valid one with
@@ -555,11 +603,26 @@ func (c *Clock) measure(ctx context.Context, s source, samples int) *ntp.Respons
 		if i > 0 && !c.sleep(ctx, c.gap) {
 			break
 		}
+		start := time.Now()
 		r, err := c.query(s.addr)
+		var verr error
+		if err == nil {
+			verr = r.Validate()
+		}
+		if tr := c.trace.Load(); tr != nil {
+			outcome := "ok"
+			switch {
+			case err != nil:
+				outcome = err.Error()
+			case verr != nil:
+				outcome = "invalid: " + verr.Error()
+			}
+			tr.add(start, "ntp %s %s %s", s.addr, ms(time.Since(start)), outcome)
+		}
 		switch {
 		case err != nil:
 			c.count(s.name, "error")
-		case r.Validate() != nil:
+		case verr != nil:
 			c.count(s.name, "invalid")
 		default:
 			c.count(s.name, "ok")

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Boot's clock sync logs one line, `clock: boot sync`, with what it took
+  and each name lookup and NTP query it made: when, how long, and how it
+  ended. "clock synced" is logged after the step, so the time between it
+  and "network up" includes the step itself; this line has the sync's
+  own time.
+
 ## 0.5.2
 
 - Boot's clock step no longer waits out a lost NTP answer before the

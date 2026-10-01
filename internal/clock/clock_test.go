@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"net"
 	"strings"
@@ -414,5 +415,37 @@ func TestSyncDoesNotWaitForStragglers(t *testing.T) {
 	}
 	if n := c.st.queries[queryKey{"ntp11.metas.ch", "ok"}]; n != 1 {
 		t.Fatalf("ntp11, which answered, asked %d times", n)
+	}
+}
+
+// Boot's sync logs one line of what it did: each lookup and query, when,
+// how long, and how it ended.
+func TestSyncLogsItsTrace(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	c, _ := testClock(metas, servers{
+		"192.0.2.1:123": steady(time.Millisecond, 2*time.Millisecond),
+		"192.0.2.2:123": func(i int) (*ntp.Response, error) {
+			if i == 0 {
+				return nil, errors.New("i/o timeout")
+			}
+			return answer(time.Millisecond, 2*time.Millisecond), nil
+		},
+	})
+	if err := c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var line string
+	for l := range strings.Lines(buf.String()) {
+		if strings.Contains(l, `msg="clock: boot sync"`) {
+			line = l
+		}
+	}
+	for _, want := range []string{"took=", "dns ntp11.metas.ch", "ms ok", "ntp 192.0.2.1:123", "ntp 192.0.2.2:123", "i/o timeout"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("no %q in %q", want, line)
+		}
 	}
 }
