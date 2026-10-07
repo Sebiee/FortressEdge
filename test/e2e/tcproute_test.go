@@ -192,6 +192,20 @@ func TestTCPRoutes(t *testing.T) {
 		t.Cleanup(func() { c.Close() })
 		return c.(*tls.Conn), nil
 	}
+	// Every route has its certificate before a step runs: each name's
+	// order finishes on its own, and a route without one yet closes
+	// with no bytes.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		for name, alpn := range map[string][]string{
+			"echo.example.com": nil, "alpn.example.com": {"echo"}, "db.example.com": {"postgresql"},
+			"idle.example.com": nil, "limit.example.com": nil,
+		} {
+			conn, err := dial(t, name, alpn...)
+			if assert.NoError(c, err, name) {
+				conn.Close()
+			}
+		}
+	}, lab.Until(t), lab.Tick)
 	echoOnce := func(t *testing.T, c *tls.Conn) {
 		t.Helper()
 		_, err := io.WriteString(c, "ping")
