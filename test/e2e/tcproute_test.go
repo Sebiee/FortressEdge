@@ -58,24 +58,25 @@ func echoServer(t *testing.T) (port int, accepted *atomic.Int64) {
 	return ln.Addr().(*net.TCPAddr).Port, accepted
 }
 
-// postgres runs image's server on a loopback port, password pw, without
-// TLS: the edge ends it.
+// postgres runs image's server on a free loopback port of the host's
+// network, password pw, without TLS: the edge ends it. Host networking
+// needs no port mapping, which some Docker daemons do not report back.
 func postgres(t *testing.T) int {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("needs docker")
 	}
-	out, err := exec.Command("docker", "run", "-d", "--rm", "-e", "POSTGRES_PASSWORD=pw", "-p", "127.0.0.1::5432", *pgImage).CombinedOutput()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	out, err := exec.Command("docker", "run", "-d", "--rm", "--network", "host", "-e", "POSTGRES_PASSWORD=pw", *pgImage,
+		"-c", "listen_addresses=127.0.0.1", "-c", "port="+strconv.Itoa(port)).CombinedOutput()
 	require.NoError(t, err, "%s", out)
 	id := strings.TrimSpace(string(out))
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
-	out, err = exec.Command("docker", "port", id, "5432/tcp").CombinedOutput()
-	require.NoError(t, err, "%s", out)
-	_, p, _ := net.SplitHostPort(strings.TrimSpace(strings.Split(string(out), "\n")[0]))
-	port, err := strconv.Atoi(p)
-	require.NoError(t, err)
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		out, err := exec.Command("docker", "exec", id, "pg_isready", "-U", "postgres", "-h", "127.0.0.1").CombinedOutput()
+		out, err := exec.Command("docker", "exec", id, "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", strconv.Itoa(port)).CombinedOutput()
 		assert.NoError(c, err, "%s", out)
 	}, time.Minute, 500*time.Millisecond)
 	return port
