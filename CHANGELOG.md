@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+- TCP routes: a published name whose clients start with TLS and then
+  speak their own protocol (PostgreSQL 17+ with
+  `sslnegotiation=direct`, Redis or Valkey with TLS, AMQPS, LDAPS). The
+  edge ends TLS on 443 with the name's ACME certificate, chosen by the
+  TLS server name like an HTTP name's, and forwards the decrypted bytes
+  through the tunnel to the name's group, one stream per connection,
+  each way closed on its own, with TCP keepalive on both ends. It does
+  not read them. See [TCP routes](docs/operations.md#tcp-routes).
+  - The frpc proxy kind is `type = "tcp-tls"`: `customDomains` (exact
+    names), `alpn` (optional), and the local target. With an `alpn`
+    list the edge selects the client's first protocol the list has, and
+    refuses a client that offers none of them before the backend is
+    dialed. It needs the frp fork on both ends.
+  - A name is an HTTP name or a TCP route: the second claim of the other
+    kind is refused, logged, and counted
+    (`fortressedge_name_conflicts_total{name,refused}`). No proxy may
+    have the tunnel name.
+  - Policy keys, under `limits` and per site: `tcp_idle_timeout` (default
+    `8h`, `0` never) and `tcp_connections_per_source` (default `20` per
+    route; `exempt` sources have none). A refused connection is a
+    strike.
+  - One access log line per closed connection (`"proto":"tcp"`, with
+    `alpn`, `group`, `result`, `close`, bytes each way, duration), under
+    the access log's settings, and the metrics
+    `fortressedge_tcp_route_connections{site}`,
+    `fortressedge_tcp_route_connections_total{site,result}` (`ok`,
+    `alpn_refused`, `policy_refused`, `no_backend`, `tls_failed`), and
+    `fortressedge_tcp_route_bytes_total{site,direction}`; `tcp_routes`
+    in the status.
+  - On TCP 443 every connection's ClientHello is now read before it goes
+    to the HTTPS server, which takes it as it came; HTTP names are
+    unchanged.
+- `fortresskube` publishes the TLSRoutes (`gateway.networking.k8s.io/v1`)
+  its Gateway has accepted, as it does HTTPRoutes: a `tcp-tls` proxy per
+  hostname, to the first `backendRefs` Service in the route's namespace,
+  dialed directly (`<svc>.<ns>.svc:<port>`), with the annotation
+  `fortressedge.io/alpn` (comma list) as the ALPN. A route or hostname
+  it cannot publish (a wildcard, a Service elsewhere, a name an
+  HTTPRoute or an older TLSRoute has) is logged once and counted; the
+  others go on. It needs `list` and `watch` on `tlsroutes`; without the
+  resource, or before the permission is there, it publishes HTTPRoutes
+  alone. `-metrics` serves its own Prometheus metrics.
+- Compatibility: a new edge serves old frpc as before. An older edge
+  refuses `tcp-tls` proxies: frpc logs why, `fortresskube` says the edge
+  needs an upgrade, and HTTP names are unaffected. Edge and
+  `fortresskube` are released as one version.
+- Overhead, measured with `make tcp-bench`: pgbench against PostgreSQL 17
+  directly (`sslmode=disable`), and through the edge with
+  `sslnegotiation=direct` and an in-process frpc over `wss`, as
+  `fortresskube` runs it; a 2-vCPU edge VM on QEMU's user-mode network,
+  which the stream crosses twice each way, 30 s per run. A benchmark,
+  not a bound: a real link adds its round trips.
+
+  | pgbench | direct | through the edge |
+  | --- | --- | --- |
+  | `-S -c 4`, latency | 0.99 ms (4045 tps) | 3.71 ms (1077 tps) |
+  | `-S -C -c 4`, connection time | 11.6 ms (86 tps) | 24.4 ms (41 tps) |
+
 ## 0.6.0
 
 - Several frpc can publish the same names: all tunnels of one node

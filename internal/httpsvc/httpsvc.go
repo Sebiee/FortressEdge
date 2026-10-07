@@ -207,9 +207,10 @@ type Extras struct {
 
 func (e Extras) ready() bool { return e.Ready != nil && e.Ready() }
 
-// Serve runs the HTTP and HTTPS servers until ctx ends. policy is the
-// policy.yml cfg holds, as stored; apply stores and applies a new one.
-func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, apply ops.ApplyFunc, reboot func(), more Extras) error {
+// Serve runs the HTTP and HTTPS servers until ctx ends, and the TCP
+// routes on the HTTPS port. policy is the policy.yml cfg holds, as
+// stored; apply stores and applies a new one.
+func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, routes TCPRoutes, apply ops.ApplyFunc, reboot func(), more Extras) error {
 	st := &httpStats{}
 	domains.SetTunnelGrace(cfg.TunnelGrace)
 	socks := &sockets{}
@@ -221,17 +222,19 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	track := newConns()
 	logx.SetConnections(track.Len)
 	lim := newLivePolicy(cfg.Policy)
-	vis := newVisitors(cfg.Tunnel, lim, filt, domains.Known)
+	vis := newVisitors(cfg.Tunnel, lim, filt, domains.KnownHTTP)
 	vis.onRate = func(host string) {
 		if route, ok := domains.Route(host); ok {
 			st.site(route).limitHits[limitRate].Add(1)
 		}
 	}
 	go vis.run(ctx)
+	tcp := newStreams(ctx, notTunnel(cfg.Tunnel, routes), nil, lim, vis, socks, st)
 	// The ops API rides the tunnel SNI's mTLS.
 	oh := ops.New(cfg, policy, logx.BootID(), config.LogDir)
 	oh.SetStatus(func() map[string]any {
 		m := statusExtra(st, filt, track, vis)
+		m["tcp_routes"] = tcp.snapshot()
 		m["access_log"] = acc.on()
 		if s := domains.CertStore(); s != nil {
 			m["cert_store"] = s.Status()
@@ -251,6 +254,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		}
 		w.Int("fortressedge_ready", ready)
 		writeMetrics(w, st, filt, track, vis, domains)
+		tcp.writeMetrics(w)
 		for _, f := range more.Metrics {
 			f(w)
 		}
@@ -278,11 +282,12 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		return err
 	}
 	h = vis.limit(protect(h, st))
-	tlsCfg, err := tlsConfig(ctx, cfg, domains)
+	tlsCfg, streamCfg, err := tlsConfig(ctx, cfg, domains)
 	if err != nil {
 		return err
 	}
-	httpH := vis.limit(redirectHTTPS(domains.Known))
+	tcp.tls = streamCfg
+	httpH := vis.limit(redirectHTTPS(domains.KnownHTTP))
 	logLimits(lim.get(), vis.maxConns)
 	// Fixed while the servers run: a change to these reboots (config.BootLimits).
 	servers := []*http.Server{newServer(":80", httpH, nil), newServer(":443", h, tlsCfg)}
@@ -290,7 +295,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		s.MaxHeaderBytes = cfg.Limits.MaxHeaderBytes
 		s.HTTP2 = &http.HTTP2Config{MaxConcurrentStreams: cfg.Limits.MaxHTTP2Streams}
 	}
-	return serve(ctx, servers, track, vis, socks, drainTimeout)
+	return serve(ctx, servers, track, vis, socks, tcp, drainTimeout)
 }
 
 // accessLogs turns the access log on and off as policies come. Its files
@@ -379,7 +384,7 @@ func (serverLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visitors, socks *sockets, drainFor time.Duration) error {
+func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visitors, socks *sockets, tcp *streams, drainFor time.Duration) error {
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
 		raw, err := net.Listen("tcp", s.Addr)
@@ -388,6 +393,10 @@ func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visit
 			return err
 		}
 		ln := track.listen(vis.listen(socks.listen(raw)))
+		if s.TLSConfig != nil && tcp != nil {
+			// A TCP route's connection leaves here, after its ClientHello.
+			ln = splitTLS(ln, tcp.take)
+		}
 		s.Handler = socks.handler(s.Handler)
 		go func(s *http.Server, ln net.Listener) {
 			if s.TLSConfig != nil {
@@ -524,19 +533,24 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-func tlsConfig(ctx context.Context, cfg config.Config, domains *Domains) (*tls.Config, error) {
+// tlsConfig is the HTTPS server's TLS, and the TLS a TCP route's
+// handshake starts from: the same certificates, versions, and suites,
+// with no ALPN of its own.
+func tlsConfig(ctx context.Context, cfg config.Config, domains *Domains) (httpsCfg, streamCfg *tls.Config, err error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(cfg.ClientCA) {
-		return nil, errors.New("client_ca: no certificates")
+		return nil, nil, errors.New("client_ca: no certificates")
 	}
 	magic, err := domains.acme(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	base := magic.TLSConfig()
 	base.GetCertificate = domains.certificate
+	streamCfg = base.Clone()
+	streamCfg.NextProtos = nil
 	base.NextProtos = append([]string{"h2", "http/1.1"}, base.NextProtos...)
-	return requireTunnelCert(base, pool, cfg.Tunnel, domains.Known), nil
+	return requireTunnelCert(base, pool, cfg.Tunnel, domains.Known), streamCfg, nil
 }
 
 // requireTunnelCert wraps base so the tunnel SNI — and only it — requires a

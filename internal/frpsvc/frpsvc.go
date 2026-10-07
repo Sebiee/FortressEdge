@@ -23,6 +23,7 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/vhost"
 	"github.com/fatedier/frp/server"
+	"github.com/fatedier/frp/server/group"
 	glog "github.com/fatedier/golib/log"
 	"golang.org/x/net/websocket"
 
@@ -55,6 +56,10 @@ type Options struct {
 	HeaderTimeout time.Duration
 	// OnDomain is told when a name gains its first route and loses its last.
 	OnDomain func(domain string, added bool)
+	// OnTCPDomain is the same for TCP routes (tcp-tls proxies).
+	OnTCPDomain func(domain string, added bool)
+	// Tunnel is the name dark nodes log in on: no proxy may have it.
+	Tunnel string
 	// OnProxyError gets each site request frps could not proxy.
 	OnProxyError func(*http.Request, error)
 	// Node names the dark node of a tunnel connection's verified client
@@ -99,6 +104,11 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 		VhostHTTPBehindProxy: true,
 		OnDomain:             opts.OnDomain,
 		OnProxyError:         opts.OnProxyError,
+		// TCP routes: httpsvc ends their TLS and dials the route.
+		EnableTCPTLS:     true,
+		OnTCPTLSDomain:   opts.OnTCPDomain,
+		OnDomainConflict: tunnel.conflict,
+		ReservedDomain:   reserved(opts.Tunnel),
 		// A surplus work connection is a burst's leftover: counted, and
 		// closed without the error frpc would log.
 		OnWorkConnDiscarded: func() { tunnel.discards.Add(1) },
@@ -404,12 +414,61 @@ func waitRun(ctx context.Context, d time.Duration) error {
 var tunnel = &tunnelStats{}
 
 // tunnelStats is frps's ServerMetrics: logins and proxies, from frps;
-// sessions and discards, from the edge's hooks.
+// sessions, discards, and name conflicts, from the edge's hooks.
 type tunnelStats struct {
 	logins, clients, proxies, discards atomic.Int64
 
-	mu       sync.Mutex
-	sessions map[string]int // open tunnel connections, by dark node
+	mu        sync.Mutex
+	sessions  map[string]int // open tunnel connections, by dark node
+	conflicts map[conflict]int64
+}
+
+// conflict is a proxy refused because its name is the other kind's.
+type conflict struct{ name, refused string }
+
+// conflict is frps's OnDomainConflict: a name is an HTTP name or a TCP
+// route, and the second claim to it is refused.
+func (t *tunnelStats) conflict(domain, refused, holder string) {
+	t.mu.Lock()
+	if t.conflicts == nil {
+		t.conflicts = map[conflict]int64{}
+	}
+	k := conflict{domain, refused}
+	t.conflicts[k]++
+	first := t.conflicts[k] == 1
+	t.mu.Unlock()
+	// frpc retries a refused proxy every half minute or so: the first
+	// refusal is a warning, the rest are counted.
+	lvl := slog.LevelDebug
+	if first {
+		lvl = slog.LevelWarn
+	}
+	slog.Log(context.Background(), lvl, "frps: name refused: it is already the other kind's",
+		"name", domain, "refused", kindName(refused), "holder", kindName(holder))
+}
+
+// reserved refuses the tunnel name to every proxy: a TCP route for it
+// would take dark nodes' and operators' connections, before their mutual
+// TLS. Names compare as frps gives them, lower case, without a trailing
+// dot.
+func reserved(tunnel string) func(string) bool {
+	tunnel = strings.TrimSuffix(strings.ToLower(tunnel), ".")
+	return func(domain string) bool {
+		return tunnel != "" && strings.TrimSuffix(domain, ".") == tunnel
+	}
+}
+
+// kindName is the edge's name for a kind of proxy.
+func kindName(kind string) string {
+	if kind == group.DomainKindTCPTLS {
+		return "tcp_route"
+	}
+	return kind
+}
+
+// TCPRoute is name's TCP route, if it has one.
+func (f *Frps) TCPRoute(name string) (group.TCPTLSRoute, bool) {
+	return f.svr.TCPTLSRoute(name)
 }
 
 func (t *tunnelStats) NewClient() {
@@ -476,6 +535,16 @@ func (f *Frps) WriteMetrics(w *metrics.Writer) {
 		"Logged-in frpc of each dark node, by its SPIFFE name (node/<name>): they share its names, and requests are spread across them.")
 	for _, g := range slices.Sorted(maps.Keys(groups)) {
 		w.Int("fortressedge_tunnel_group_members", int64(groups[g]), "group", g)
+	}
+	tunnel.mu.Lock()
+	conflicts := maps.Clone(tunnel.conflicts)
+	tunnel.mu.Unlock()
+	w.Family("fortressedge_name_conflicts_total", "counter",
+		"Proxies refused because their name is the other kind's, by name and the kind refused (http, tcp_route): a name is one or the other.")
+	for _, c := range slices.SortedFunc(maps.Keys(conflicts), func(a, b conflict) int {
+		return strings.Compare(a.name+" "+a.refused, b.name+" "+b.refused)
+	}) {
+		w.Int("fortressedge_name_conflicts_total", conflicts[c], "name", c.name, "refused", kindName(c.refused))
 	}
 	w.Family("fortressedge_tunnel_logins_total", "counter", "frpc logins frps accepted.")
 	w.Int("fortressedge_tunnel_logins_total", tunnel.logins.Load())

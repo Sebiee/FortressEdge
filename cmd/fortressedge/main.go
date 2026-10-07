@@ -189,6 +189,8 @@ func run() error {
 		// The default; each site request carries its site's (httpsvc).
 		HeaderTimeout: cfg.Limits.ResponseHeaderTimeout,
 		OnDomain:      domains.Domain,
+		OnTCPDomain:   domains.TCPDomain,
+		Tunnel:        cfg.Tunnel,
 		OnProxyError:  httpsvc.ProxyError,
 		Node:          httpsvc.NodeName(cfg.Tunnel),
 	})
@@ -199,7 +201,11 @@ func run() error {
 	consoleStatus(true, true, cfg)
 	var wantReboot atomic.Bool
 	var applyMu sync.Mutex
-	err = httpsvc.Serve(ctx, cfg, policy, filt, domains, frps.Control, frps.Vhost, func(b []byte) (ops.Outcome, error) {
+	routes := func(name string) (httpsvc.TCPRoute, bool) {
+		r, ok := frps.TCPRoute(name)
+		return httpsvc.TCPRoute{Group: r.Group, ALPN: r.ALPN, Dial: r.Dial}, ok
+	}
+	err = httpsvc.Serve(ctx, cfg, policy, filt, domains, frps.Control, frps.Vhost, routes, func(b []byte) (ops.Outcome, error) {
 		applyMu.Lock()
 		defer applyMu.Unlock()
 		p, aerr := config.ParsePolicy(b)

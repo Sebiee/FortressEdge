@@ -185,6 +185,9 @@ type SitePolicy struct {
 	AccessLog             *bool
 	MaxBodyBytes          *int64 // 0: no limit
 	ResponseHeaderTimeout time.Duration
+	// For a TCP route: see Limits.
+	TCPIdleTimeout    *time.Duration
+	TCPConnsPerSource *int
 }
 
 // Site is the settings in force for one request.
@@ -192,13 +195,18 @@ type Site struct {
 	AccessLog             bool
 	MaxBodyBytes          int64 // 0: no limit
 	ResponseHeaderTimeout time.Duration
+	TCPIdleTimeout        time.Duration // 0: never
+	TCPConnsPerSource     int           // 0: no limit
 }
 
 // Site is what applies to a request for host, which frps routed by route,
 // the published name that matched it (host itself, or a wildcard). An
 // entry for host wins over one for route.
 func (p Policy) Site(host, route string) Site {
-	s := Site{AccessLog: p.AccessLog.On, MaxBodyBytes: p.Limits.MaxBodyBytes, ResponseHeaderTimeout: p.Limits.ResponseHeaderTimeout}
+	s := Site{
+		AccessLog: p.AccessLog.On, MaxBodyBytes: p.Limits.MaxBodyBytes, ResponseHeaderTimeout: p.Limits.ResponseHeaderTimeout,
+		TCPIdleTimeout: p.Limits.TCPIdleTimeout, TCPConnsPerSource: p.Limits.TCPConnsPerSource,
+	}
 	if len(p.Sites) == 0 {
 		return s
 	}
@@ -216,6 +224,12 @@ func (p Policy) Site(host, route string) Site {
 	}
 	if sp.ResponseHeaderTimeout > 0 {
 		s.ResponseHeaderTimeout = sp.ResponseHeaderTimeout
+	}
+	if sp.TCPIdleTimeout != nil {
+		s.TCPIdleTimeout = *sp.TCPIdleTimeout
+	}
+	if sp.TCPConnsPerSource != nil {
+		s.TCPConnsPerSource = *sp.TCPConnsPerSource
 	}
 	return s
 }
@@ -266,6 +280,13 @@ type Limits struct {
 	// response headers; a stream that sends them with its first event
 	// (server-sent events, long polling) is cut after it. Whole seconds.
 	ResponseHeaderTimeout time.Duration
+	// TCPIdleTimeout closes a TCP route's connection after this long
+	// with no byte either way; 0 never does. Database tools hold
+	// sessions open for hours.
+	TCPIdleTimeout time.Duration
+	// TCPConnsPerSource is how many connections one source may hold open
+	// to one TCP route; connections_per_source counts them too.
+	TCPConnsPerSource int
 }
 
 // BootLimits are the limits the HTTP servers and listeners fix when they
@@ -293,6 +314,8 @@ func DefaultLimits() Limits {
 		MaxHTTP2Streams: 100, // net/http's default is 250
 		// frp's default.
 		ResponseHeaderTimeout: time.Minute,
+		TCPIdleTimeout:        8 * time.Hour,
+		TCPConnsPerSource:     20,
 	}
 }
 
@@ -312,6 +335,8 @@ type limitsYAML struct {
 	MaxBodySize           string `yaml:"max_body_size"`
 	MaxHTTP2Streams       *int   `yaml:"max_http2_streams"`
 	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
+	TCPIdleTimeout        string `yaml:"tcp_idle_timeout"`
+	TCPConnsPerSource     *int   `yaml:"tcp_connections_per_source"`
 }
 
 // edgeConfig is fortress.yml.
@@ -355,6 +380,8 @@ type siteYAML struct {
 	AccessLog             *bool  `yaml:"access_log"`
 	MaxBodySize           string `yaml:"max_body_size"`
 	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
+	TCPIdleTimeout        string `yaml:"tcp_idle_timeout"`
+	TCPConnsPerSource     *int   `yaml:"tcp_connections_per_source"`
 }
 
 // The keys each file takes. A key in the other file's list is refused
@@ -537,6 +564,19 @@ func parseSites(y map[string]siteYAML) (map[string]SitePolicy, error) {
 				return nil, fmt.Errorf("%s: sites: %s: %w", PolicyName, name, err)
 			}
 			sp.ResponseHeaderTimeout = d
+		}
+		if s := strings.TrimSpace(sy.TCPIdleTimeout); s != "" {
+			d, err := parseIdleTimeout(s)
+			if err != nil {
+				return nil, fmt.Errorf("%s: sites: %s: %w", PolicyName, name, err)
+			}
+			sp.TCPIdleTimeout = &d
+		}
+		if v := sy.TCPConnsPerSource; v != nil {
+			if *v < 0 {
+				return nil, fmt.Errorf("%s: sites: %s: tcp_connections_per_source: want 0 (off) or more", PolicyName, name)
+			}
+			sp.TCPConnsPerSource = v
 		}
 		out[name] = sp
 	}
@@ -851,6 +891,7 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 		{&l.NewConnsPerSecond, y.NewConnsPerSecond, "new_connections_per_second"},
 		{&l.NewConnBurst, y.NewConnBurst, "new_connection_burst"},
 		{&l.MaxConns, y.MaxConns, "max_connections"},
+		{&l.TCPConnsPerSource, y.TCPConnsPerSource, "tcp_connections_per_source"},
 	} {
 		if err := count(f.dst, f.v, f.key); err != nil {
 			return err
@@ -918,7 +959,23 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 		}
 		l.ResponseHeaderTimeout = d
 	}
+	if s := strings.TrimSpace(y.TCPIdleTimeout); s != "" {
+		d, err := parseIdleTimeout(s)
+		if err != nil {
+			return fmt.Errorf("%s: limits: %w", PolicyName, err)
+		}
+		l.TCPIdleTimeout = d
+	}
 	return nil
+}
+
+// parseIdleTimeout reads tcp_idle_timeout.
+func parseIdleTimeout(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 || d > 7*24*time.Hour || d > 0 && d < time.Second {
+		return 0, fmt.Errorf("tcp_idle_timeout: want a duration from 1s to 168h, such as 8h, or 0 for never")
+	}
+	return d, nil
 }
 
 // parseBodySize reads max_body_size: a size, or 0 for no limit.

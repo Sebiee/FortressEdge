@@ -155,7 +155,8 @@ func logLimits(l *edgeLimits, maxConns int) {
 		"connections_per_source", l.ConnsPerSource, "requests_per_second", l.RequestsPerSecond,
 		"request_burst", l.RequestBurst, "ban", l.Ban, "ban_after", l.BanAfter, "ban_window", l.BanWindow,
 		"max_uri_size", l.MaxURIBytes,
-		"max_body_size", l.MaxBodyBytes, "max_connections", maxConns, "exempt", len(l.Exempt))
+		"max_body_size", l.MaxBodyBytes, "max_connections", maxConns, "exempt", len(l.Exempt),
+		"tcp_idle_timeout", l.TCPIdleTimeout, "tcp_connections_per_source", l.TCPConnsPerSource)
 }
 
 // get returns k's visitor, creating it. Caller holds v.mu.
@@ -387,6 +388,8 @@ func (v *visitors) stats() map[string]any {
 			"max_body_size":              lim.MaxBodyBytes,
 			"max_http2_streams":          lim.MaxHTTP2Streams,
 			"response_header_timeout":    lim.ResponseHeaderTimeout.String(),
+			"tcp_idle_timeout":           lim.TCPIdleTimeout.String(),
+			"tcp_connections_per_source": lim.TCPConnsPerSource,
 			"exempt":                     len(lim.Exempt),
 		},
 	}

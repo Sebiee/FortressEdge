@@ -21,8 +21,9 @@ import (
 
 var fqdnRegex = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}\.?$`)
 
-// Domains is the set of hostnames that currently have an HTTP route.
-// frps reports a name when its first route appears and when its last route
+// Domains is the set of hostnames that currently have an HTTP route or
+// a TCP route: a name is one or the other, which frps decides. frps
+// reports a name when its first route appears and when its last route
 // disappears. Under tls: acme, the first report of an exact name manages
 // its certificate: loaded from disk, or obtained. certmagic's timer then
 // checks it every renew_interval and renews it once it is due. The last
@@ -32,6 +33,7 @@ type Domains struct {
 
 	mu    sync.Mutex
 	names map[string]context.CancelFunc // cancel stops that name's pending obtain
+	tcp   map[string]bool               // the names that are TCP routes
 	magic *certmagic.Config
 	cache *certmagic.Cache
 
@@ -123,7 +125,14 @@ func (d *Domains) setMagic(magic *certmagic.Config, cache *certmagic.Cache) {
 // Domain is the frps vhost callback. added is true when the name gains its
 // first route and false when it loses its last. frps calls it with its
 // router lock held, so the obtain runs in the background.
-func (d *Domains) Domain(domain string, added bool) {
+func (d *Domains) Domain(domain string, added bool) { d.publish(domain, added, false) }
+
+// TCPDomain is frps's callback for TCP routes, as Domain is for HTTP
+// names. A TCP route's name has a certificate like any, and no HTTP
+// route.
+func (d *Domains) TCPDomain(domain string, added bool) { d.publish(domain, added, true) }
+
+func (d *Domains) publish(domain string, added, tcp bool) {
 	if d == nil {
 		return
 	}
@@ -134,10 +143,15 @@ func (d *Domains) Domain(domain string, added bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !added {
-		if cancel, ok := d.names[domain]; ok {
+		if cancel, ok := d.names[domain]; ok && d.tcp[domain] == tcp {
 			cancel()
 			delete(d.names, domain)
-			d.holdLocked(domain)
+			delete(d.tcp, domain)
+			if !tcp {
+				// A TCP route's client would get an HTTP 503: it goes
+				// silent like any name the edge does not serve.
+				d.holdLocked(domain)
+			}
 			d.unmanageLocked(domain)
 		}
 		return
@@ -147,6 +161,16 @@ func (d *Domains) Domain(domain string, added bool) {
 	}
 	if d.names == nil {
 		d.names = map[string]context.CancelFunc{}
+		d.tcp = map[string]bool{}
+	}
+	if tcp {
+		if domain == d.tunnel {
+			return // frps refuses it; its connections need mutual TLS
+		}
+		d.tcp[domain] = true
+		// A certificate kept from an HTTP name, or from the disk at boot,
+		// would answer HTTP for it.
+		delete(d.held, domain)
 	}
 	d.names[domain] = func() {}
 	d.startLocked(domain)
@@ -338,13 +362,24 @@ func (d *Domains) Allowed(name string) bool {
 	return ok
 }
 
-// Routed reports whether frps has a route for host.
+// TCPRoute reports whether name is a TCP route's.
+func (d *Domains) TCPRoute(name string) bool {
+	if d == nil {
+		return false
+	}
+	name = hostname(name)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.tcp[name]
+}
+
+// Routed reports whether frps has an HTTP route for host.
 func (d *Domains) Routed(host string) bool {
 	_, ok := d.Route(host)
 	return ok
 }
 
-// Route returns the published name frps routes host by, matched the way
+// Route returns the published name frps routes host's HTTP by, matched the way
 // its router matches: the exact name, then each wildcard parent down to
 // three labels (a.b.example.com tries *.b.example.com, then
 // *.example.com), then a catch-all "*". A name with a held certificate
@@ -360,7 +395,7 @@ func (d *Domains) Route(host string) (string, bool) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, ok := d.names[host]; ok {
+	if _, ok := d.names[host]; ok && !d.tcp[host] {
 		return host, true
 	}
 	labels := strings.Split(host, ".")
@@ -415,9 +450,16 @@ func (d *Domains) TunnelCertValid(now time.Time) bool {
 	return false
 }
 
-// Known is a name the edge answers for: the tunnel or a routed site.
-// Anything else gets no certificate, no status code, and no bytes.
+// Known is a name the edge answers TLS for: the tunnel, a routed site,
+// or a TCP route. Anything else gets no certificate, no status code, and
+// no bytes.
 func (d *Domains) Known(name string) bool {
+	return d.KnownHTTP(name) || d.TCPRoute(name)
+}
+
+// KnownHTTP is a name the edge answers HTTP for: the tunnel or a routed
+// site.
+func (d *Domains) KnownHTTP(name string) bool {
 	if d == nil {
 		return false
 	}

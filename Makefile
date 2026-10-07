@@ -1,4 +1,4 @@
-.PHONY: generate test build kube iso e2e load clock-soak openappsec gotestwaf bench-iso waf-bench perf-guard ci tidy tidy-check
+.PHONY: generate test build kube iso e2e load tcp-bench clock-soak openappsec gotestwaf bench-iso waf-bench perf-guard ci tidy tidy-check
 
 # Three Go modules: the edge and fortressctl (root), the system tests
 # (test/e2e), and fortresskube (cmd/fortresskube). Test and Kubernetes
@@ -159,6 +159,16 @@ load: iso
 	$(Q)go -C test/e2e test -tags e2e -count=1 -timeout 15m -run '^TestLoad$$' -v . \
 		-args -iso=$(CURDIR)/out/fortressedge.iso -fortressctl=$(CURDIR)/out/fortressctl -load=$(LOAD_FOR) 2>&1 \
 		| grep -E '^(---|ok|FAIL|PASS)|load_test.go'
+
+# pgbench through a TCP route against the same database directly, for
+# the release notes (TestTCPRouteOverhead). Needs docker; not part of
+# ci; no -race, which would slow the in-process frpc. TCP_BENCH_FOR is
+# each run's length.
+TCP_BENCH_FOR ?= 30s
+tcp-bench: iso
+	$(Q)go -C test/e2e test -tags e2e -count=1 -timeout 15m -run '^TestTCPRouteOverhead$$' -v . \
+		-args -iso=$(CURDIR)/out/fortressedge.iso -fortressctl=$(CURDIR)/out/fortressctl -pgbench=$(TCP_BENCH_FOR) 2>&1 \
+		| grep -E '^(---|ok|FAIL|PASS)|tcproute_test.go'
 
 # An edge kept to real NTP servers (CLOCK_NTP, comma-separated; METAS's by
 # default) for CLOCK_FOR, printing its offset each minute. Needs the

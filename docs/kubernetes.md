@@ -18,6 +18,11 @@ rejecting it, removes the name, and other names keep running.
 - The frpc admin API's reload is refused: it would replace the routes
   with the file's proxies.
 - Outside a cluster, `-kubeconfig` (or `KUBECONFIG`) points it at one.
+- TLSRoutes it has accepted become [TCP routes](#tcp-routes).
+- `-metrics :9100` serves its own Prometheus metrics on `/metrics`:
+  `fortresskube_published_names{kind}` and the TLSRoutes it refuses
+  (`fortresskube_refused_tlsroutes{reason}`,
+  `fortresskube_tlsroute_refusals_total{reason}`). Off by default.
 
 Releases attach the binary and push the image
 `ghcr.io/sebiee/fortressedge/fortresskube:<tag>`.
@@ -32,7 +37,7 @@ kind: ClusterRole
 metadata: { name: fortresskube }
 rules:
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes"]
+    resources: ["httproutes", "tlsroutes"] # tlsroutes for TCP routes
     verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -116,7 +121,7 @@ unused, without the error message older edges sent (frpc logged it as
 `fortressedge_work_connections_discarded_total`. `poolCount = 5` is the
 most that helps. The edge's [metrics](operations.md#metrics) cover `fortresskube`'s
 health: `fortressedge_tunnel_clients{node="<name>"}` counts its open
-tunnels; it has no admin or metrics port of its own.
+tunnels; `-metrics` adds what it publishes and refuses.
 
 **Several replicas.** Every replica of the Deployment uses the same
 node certificate, so the edge sees them as one dark node,
@@ -148,3 +153,53 @@ spec:
   hostnames: ["blog.example.com"]
   rules: [{ backendRefs: [{ name: blog, port: 80 }] }]
 ```
+
+## TCP routes
+
+A TLSRoute (`gateway.networking.k8s.io/v1`) that the Gateway has
+accepted publishes a [TCP route](operations.md#tcp-routes) per
+hostname: the edge ends TLS, as it does for an HTTPRoute, and the
+decrypted stream goes to the route's first `backendRefs` entry. A
+developer can then reach a database in a dark cluster with direct TLS:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: postgresql
+  namespace: dev
+  annotations:
+    fortressedge.io/alpn: postgresql   # comma list; leave out for none
+spec:
+  parentRefs: [{ name: public, namespace: infra }]
+  hostnames: ["db.dev.example.com"]
+  rules: [{ backendRefs: [{ name: postgresql-rw, port: 5432 }] }]
+```
+
+```sh
+psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct sslrootcert=system dbname=app"
+# pgJDBC 42.7.4+: jdbc:postgresql://db.dev.example.com:443/app?sslmode=verify-full&sslNegotiation=direct
+```
+
+- `fortresskube` dials the Service itself,
+  `<name>.<namespace>.svc:<port>`, not the Gateway: the Gateway's proxy
+  routes a TLS stream by its server name, and the edge has already
+  ended that TLS. The Gateway needs a TLS listener that accepts the
+  route (`allowedRoutes` decides which namespaces may publish, as for
+  HTTPRoutes), and a network policy must let `fortresskube` reach the
+  Service.
+- The backend must be a `Service` in the route's own namespace, with a
+  `port`; a route that names another namespace is refused, as
+  `fortresskube` does not check ReferenceGrants.
+- Wildcard hostnames are refused. A hostname an HTTPRoute publishes
+  stays an HTTP name, and the TLSRoute's is refused; of two TLSRoutes
+  with one hostname, the older keeps it. A refused route or hostname is
+  logged once, and counted in its metrics; the others go on.
+- `fortresskube` needs `list` and `watch` on `tlsroutes` (above). A
+  cluster without TLSRoutes is logged at start and left out. A discovery
+  that fails otherwise is tried again, and a missing permission is
+  warned about after 30 s; HTTPRoutes are published meanwhile, and the
+  TLSRoutes join once their first full list is in.
+- An edge older than 0.7.0 refuses the `tcp-tls` proxies:
+  `fortresskube` logs that the edge needs an upgrade, and its HTTP
+  names are unaffected.

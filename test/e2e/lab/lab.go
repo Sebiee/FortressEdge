@@ -663,6 +663,25 @@ type Member struct {
 // PublishAs is Publish as member m.
 func (vm *VM) PublishAs(t *testing.T, m Member, proto, caFile, crt, key string, port int, domains ...string) (stop func()) {
 	t.Helper()
+	return vm.PublishProxies(t, m, proto, caFile, crt, key, &v1.HTTPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: domains[0], Type: "http", ProxyBackend: v1.ProxyBackend{
+			LocalIP: "127.0.0.1", LocalPort: port,
+		}},
+		DomainConfig: v1.DomainConfig{CustomDomains: domains},
+	})
+}
+
+// TCPRoute is a tcp-tls proxy for domain to 127.0.0.1:port, whose
+// clients must select one of alpn, if any.
+func TCPRoute(domain string, port int, alpn ...string) v1.ProxyConfigurer {
+	c := &v1.TCPTLSProxyConfig{CustomDomains: []string{domain}, ALPN: alpn}
+	c.Name, c.Type, c.LocalIP, c.LocalPort = "tls:"+domain, "tcp-tls", "127.0.0.1", port
+	return c
+}
+
+// PublishProxies is PublishAs with any proxies.
+func (vm *VM) PublishProxies(t *testing.T, m Member, proto, caFile, crt, key string, proxies ...v1.ProxyConfigurer) (stop func()) {
+	t.Helper()
 	svc := FRPC(t, &v1.ClientCommonConfig{
 		User:          m.User,
 		ServerAddr:    vm.Addr,
@@ -679,12 +698,7 @@ func (vm *VM) PublishAs(t *testing.T, m Member, proto, caFile, crt, key string, 
 				CertFile: crt, KeyFile: key, TrustedCaFile: caFile, ServerName: Tunnel,
 			}},
 		},
-	}, &v1.HTTPProxyConfig{
-		ProxyBaseConfig: v1.ProxyBaseConfig{Name: domains[0], Type: "http", ProxyBackend: v1.ProxyBackend{
-			LocalIP: "127.0.0.1", LocalPort: port,
-		}},
-		DomainConfig: v1.DomainConfig{CustomDomains: domains},
-	})
+	}, proxies...)
 	// Own the lifetime: Close and wait so Run's stop does not race the next
 	// parallel subtest (t.Context alone cancels without joining).
 	done := make(chan struct{})

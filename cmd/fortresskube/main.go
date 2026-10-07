@@ -1,7 +1,9 @@
 // Command fortresskube is frpc for a Kubernetes cluster. Besides the
 // proxies in its frpc config, it publishes every hostname of the HTTPRoutes
 // that one Gateway has accepted, one http proxy per name, all forwarded to
-// that Gateway. The edge then gets a certificate for each exact name.
+// that Gateway, and every hostname of the TLSRoutes it has accepted, one
+// tcp-tls proxy per name, forwarded to the route's Service. The edge then
+// gets a certificate for each exact name.
 package main
 
 import (
@@ -10,23 +12,31 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/fatedier/frp/client"
+	"github.com/fatedier/frp/client/proxy"
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/config/v1/validation"
 	"github.com/fatedier/frp/pkg/util/log"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/rest"
@@ -50,6 +60,7 @@ func run() error {
 	gateway := flag.String("gateway", "", "Gateway whose accepted HTTPRoutes are published, as namespace/name")
 	backend := flag.String("backend", "", "host:port the published proxies forward to (default cilium-gateway-NAME.NAMESPACE.svc:80)")
 	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path; empty means in-cluster")
+	metricsAddr := flag.String("metrics", "", "host:port to serve Prometheus metrics on, such as :9100; empty serves none")
 	flag.Parse()
 
 	gwNS, gwName, ok := strings.Cut(*gateway, "/")
@@ -125,15 +136,24 @@ func run() error {
 		default:
 		}
 	}
-	inf := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0).ForResource(httpRoutes).Informer()
-	if _, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0)
+	handler := cache.ResourceEventHandlerFuncs{
 		AddFunc:    poke,
 		UpdateFunc: func(_, obj any) { poke(obj) },
 		DeleteFunc: poke,
-	}); err != nil {
+	}
+	inf := factory.ForResource(httpRoutes).Informer()
+	if _, err := inf.AddEventHandler(handler); err != nil {
 		return err
 	}
 	go inf.Run(ctx.Done())
+	// TLSRoutes, when the cluster serves them. They never hold up the
+	// HTTPRoutes: until their first full list, none is published.
+	var tlsInf atomic.Pointer[cache.SharedIndexInformer]
+	go watchTLSRoutes(ctx, rc, factory, handler, func(i cache.SharedIndexInformer) {
+		tlsInf.Store(&i)
+		poke(nil)
+	})
 	// Publishing before the first full list would drop every name the
 	// edge already serves.
 	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
@@ -141,38 +161,202 @@ func run() error {
 	}
 	log.Infof("watching httproutes accepted by gateway %s/%s, forwarding to %s", gwNS, gwName, *backend)
 
+	stats := &routeStats{}
+	if *metricsAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("GET /metrics", stats)
+			srv := &http.Server{Addr: *metricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+			if err := srv.ListenAndServe(); err != nil {
+				log.Warnf("metrics: %v", err)
+			}
+		}()
+	}
+	edge := &edgeSupport{status: svc.StatusExporter()}
+	tlsSynced := false
 	for {
 		select {
 		case err := <-errc:
 			return err
 		case <-changed:
+			var tlsStore cache.Store
+			if i := tlsInf.Load(); i != nil {
+				if !tlsSynced {
+					tlsSynced = true
+					log.Infof("watching tlsroutes accepted by gateway %s/%s, forwarding to their Services", gwNS, gwName)
+				}
+				tlsStore = (*i).GetStore()
+			}
+			httpProxies, tlsProxies, refused := publication(inf.GetStore(), tlsStore, gwNS, gwName, host, port)
+			for _, r := range stats.update(len(httpProxies), len(tlsProxies), refused) {
+				log.Warnf("tlsroute not published: %s", r)
+			}
 			// Static proxies come last so they win a name clash.
-			all := append(published(inf.GetStore().List(), gwNS, gwName, host, port), res.Proxies...)
+			all := append(append(httpProxies, tlsProxies...), res.Proxies...)
 			if err := svc.UpdateConfigSource(common, all, res.Visitors); err != nil {
-				log.Warnf("publish httproutes: %v", err)
+				log.Warnf("publish routes: %v", err)
+			}
+			if len(tlsProxies) > 0 {
+				edge.check(tlsProxies)
 			}
 		}
 	}
+}
+
+// publication is what fortresskube publishes from the routes the stores
+// hold: an http proxy per HTTPRoute name, then a tcp-tls proxy per
+// TLSRoute name that no HTTPRoute has. A nil tlsStore has no TLSRoutes.
+func publication(httpStore, tlsStore cache.Store, gwNS, gwName, host string, port int) (httpProxies, tlsProxies []v1.ProxyConfigurer, refused []refusal) {
+	httpProxies = published(httpStore.List(), gwNS, gwName, host, port)
+	if tlsStore == nil {
+		return httpProxies, nil, nil
+	}
+	names := map[string]bool{}
+	for _, p := range httpProxies {
+		names[p.GetBaseConfig().Name] = true
+	}
+	tlsProxies, refused = publishedTLS(tlsStore.List(), gwNS, gwName, names)
+	return httpProxies, tlsProxies, refused
+}
+
+// watchTLSRoutes starts watching TLSRoutes once discovery says the
+// cluster serves them, and calls synced with the informer once its first
+// full list is in. A cluster without them is logged, and left out; a
+// discovery that fails otherwise (the API server away, no permission)
+// is tried again.
+func watchTLSRoutes(ctx context.Context, rc *rest.Config, factory dynamicinformer.DynamicSharedInformerFactory,
+	handler cache.ResourceEventHandler, synced func(cache.SharedIndexInformer),
+) {
+	for delay := time.Second; ; delay = min(2*delay, time.Minute) {
+		served, err := tlsRoutesServed(rc)
+		if err == nil && !served || apierrors.IsNotFound(err) {
+			log.Infof("tlsroutes (%s) not served by this cluster: TCP routes off", tlsRoutes.GroupVersion())
+			return
+		}
+		if err == nil {
+			break
+		}
+		log.Warnf("tlsroutes: discovery of %s: %v; trying again in %s", tlsRoutes.GroupVersion(), err, delay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
+	inf := factory.ForResource(tlsRoutes).Informer()
+	if _, err := inf.AddEventHandler(handler); err != nil {
+		log.Warnf("tlsroutes: %v", err)
+		return
+	}
+	go inf.Run(ctx.Done())
+	for warned := false; ; warned = true {
+		wait, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ok := cache.WaitForCacheSync(wait.Done(), inf.HasSynced)
+		cancel()
+		if ok {
+			synced(inf)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if !warned {
+			log.Warnf("tlsroutes: no full list after 30s; fortresskube needs list and watch on %s", tlsRoutes.GroupResource())
+		}
+	}
+}
+
+// tlsRoutesServed reports whether the API server serves TLSRoutes in
+// the version fortresskube reads.
+func tlsRoutesServed(rc *rest.Config) (bool, error) {
+	dc, err := discovery.NewDiscoveryClientForConfig(rc)
+	if err != nil {
+		return false, err
+	}
+	list, err := dc.ServerResourcesForGroupVersion(tlsRoutes.GroupVersion().String())
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(list.APIResources, func(r metav1.APIResource) bool { return r.Name == tlsRoutes.Resource }), nil
+}
+
+// edgeSupport tells, once, that the edge refuses tcp-tls proxies: it is
+// older than fortresskube. HTTP names are not affected.
+type edgeSupport struct {
+	status interface {
+		GetProxyStatus(string) (*proxy.WorkingStatus, bool)
+	}
+	mu       sync.Mutex
+	told     bool
+	checking bool
+}
+
+// check looks at the proxies' status a little after they were sent.
+func (e *edgeSupport) check(proxies []v1.ProxyConfigurer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.told || e.checking {
+		return
+	}
+	e.checking = true
+	names := make([]string, len(proxies))
+	for i, p := range proxies {
+		names[i] = p.GetBaseConfig().Name
+	}
+	var look func()
+	look = func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		pending := false
+		for _, n := range names {
+			st, ok := e.status.GetProxyStatus(n)
+			switch {
+			case !ok:
+			case st.Phase == proxy.ProxyPhaseStartErr && oldEdge(st.Err):
+				log.Warnf("the edge does not take TCP routes (%s): it is older than fortresskube; "+
+					"TLSRoutes stay unpublished until it is upgraded, HTTPRoutes are unaffected", st.Err)
+				e.told, e.checking = true, false
+				return
+			case st.Phase == proxy.ProxyPhaseNew || st.Phase == proxy.ProxyPhaseWaitStart:
+				pending = true // not logged in yet, or no answer yet
+			}
+		}
+		if pending {
+			time.AfterFunc(10*time.Second, look)
+			return
+		}
+		e.checking = false
+	}
+	time.AfterFunc(10*time.Second, look)
+}
+
+// oldEdge is frps's refusal of a proxy type it does not know, or one it
+// does not route.
+func oldEdge(err string) bool {
+	return strings.Contains(err, "unknown proxy type") || strings.Contains(err, "type [tcp-tls] not supported")
 }
 
 type httpRoute struct {
 	Spec struct {
 		Hostnames []string `json:"hostnames"`
 	} `json:"spec"`
-	Status struct {
-		Parents []struct {
-			ParentRef struct {
-				Group     *string `json:"group"`
-				Kind      *string `json:"kind"`
-				Namespace *string `json:"namespace"`
-				Name      string  `json:"name"`
-			} `json:"parentRef"`
-			Conditions []struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"conditions"`
-		} `json:"parents"`
-	} `json:"status"`
+	Status routeStatus `json:"status"`
+}
+
+// routeStatus is a route's status, as Gateways write it.
+type routeStatus struct {
+	Parents []struct {
+		ParentRef struct {
+			Group     *string `json:"group"`
+			Kind      *string `json:"kind"`
+			Namespace *string `json:"namespace"`
+			Name      string  `json:"name"`
+		} `json:"parentRef"`
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+	} `json:"parents"`
 }
 
 // published is one http proxy per hostname of each route the Gateway
@@ -228,7 +412,7 @@ func published(objs []any, gwNS, gwName, host string, port int) []v1.ProxyConfig
 			continue
 		}
 		var r httpRoute
-		if runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &r) != nil || !r.acceptedBy(u.GetNamespace(), gwNS, gwName) {
+		if runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &r) != nil || !r.Status.acceptedBy(u.GetNamespace(), gwNS, gwName) {
 			continue
 		}
 		for _, h := range r.Spec.Hostnames {
@@ -248,8 +432,8 @@ func published(objs []any, gwNS, gwName, host string, port int) []v1.ProxyConfig
 	return out
 }
 
-func (r *httpRoute) acceptedBy(routeNS, gwNS, gwName string) bool {
-	for _, p := range r.Status.Parents {
+func (s *routeStatus) acceptedBy(routeNS, gwNS, gwName string) bool {
+	for _, p := range s.Parents {
 		ref := p.ParentRef
 		if deref(ref.Group, gatewayGroup) != gatewayGroup || deref(ref.Kind, "Gateway") != "Gateway" ||
 			deref(ref.Namespace, routeNS) != gwNS || ref.Name != gwName {

@@ -12,6 +12,7 @@ for ACME certificates.
 ```
 Internet  --TCP 80-->   308 redirect to HTTPS
 Internet  --TCP 443-->  TLS, then the dark node that publishes that hostname
+                        (HTTP, or a TCP stream such as PostgreSQL's direct TLS)
 Dark node --TCP 443-->  frp over WebSocket, with a client certificate
 ```
 
@@ -295,8 +296,13 @@ system roots for Let's Encrypt, or an internal ACME server's root. Set it
 for stock frpc, which does not check the edge's certificate without it.
 `fortresskube` checks against the system roots when it is not set, and
 skips the check only with `transport.tls.insecureSkipVerify = true`. For Kubernetes, `fortresskube`
-publishes every HTTPRoute a Gateway accepts: see
+publishes every HTTPRoute and TLSRoute a Gateway accepts: see
 [docs/kubernetes.md](docs/kubernetes.md).
+
+A proxy of type `tcp-tls` publishes a TCP service whose clients start
+with TLS, such as PostgreSQL 17 with `sslnegotiation=direct`: the edge
+ends TLS and forwards the stream, which needs the frp fork on the dark
+node too ([TCP routes](docs/operations.md#tcp-routes)).
 
 ## Operations
 

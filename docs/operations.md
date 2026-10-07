@@ -158,12 +158,80 @@ off keeps its files; a new size or count applies from the next write. Each new f
 gets a new id (`<boot-id>`, then `<boot-id>.1`, `.2`, …), and a rotated
 file is kept as `<id>.log`.
 
+A connection to a [TCP route](#tcp-routes) is one line when it closes,
+with `"proto":"tcp"`, under the same settings:
+
+```json
+{"time":"2026-10-07T10:02:17.114Z","id":"01925f3a-…","ip":"203.0.113.7","site":"db.dev.example.com","proto":"tcp","alpn":"postgresql","group":"node1","result":"ok","close":"client","in":18213,"out":904117,"ms":5410233,"start":"2026-10-07T08:32:06.881Z","us":5410233012}
+```
+
+`result` is `ok`, `alpn_refused`, `policy_refused`, `no_backend`, or
+`tls_failed`; `close`, for an `ok` one, is who ended it: `client` or
+`backend` (the one that closed first, then the other), `idle_timeout`,
+`client_error`, `backend_error`, or `shutdown`. `in` is what the client
+sent, `out` what it got back, and `group` the dark node whose frpc
+carried it.
+
 `GET /~!ops/access` serves it with the same cursor, `follow`, and gap
 rules as the edge's log, always as NDJSON (the lines are JSON already).
 A cursor into any kept file continues through every newer one, so a
 shipper that polls before the oldest file is deleted loses nothing. For
 Filebeat, copy the input above with `url: …/~!ops/access`; each event is
 then the request record itself.
+
+## TCP routes
+
+A TCP route publishes a service whose clients start with TLS and then
+speak their own protocol: PostgreSQL 17 or later with
+`sslnegotiation=direct`, Redis or Valkey with TLS, AMQPS, LDAPS. The
+edge ends TLS on 443 with the name's ACME certificate, chosen by the
+TLS server name, as for an HTTP name, and forwards the decrypted bytes
+through the tunnel; it does not read them. It cannot serve a protocol
+that starts TLS inside its own conversation: MySQL, PostgreSQL's
+classic `SSLRequest`, STARTTLS.
+
+A dark node publishes one with an frpc proxy of type `tcp-tls`
+(`fortresskube` makes one per [TLSRoute](kubernetes.md#tcp-routes)):
+
+```toml
+[[proxies]]
+name = "db"
+type = "tcp-tls"
+customDomains = ["db.dev.example.com"]   # exact names
+alpn = ["postgresql"]                    # optional
+localIP = "postgresql-rw.dev.svc"
+localPort = 5432
+```
+
+- With an `alpn` list, the edge selects the first protocol the client
+  offers that the list has; a client that offers none of them is
+  refused, before the backend is dialed: `no_application_protocol`, or
+  a closed connection when it offers no ALPN at all. PostgreSQL's
+  clients require the server to select `postgresql`.
+- A name is an HTTP name or a TCP route. A second claim of the other
+  kind is refused, logged, and counted in
+  `fortressedge_name_conflicts_total`; frpc logs why. A TCP route's
+  name wins over an HTTP wildcard that covers it. No proxy may have the
+  tunnel name, whose connections need the edge's mutual TLS.
+- Each client connection gets its own stream to the backend. Each way
+  closes on its own: the client's `close_notify` or FIN reaches the
+  backend as EOF, and the backend's EOF reaches the client as
+  `close_notify`, while the other way goes on. Both sockets keep TCP
+  keepalive (30 s idle, then every 10 s).
+- The replicas of one dark node share a TCP route as they share an HTTP
+  name, connection by connection; their `alpn` lists must hold the same
+  protocols, in any order.
+- `tcp_idle_timeout` (default 8 h: database tools hold sessions for
+  hours) and `tcp_connections_per_source` (default 20, per route) are
+  [limits](#limits), per site too; `exempt` sources have no
+  `tcp_connections_per_source`. `connections_per_source` counts these
+  connections as well. A refused connection is a strike.
+- They are on TCP 443 only. QUIC on UDP 443 carries dark nodes'
+  tunnels, not visitors.
+- A shutdown closes them with the rest.
+
+The edge's metrics and access log have [their own lines](#access-log)
+for them.
 
 ## Clock
 
@@ -305,7 +373,11 @@ names visitors make up.
 | `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
 | `fortressedge_tunnel_group_members` | `group` | logged-in frpc by dark node (`node/<name>`): its group, which shares its names |
 | `fortressedge_tunnel_logins_total`, `fortressedge_tunnel_proxies` | | frpc logins; proxies registered |
-| `fortressedge_published_names` | | names published, wildcards included |
+| `fortressedge_published_names` | | names published, wildcards and TCP routes included |
+| `fortressedge_tcp_route_connections` | `site` | connections to a [TCP route](#tcp-routes) open now |
+| `fortressedge_tcp_route_connections_total` | `site`, `result` | connections to a TCP route by result: `ok`, `alpn_refused`, `policy_refused`, `no_backend`, `tls_failed` |
+| `fortressedge_tcp_route_bytes_total` | `site`, `direction` | bytes a TCP route carried, `in` from the client and `out` to it |
+| `fortressedge_name_conflicts_total` | `name`, `refused` | proxies refused because their name is the other kind's: `http` or `tcp_route` (frpc retries, so each try counts) |
 | `fortressedge_work_connections` | `state` | work connections: `pooled` by frpc ahead of a request, `idle` after one, `active` |
 | `fortressedge_work_connections_discarded_total` | | work connections frpc sent beyond its pool, closed unused |
 | `fortressedge_certificate_not_after_seconds` | `name` | when the served certificate expires: the tunnel name and each site |
@@ -362,6 +434,8 @@ limits:
   max_uri_size: 16KiB
   max_body_size: 512MiB             # 0: no limit (leave it to the gateway). Per site too
   response_header_timeout: 60s      # wait for the origin's response headers; whole seconds, 1s–10m. Per site too
+  tcp_idle_timeout: 8h              # a TCP route's connection with no byte either way; 0: never. Per site too
+  tcp_connections_per_source: 20    # open connections to one TCP route; 0: no limit. Per site too
   max_connections: 0                # reboot. All sources, per port; 0: RAM ÷ 64 KiB, 1024–32768
   max_header_size: 64KiB            # reboot. Request line and headers
   max_http2_streams: 100            # reboot. Concurrent streams per HTTP/2 connection
@@ -405,6 +479,8 @@ logs.
 | `max_body_size` | `413`; a body announced as larger never reaches the origin, a streamed one is cut off there |
 | `max_http2_streams` | the client queues further requests; the server announces the limit when the connection opens |
 | `response_header_timeout` | `504` with an empty body |
+| `tcp_connections_per_source` | the connection to the TCP route is closed before its TLS handshake |
+| `tcp_idle_timeout` | the TCP route's connection is closed: the client reads EOF |
 
 Each refused request (`429`) or connection is a strike. A source with
 more than `ban_after` strikes within `ban_window`, counted from its first

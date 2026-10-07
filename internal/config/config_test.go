@@ -333,16 +333,21 @@ func TestParseSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	edge := Site{AccessLog: true, MaxBodyBytes: 1 << 20, ResponseHeaderTimeout: 30 * time.Second}
+	// TCP routes' defaults, which these sites leave alone.
+	tcp := func(s Site) Site {
+		s.TCPIdleTimeout, s.TCPConnsPerSource = 8*time.Hour, 20
+		return s
+	}
+	edge := tcp(Site{AccessLog: true, MaxBodyBytes: 1 << 20, ResponseHeaderTimeout: 30 * time.Second})
 	for _, tc := range []struct {
 		host, route string
 		want        Site
 	}{
 		{"other.example.com", "other.example.com", edge},
-		{"upload.example.com", "upload.example.com", Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second}},
-		{"argo.apps.example.com", "*.apps.example.com", Site{AccessLog: true, ResponseHeaderTimeout: 10 * time.Minute}},
+		{"upload.example.com", "upload.example.com", tcp(Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second})},
+		{"argo.apps.example.com", "*.apps.example.com", tcp(Site{AccessLog: true, ResponseHeaderTimeout: 10 * time.Minute})},
 		// A name's own entry wins over its wildcard's.
-		{"upload.example.com", "*.example.com", Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second}},
+		{"upload.example.com", "*.example.com", tcp(Site{MaxBodyBytes: 4 << 30, ResponseHeaderTimeout: 30 * time.Second})},
 	} {
 		if got := p.Site(tc.host, tc.route); got != tc.want {
 			t.Errorf("%s via %s: %+v, want %+v", tc.host, tc.route, got, tc.want)
@@ -362,6 +367,43 @@ func TestParseSites(t *testing.T) {
 		"sites:\n  a.example.com:\n    response_header_timeout: 1h\n",
 		"sites:\n  a.example.com:\n    ban: 1m\n",
 		"sites:\n  a.example.com: {}\n  A.example.com: {}\n",
+	} {
+		if _, err := ParsePolicy([]byte(bad)); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
+func TestParseTCPRoutePolicy(t *testing.T) {
+	p, err := ParsePolicy([]byte("limits:\n  tcp_idle_timeout: 2h\n  tcp_connections_per_source: 5\n" +
+		"sites:\n  db.example.com:\n    tcp_idle_timeout: 0\n    tcp_connections_per_source: 0\n" +
+		"  cache.example.com:\n    tcp_idle_timeout: 30m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		idle  time.Duration
+		conns int
+	}{
+		{"other.example.com", 2 * time.Hour, 5},
+		{"db.example.com", 0, 0},
+		{"cache.example.com", 30 * time.Minute, 5},
+	} {
+		if s := p.Site(tc.name, tc.name); s.TCPIdleTimeout != tc.idle || s.TCPConnsPerSource != tc.conns {
+			t.Errorf("%s: %s %d, want %s %d", tc.name, s.TCPIdleTimeout, s.TCPConnsPerSource, tc.idle, tc.conns)
+		}
+	}
+	if d := DefaultLimits(); d.TCPIdleTimeout != 8*time.Hour || d.TCPConnsPerSource != 20 {
+		t.Errorf("defaults: %s %d", d.TCPIdleTimeout, d.TCPConnsPerSource)
+	}
+	for _, bad := range []string{
+		"limits:\n  tcp_idle_timeout: 500ms\n",
+		"limits:\n  tcp_idle_timeout: 200h\n",
+		"limits:\n  tcp_idle_timeout: -1s\n",
+		"limits:\n  tcp_connections_per_source: -1\n",
+		"sites:\n  db.example.com:\n    tcp_idle_timeout: soon\n",
+		"sites:\n  db.example.com:\n    tcp_connections_per_source: -2\n",
 	} {
 		if _, err := ParsePolicy([]byte(bad)); err == nil {
 			t.Errorf("%q: want error", bad)
