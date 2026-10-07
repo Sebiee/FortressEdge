@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - TCP routes: a published name whose clients start with TLS and then
   speak their own protocol (PostgreSQL 17+ with

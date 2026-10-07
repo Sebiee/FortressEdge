@@ -61,7 +61,7 @@ published through it. You need `qemu-system-x86_64`, Docker, `openssl`,
 and `cloud-localds` (Debian and Ubuntu: `cloud-image-utils`).
 
 ```sh
-v=v0.6.0
+v=v0.7.0
 base=https://github.com/Sebiee/fortressedge/releases/download/$v
 wget -O fortressedge.iso "$base/fortressedge-$v.iso"
 wget -O fortressctl "$base/fortressctl-$v-linux-amd64" && chmod +x fortressctl
@@ -173,7 +173,7 @@ terraform {
 }
 
 data "fortressedge_iso" "edge" {
-  release_url    = "https://github.com/Sebiee/fortressedge/releases/download/v0.6.0/fortressedge-v0.6.0.iso"
+  release_url    = "https://github.com/Sebiee/fortressedge/releases/download/v0.7.0/fortressedge-v0.7.0.iso"
   release_sha256 = "…" # from the release's SHA256SUMS
   client_ca      = file("${path.module}/tls/ca.crt")
 }
