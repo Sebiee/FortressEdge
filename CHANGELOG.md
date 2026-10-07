@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.7.1
+## 0.7.2
 
-- The release of 0.7.0's changes: v0.7.0's release job failed in the
-  TCP route test's harness (Docker on the build machine did not report
-  PostgreSQL's mapped port) and published nothing. The test now runs
-  PostgreSQL on the host's network.
+- The release of 0.7.0's changes. The release jobs of v0.7.0 and v0.7.1
+  failed in the TCP route test's harness and published nothing: the test
+  took a container id from docker's output and error together, and on a
+  machine without the PostgreSQL image the pull's progress came first.
 
-## 0.7.0
+## 0.7.0 (not released; see 0.7.2)
 
 - TCP routes: a published name whose clients start with TLS and then
   speak their own protocol (PostgreSQL 17+ with
