@@ -58,6 +58,19 @@ func echoServer(t *testing.T) (port int, accepted *atomic.Int64) {
 	return ln.Addr().(*net.TCPAddr).Port, accepted
 }
 
+// docker runs the docker CLI and returns its stdout. Its stderr, where
+// a pull's progress goes, is only in the error.
+func docker(args ...string) (string, error) {
+	var stderr strings.Builder
+	cmd := exec.Command("docker", args...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return string(out), fmt.Errorf("docker %s: %w: %s", args[0], err, stderr.String())
+	}
+	return string(out), nil
+}
+
 // postgres runs image's server on a free loopback port of the host's
 // network, password pw, without TLS: the edge ends it. Host networking
 // needs no port mapping, which some Docker daemons do not report back.
@@ -70,14 +83,14 @@ func postgres(t *testing.T) int {
 	require.NoError(t, err)
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
-	out, err := exec.Command("docker", "run", "-d", "--rm", "--network", "host", "-e", "POSTGRES_PASSWORD=pw", *pgImage,
-		"-c", "listen_addresses=127.0.0.1", "-c", "port="+strconv.Itoa(port)).CombinedOutput()
-	require.NoError(t, err, "%s", out)
-	id := strings.TrimSpace(string(out))
+	out, err := docker("run", "-d", "--rm", "--network", "host", "-e", "POSTGRES_PASSWORD=pw", *pgImage,
+		"-c", "listen_addresses=127.0.0.1", "-c", "port="+strconv.Itoa(port))
+	require.NoError(t, err)
+	id := strings.TrimSpace(out)
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		out, err := exec.Command("docker", "exec", id, "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", strconv.Itoa(port)).CombinedOutput()
-		assert.NoError(c, err, "%s", out)
+		_, err := docker("exec", id, "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", strconv.Itoa(port))
+		assert.NoError(c, err)
 	}, time.Minute, 500*time.Millisecond)
 	return port
 }
@@ -86,10 +99,8 @@ func postgres(t *testing.T) int {
 // name resolving to the edge's address and the edge's roots at /ca.pem.
 func pgTool(t *testing.T, vm *lab.VM, roots string, args ...string) (string, error) {
 	t.Helper()
-	cmd := append([]string{"run", "--rm", "--network", "host", "--add-host", "db.example.com:" + vm.Addr,
-		"-v", roots + ":/ca.pem:ro", "-e", "PGPASSWORD=pw", *pgImage}, args...)
-	out, err := exec.Command("docker", cmd...).CombinedOutput()
-	return string(out), err
+	return docker(append([]string{"run", "--rm", "--network", "host", "--add-host", "db.example.com:" + vm.Addr,
+		"-v", roots + ":/ca.pem:ro", "-e", "PGPASSWORD=pw", *pgImage}, args...)...)
 }
 
 func pgConn(vm *lab.VM) string {
@@ -258,11 +269,11 @@ public class Select1 {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "Select1.java"), []byte(src), 0o644))
 		url := fmt.Sprintf("jdbc:postgresql://db.example.com:%d/postgres?sslmode=verify-full&sslrootcert=/ca.pem&sslNegotiation=direct", vm.HTTPS)
-		out, err := exec.Command("docker", "run", "--rm", "--network", "host", "--add-host", "db.example.com:"+vm.Addr,
+		out, err := docker("run", "--rm", "--network", "host", "--add-host", "db.example.com:"+vm.Addr,
 			"-v", roots+":/ca.pem:ro", "-v", *jdbcJar+":/pgjdbc.jar:ro", "-v", dir+":/src:ro", *jdbcJava,
-			"java", "-cp", "/pgjdbc.jar", "/src/Select1.java", url).CombinedOutput()
-		require.NoError(t, err, "%s", out)
-		assert.Equal(t, "1", strings.TrimSpace(string(out)))
+			"java", "-cp", "/pgjdbc.jar", "/src/Select1.java", url)
+		require.NoError(t, err, out)
+		assert.Equal(t, "1", strings.TrimSpace(out))
 	})
 	step(t, "an HTTP name and a TCP route on one name: the second is refused", func(t *testing.T) {
 		_, body, err := lab.Get(web, "https://app.example.com/")
