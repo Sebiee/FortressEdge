@@ -456,7 +456,7 @@ names visitors make up.
 | `fortressedge_http_bytes_total` | `site`, `direction` | body bytes `in` and `out` |
 | `fortressedge_http_requests_in_flight` | `site` | requests being served |
 | `fortressedge_proxy_errors_total` | `site`, `reason` | see [Proxy errors](#proxy-errors) |
-| `fortressedge_limit_hits_total` | `site`, `limit` | refusals: `rate`, `uri`, `body`, `malformed`, and `connections` (no site: refused at accept) |
+| `fortressedge_limit_hits_total` | `site`, `limit` | refusals: `rate`, `uri`, `body`, `malformed`, `body_timeout`, and `connections` (no site: refused at accept) |
 | `fortressedge_connections`, `fortressedge_visitors` | | open connections; sources tracked |
 | `fortressedge_bans_total`, `fortressedge_banned_sources` | | bans since boot; banned now |
 | `fortressedge_ready` | | 1 while the edge can serve sites, see [Readiness](#readiness) |
@@ -518,7 +518,7 @@ into the new policy.
 limits:
   connections_per_source: 256       # open connections
   requests_per_second: 150          # sustained, per source
-  request_burst: 600                # at once: several heavy pages from one address
+  request_burst: 600                # at once: several heavy pages from one address; also requests open at once
   new_connections_per_second: 64    # TCP SYNs, dropped in XDP during a SYN flood
   new_connection_burst: 128
   ban: 15m                          # how long; 0: refuse, never ban
@@ -561,17 +561,35 @@ once the headers arrive. A visitor who leaves before then (a reload, a
 closed tab) is not a warning: it is logged at debug, below what the edge
 logs.
 
+`request_burst` is also the most requests a source may have open at
+once, WebSockets and streams included: each holds a connection to the
+dark node and the origin until it ends. A source at that count gets a
+`429` for its next request, as one over its rate does, even with tokens
+left.
+
+A request whose body or response stops moving ends after a minute, as
+does an HTTP/2 connection the visitor takes nothing from: each read of a
+request's body must bring a byte, and each write of its response (up to
+32 KiB) must be taken, within that minute. A long upload on a slow link,
+a stream quiet between its events, and a WebSocket go on. A body that
+stops is answered `408` and counted as the site's `body_timeout`; a
+response the visitor stops reading is cut. An HTTP/2 connection that
+sends nothing for 30 seconds gets a ping, and is closed when 15 more
+pass without its answer.
+
 | Over the limit | What the source sees |
 | --- | --- |
 | `new_connections_per_second` | during a SYN flood, its SYN is dropped; the client retries after a second or more |
 | `connections_per_source` | the connection is closed at accept, before any byte |
 | `max_connections` | accept waits until a connection closes |
-| `requests_per_second` / `request_burst` | `429` with `Retry-After: 1` |
+| `requests_per_second` / `request_burst` | `429` with `Retry-After: 1`; also past `request_burst` requests open at once |
 | `max_header_size` | `431` |
 | `max_uri_size` | `414` |
 | `max_body_size` | `413`; a body announced as larger never reaches the origin, a streamed one is cut off there |
 | `max_http2_streams` | the client queues further requests; the server announces the limit when the connection opens |
 | `response_header_timeout` | `504` with an empty body |
+| a body that brings no byte for a minute | `408` with an empty body |
+| a response write the visitor does not take within a minute | the response is cut |
 | `tcp_connections_per_source` | the connection to the TCP route is closed before its TLS handshake |
 | `tcp_idle_timeout` | the TCP route's connection is closed: the client reads EOF |
 

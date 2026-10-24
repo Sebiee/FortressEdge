@@ -101,13 +101,14 @@ type visitors struct {
 }
 
 type visitor struct {
-	req     *rate.Limiter
-	strikes int
-	since   time.Time // of the first strike in this window
-	conns   int
-	seen    time.Time
-	banned  time.Time // until
-	noticed time.Time
+	req      *rate.Limiter
+	inFlight int // requests being served
+	strikes  int
+	since    time.Time // of the first strike in this window
+	conns    int
+	seen     time.Time
+	banned   time.Time // until
+	noticed  time.Time
 }
 
 func newVisitors(tunnel string, lim *liveLimits, filt edgeFilter, known func(string) bool) *visitors {
@@ -209,9 +210,12 @@ func (v *visitors) strike(k netip.Prefix, by string) {
 	}
 }
 
-// limit rejects a request over its visitor's rate with 429. Requests on
-// the tunnel name with a verified client certificate (dark nodes,
-// operators) and exempt sources are never limited.
+// limit rejects a request over its visitor's rate with 429, and one over
+// request_burst requests open at once: each open one holds a work
+// connection, an origin connection and edge memory, for as long as a
+// visitor who stalls it likes. Requests on the tunnel name with a
+// verified client certificate (dark nodes, operators) and exempt sources
+// are never limited.
 func (v *visitors) limit(h http.Handler) http.Handler {
 	if v == nil {
 		return h
@@ -226,9 +230,19 @@ func (v *visitors) limit(h http.Handler) http.Handler {
 		k := visitorKey(a)
 		now := time.Now()
 		v.mu.Lock()
-		ok := v.get(k, now).req.AllowN(now, 1)
+		vis := v.get(k, now)
+		full := vis.inFlight >= lim.RequestBurst
+		ok := !full && vis.req.AllowN(now, 1)
+		if ok {
+			vis.inFlight++
+		}
 		v.mu.Unlock()
 		if ok {
+			defer func() {
+				v.mu.Lock()
+				vis.inFlight--
+				v.mu.Unlock()
+			}()
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -236,7 +250,11 @@ func (v *visitors) limit(h http.Handler) http.Handler {
 		if v.onRate != nil {
 			v.onRate(r.Host)
 		}
-		v.strike(k, "requests_per_second")
+		by := "requests_per_second"
+		if full {
+			by = "requests_in_flight"
+		}
+		v.strike(k, by)
 		if v.known != nil && !v.known(r.Host) {
 			hide()
 		}
@@ -342,7 +360,7 @@ func (v *visitors) sweep(now time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for k, vis := range v.m {
-		if vis.conns == 0 && now.Sub(vis.seen) > visitorIdle && now.After(vis.banned) {
+		if vis.conns == 0 && vis.inFlight == 0 && now.Sub(vis.seen) > visitorIdle && now.After(vis.banned) {
 			delete(v.m, k)
 		}
 	}
