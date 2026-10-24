@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,6 +33,8 @@ func TestPublishedTLS(t *testing.T) {
 		return testRoute{kind: "TLSRoute", ns: ns, name: name, age: age, annotations: annotations, hostnames: hostnames, backend: backend}.obj(t)
 	}
 	v := apiView(t, gatewayObj(t), classObj(t, "cilium", controller),
+		clusterIPSvc(t, "prod", "postgresql-rw", "10.0.0.1"), clusterIPSvc(t, "dev", "postgresql-rw", "10.0.0.2"),
+		clusterIPSvc(t, "dev", "valkey", "fd00::3"), clusterIPSvc(t, "dev", "x", "10.0.0.4"),
 		testRoute{ns: "web", hostnames: []string{"app.example.com"}}.obj(t),
 		tls("dev", "db", young, pg, []string{"DB.dev.example.com", "*.dev.example.com", "app.example.com"}, svc("postgresql-rw", 5432)),
 		tls("prod", "db", old, map[string]string{alpnAnnotation: " postgresql , x "}, []string{"db.prod.example.com", "db.dev.example.com"}, svc("postgresql-rw", 5432)),
@@ -57,10 +60,10 @@ func TestPublishedTLS(t *testing.T) {
 		pubs = append(pubs, pub{c.Name, c.CustomDomains[0], fmt.Sprintf("%s:%d", c.LocalIP, c.LocalPort), c.ALPN})
 	}
 	require.Equal(t, []pub{
-		{"tls:cache.dev.example.com", "cache.dev.example.com", "valkey.dev.svc:6379", nil},
+		{"tls:cache.dev.example.com", "cache.dev.example.com", "fd00::3:6379", nil},
 		// The older route keeps the name both have.
-		{"tls:db.dev.example.com", "db.dev.example.com", "postgresql-rw.prod.svc:5432", []string{"postgresql", "x"}},
-		{"tls:db.prod.example.com", "db.prod.example.com", "postgresql-rw.prod.svc:5432", []string{"postgresql", "x"}},
+		{"tls:db.dev.example.com", "db.dev.example.com", "10.0.0.1:5432", []string{"postgresql", "x"}},
+		{"tls:db.prod.example.com", "db.prod.example.com", "10.0.0.1:5432", []string{"postgresql", "x"}},
 	}, pubs)
 
 	var reasons []string
@@ -94,31 +97,114 @@ func TestPublishedTLS(t *testing.T) {
 	}
 }
 
+// A route publishes only the names that a listener which accepted it
+// takes: one whose protocol carries the route's kind, whose
+// allowedRoutes have the route's namespace, and whose hostname covers
+// the name. A TLSRoute's Service is dialed at its cluster IP, and only
+// when the Gateway resolved it.
+func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
+	team := func(name string) map[string]any {
+		return map[string]any{"namespaces": map[string]any{"from": "Selector", "selector": map[string]any{
+			"matchLabels": map[string]any{"kubernetes.io/metadata.name": name}}}}
+	}
+	gw := gatewayObj(t,
+		map[string]any{"name": "web-b", "protocol": "HTTP", "port": 80, "hostname": "*.team-b.example.com", "allowedRoutes": team("team-b")},
+		map[string]any{"name": "grpc", "protocol": "HTTPS", "port": 443, "hostname": "grpc.example.com",
+			"allowedRoutes": map[string]any{"namespaces": map[string]any{"from": "All"}, "kinds": []map[string]any{{"kind": "GRPCRoute"}}}},
+		map[string]any{"name": "tls-a", "protocol": "TLS", "port": 443, "hostname": "*.team-a.example.com", "allowedRoutes": team("team-a")},
+		map[string]any{"name": "tls-b", "protocol": "TLS", "port": 443, "hostname": "*.team-b.example.com", "allowedRoutes": team("team-b")},
+		map[string]any{"name": "tls-infra", "protocol": "TLS", "port": 8443, "hostname": "db.infra.example.com"},
+	)
+	ref := func(extra map[string]any) map[string]any {
+		r := maps.Clone(public)
+		maps.Copy(r, extra)
+		return r
+	}
+	old, young := time.Unix(1_700_000_000, 0), time.Unix(1_800_000_000, 0)
+	tls := func(ns, name string, hostnames []string, backend string) testRoute {
+		return testRoute{kind: "TLSRoute", ns: ns, name: name, age: young, hostnames: hostnames, backend: svc(backend, 5432)}
+	}
+	evil := tls("team-b", "evil", []string{"db.team-b.example.com", "db.team-a.example.com", "x.y.team-b.example.com"}, "steal")
+	evil.age = old
+	pinned := tls("team-b", "pinned", []string{"cache.team-a.example.com"}, "steal")
+	pinned.parentRefs = []map[string]any{ref(map[string]any{"sectionName": "tls-a"})}
+	onHTTP := tls("team-b", "on-http", []string{"web.team-b.example.com"}, "steal")
+	onHTTP.parentRefs = []map[string]any{ref(map[string]any{"sectionName": "web-b"})}
+	unresolved := tls("team-b", "unresolved", []string{"unresolved.team-b.example.com"}, "steal")
+	unresolved.status = []map[string]any{status(public, controller, 1, "True", "False")}
+	infra := tls("infra", "db", []string{"db.infra.example.com", "other.infra.example.com"}, "pg")
+	infra.parentRefs = []map[string]any{ref(map[string]any{"port": 8443})}
+	wrongPort := tls("infra", "wrong-port", []string{"db.infra.example.com"}, "pg")
+	wrongPort.parentRefs = []map[string]any{ref(map[string]any{"port": 443})}
+
+	v := apiView(t, gw, classObj(t, "cilium", controller),
+		nsObj(t, "team-a", map[string]string{"kubernetes.io/metadata.name": "team-a"}),
+		nsObj(t, "team-b", map[string]string{"kubernetes.io/metadata.name": "team-b"}),
+		clusterIPSvc(t, "team-a", "pg", "10.0.0.10"), clusterIPSvc(t, "team-b", "steal", "10.0.0.20"),
+		clusterIPSvc(t, "infra", "pg", "10.0.0.30"),
+		svcObj(t, "team-b", "metadata", map[string]any{"type": "ExternalName", "externalName": "169.254.169.254.nip.io"}),
+		svcObj(t, "team-b", "headless", map[string]any{"type": "ClusterIP", "clusterIP": "None"}),
+		testRoute{ns: "team-b", name: "web", hostnames: []string{"app.team-b.example.com", "app.team-a.example.com", "grpc.example.com"}}.obj(t),
+		evil.obj(t),
+		tls("team-a", "db", []string{"db.team-a.example.com"}, "pg").obj(t),
+		pinned.obj(t), onHTTP.obj(t), unresolved.obj(t), infra.obj(t), wrongPort.obj(t),
+		tls("team-b", "external", []string{"metadata.team-b.example.com"}, "metadata").obj(t),
+		tls("team-b", "headless", []string{"headless.team-b.example.com"}, "headless").obj(t),
+		tls("team-b", "missing", []string{"missing.team-b.example.com"}, "missing").obj(t),
+		tls("team-b", "badname", []string{"badname.team-b.example.com"}, "Steal_DB").obj(t),
+	)
+	httpProxies, tlsProxies, refused := testPublisher.publication(v)
+
+	require.Equal(t, []string{"app.team-b.example.com"}, names(httpProxies))
+	targets := map[string]string{}
+	for _, p := range tlsProxies {
+		c := p.GetBaseConfig()
+		targets[names([]v1.ProxyConfigurer{p})[0]] = fmt.Sprintf("%s:%d", c.LocalIP, c.LocalPort)
+	}
+	require.Equal(t, map[string]string{
+		"db.team-a.example.com":  "10.0.0.10:5432",
+		"db.team-b.example.com":  "10.0.0.20:5432",
+		"x.y.team-b.example.com": "10.0.0.20:5432",
+		"db.infra.example.com":   "10.0.0.30:5432",
+	}, targets)
+	var reasons []string
+	for _, r := range refused {
+		reasons = append(reasons, r.String())
+	}
+	require.ElementsMatch(t, []string{
+		"team-b/external: backend_service",
+		"team-b/headless: backend_service",
+		"team-b/missing: backend_service",
+		"team-b/badname: invalid_backend",
+	}, reasons)
+}
+
 // A TLSRoute on a watched API is published, refused while an HTTPRoute
 // has its name, and unpublished when deleted.
 func TestPublicationFollowsTheAPI(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	scheme := runtime.NewScheme()
-	gvk := func(kind string) schema.GroupVersionKind {
-		return schema.GroupVersionKind{Group: gatewayGroup, Version: "v1", Kind: kind}
-	}
 	resources := map[schema.GroupVersionResource]string{
 		httpRoutes: "HTTPRouteList", tlsRoutes: "TLSRouteList", gateways: "GatewayList", gatewayClasses: "GatewayClassList",
+		namespaces: "NamespaceList", services: "ServiceList",
 	}
-	for _, list := range resources {
-		scheme.AddKnownTypeWithName(gvk(list), &unstructured.UnstructuredList{})
+	for r, list := range resources {
+		scheme.AddKnownTypeWithName(r.GroupVersion().WithKind(list), &unstructured.UnstructuredList{})
 	}
 	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, resources)
 	_, err := dyn.Resource(gateways).Namespace("infra").Create(ctx, gatewayObj(t), metav1.CreateOptions{})
 	require.NoError(t, err)
 	_, err = dyn.Resource(gatewayClasses).Create(ctx, classObj(t, "cilium", controller), metav1.CreateOptions{})
 	require.NoError(t, err)
+	_, err = dyn.Resource(services).Namespace("dev").Create(ctx, clusterIPSvc(t, "dev", "pg", "10.0.0.1"), metav1.CreateOptions{})
+	require.NoError(t, err)
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0)
 	v := view{}
 	var synced []cache.InformerSynced
 	for r, store := range map[schema.GroupVersionResource]*cache.Store{
 		httpRoutes: &v.httpRoutes, tlsRoutes: &v.tlsRoutes, gateways: &v.gateways, gatewayClasses: &v.classes,
+		namespaces: &v.namespaces, services: &v.services,
 	} {
 		inf := factory.ForResource(r).Informer()
 		*store = inf.GetStore()

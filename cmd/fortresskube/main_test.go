@@ -32,13 +32,40 @@ func obj(t *testing.T, m map[string]any) *unstructured.Unstructured {
 	return u
 }
 
-// gatewayObj is the Gateway infra/public, of the class cilium.
-func gatewayObj(t *testing.T) *unstructured.Unstructured {
+// gatewayObj is the Gateway infra/public, of the class cilium, with
+// listeners; with none, an HTTP one and a TLS one that take every route.
+func gatewayObj(t *testing.T, listeners ...map[string]any) *unstructured.Unstructured {
+	all := map[string]any{"namespaces": map[string]any{"from": "All"}}
+	if listeners == nil {
+		listeners = []map[string]any{
+			{"name": "http", "protocol": "HTTP", "port": 80, "allowedRoutes": all},
+			{"name": "tls", "protocol": "TLS", "port": 443, "allowedRoutes": all},
+		}
+	}
 	return obj(t, map[string]any{
 		"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
 		"metadata": map[string]any{"namespace": "infra", "name": "public"},
-		"spec":     map[string]any{"gatewayClassName": "cilium"},
+		"spec":     map[string]any{"gatewayClassName": "cilium", "listeners": listeners},
 	})
+}
+
+func nsObj(t *testing.T, name string, labels map[string]string) *unstructured.Unstructured {
+	return obj(t, map[string]any{
+		"apiVersion": "v1", "kind": "Namespace",
+		"metadata": map[string]any{"name": name, "labels": labels},
+	})
+}
+
+func svcObj(t *testing.T, ns, name string, spec map[string]any) *unstructured.Unstructured {
+	return obj(t, map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"namespace": ns, "name": name},
+		"spec":     spec,
+	})
+}
+
+func clusterIPSvc(t *testing.T, ns, name, ip string) *unstructured.Unstructured {
+	return svcObj(t, ns, name, map[string]any{"type": "ClusterIP", "clusterIP": ip})
 }
 
 func classObj(t *testing.T, name, controllerName string) *unstructured.Unstructured {
@@ -106,8 +133,11 @@ func status(ref map[string]any, controllerName string, generation int64, accepte
 func apiView(t *testing.T, objs ...*unstructured.Unstructured) view {
 	t.Helper()
 	newStore := func() cache.Store { return cache.NewStore(cache.MetaNamespaceKeyFunc) }
-	v := view{gateways: newStore(), classes: newStore(), httpRoutes: newStore(), tlsRoutes: newStore()}
-	stores := map[string]cache.Store{"Gateway": v.gateways, "GatewayClass": v.classes, "HTTPRoute": v.httpRoutes, "TLSRoute": v.tlsRoutes}
+	v := view{gateways: newStore(), classes: newStore(), namespaces: newStore(), services: newStore(), httpRoutes: newStore(), tlsRoutes: newStore()}
+	stores := map[string]cache.Store{
+		"Gateway": v.gateways, "GatewayClass": v.classes, "Namespace": v.namespaces, "Service": v.services,
+		"HTTPRoute": v.httpRoutes, "TLSRoute": v.tlsRoutes,
+	}
 	for _, o := range objs {
 		require.NoError(t, stores[o.GetKind()].Add(o))
 	}
@@ -151,27 +181,28 @@ func TestPublished(t *testing.T) {
 // route still has.
 func TestPublishedTrustsOnlyTheGatewaysController(t *testing.T) {
 	other := map[string]any{"name": "internal", "namespace": "infra"}
-	section := map[string]any{"name": "public", "namespace": "infra", "sectionName": "http"}
-	cases := []testRoute{
-		{hostnames: []string{"accepted.example.com"}},
-		{hostnames: []string{"section.example.com"}, parentRefs: []map[string]any{section}},
-		{ns: "infra", hostnames: []string{"implicit-ns.example.com"}, parentRefs: []map[string]any{{"name": "public"}}},
-		{generation: 5, hostnames: []string{"current.example.com"}},
-		{hostnames: []string{"rejected.example.com"}, status: []map[string]any{status(public, controller, 1, "False", "True")}},
-		{hostnames: []string{"unreconciled.example.com"}, status: []map[string]any{}},
-		{hostnames: []string{"foreign.example.com"}, status: []map[string]any{status(public, "attacker.example/whatever", 1, "True", "True")}},
-		{generation: 5, hostnames: []string{"stale.example.com"}, status: []map[string]any{status(public, controller, 1, "True", "True")}},
-		{hostnames: []string{"dropped.example.com"}, parentRefs: []map[string]any{other},
-			status: []map[string]any{status(public, controller, 1, "True", "True"), status(other, controller, 1, "True", "True")}},
-		{hostnames: []string{"other-section.example.com"}, status: []map[string]any{status(section, controller, 1, "True", "True")}},
-		{hostnames: []string{"other-gw.example.com"}, parentRefs: []map[string]any{other}},
-		{hostnames: []string{"service.example.com"}, parentRefs: []map[string]any{{"name": "public", "namespace": "infra", "group": "", "kind": "Service"}}},
+	cases := func(section map[string]any) []testRoute {
+		return []testRoute{
+			{hostnames: []string{"accepted.example.com"}},
+			{hostnames: []string{"section.example.com"}, parentRefs: []map[string]any{section}},
+			{ns: "infra", hostnames: []string{"implicit-ns.example.com"}, parentRefs: []map[string]any{{"name": "public"}}},
+			{generation: 5, hostnames: []string{"current.example.com"}},
+			{hostnames: []string{"rejected.example.com"}, status: []map[string]any{status(public, controller, 1, "False", "True")}},
+			{hostnames: []string{"unreconciled.example.com"}, status: []map[string]any{}},
+			{hostnames: []string{"foreign.example.com"}, status: []map[string]any{status(public, "attacker.example/whatever", 1, "True", "True")}},
+			{generation: 5, hostnames: []string{"stale.example.com"}, status: []map[string]any{status(public, controller, 1, "True", "True")}},
+			{hostnames: []string{"dropped.example.com"}, parentRefs: []map[string]any{other},
+				status: []map[string]any{status(public, controller, 1, "True", "True"), status(other, controller, 1, "True", "True")}},
+			{hostnames: []string{"other-section.example.com"}, status: []map[string]any{status(section, controller, 1, "True", "True")}},
+			{hostnames: []string{"other-gw.example.com"}, parentRefs: []map[string]any{other}},
+			{hostnames: []string{"service.example.com"}, parentRefs: []map[string]any{{"name": "public", "namespace": "infra", "group": "", "kind": "Service"}}},
+		}
 	}
 	want := []string{"accepted.example.com", "current.example.com", "implicit-ns.example.com", "section.example.com"}
-	for _, kind := range []string{"HTTPRoute", "TLSRoute"} {
+	for kind, listener := range map[string]string{"HTTPRoute": "http", "TLSRoute": "tls"} {
 		t.Run(kind, func(t *testing.T) {
-			objs := []*unstructured.Unstructured{gatewayObj(t), classObj(t, "cilium", controller)}
-			for i, r := range cases {
+			objs := []*unstructured.Unstructured{gatewayObj(t), classObj(t, "cilium", controller), clusterIPSvc(t, "blog", "app", "10.0.0.1"), clusterIPSvc(t, "infra", "app", "10.0.0.2")}
+			for i, r := range cases(map[string]any{"name": "public", "namespace": "infra", "sectionName": listener}) {
 				r.kind, r.ns, r.name, r.backend = kind, cmp.Or(r.ns, "blog"), fmt.Sprint("r", i), map[string]any{"name": "app", "port": 80}
 				objs = append(objs, r.obj(t))
 			}

@@ -1,9 +1,9 @@
 // Command fortresskube is frpc for a Kubernetes cluster. Besides the
-// proxies in its frpc config, it publishes every hostname of the HTTPRoutes
-// that one Gateway has accepted, one http proxy per name, all forwarded to
-// that Gateway, and every hostname of the TLSRoutes it has accepted, one
-// tcp-tls proxy per name, forwarded to the route's Service. The edge then
-// gets a certificate for each exact name.
+// proxies in its frpc config, it publishes the hostnames of the HTTPRoutes
+// that one Gateway's listeners have accepted, one http proxy per name, all
+// forwarded to that Gateway, and those of the TLSRoutes they have
+// accepted, one tcp-tls proxy per name, forwarded to the route's Service.
+// The edge then gets a certificate for each exact name.
 package main
 
 import (
@@ -144,7 +144,7 @@ func run() error {
 		DeleteFunc: poke,
 	}
 	infs := map[schema.GroupVersionResource]cache.SharedIndexInformer{}
-	for _, r := range []schema.GroupVersionResource{httpRoutes, gateways, gatewayClasses} {
+	for _, r := range []schema.GroupVersionResource{httpRoutes, gateways, gatewayClasses, namespaces, services} {
 		inf := factory.ForResource(r).Informer()
 		if _, err := inf.AddEventHandler(handler); err != nil {
 			return err
@@ -182,7 +182,11 @@ func run() error {
 	}
 	edge := &edgeSupport{status: ts}
 	pub := &publisher{gwNS: gwNS, gwName: gwName, host: host, port: port}
-	v := view{gateways: infs[gateways].GetStore(), classes: infs[gatewayClasses].GetStore(), httpRoutes: infs[httpRoutes].GetStore()}
+	v := view{
+		gateways: infs[gateways].GetStore(), classes: infs[gatewayClasses].GetStore(),
+		namespaces: infs[namespaces].GetStore(), services: infs[services].GetStore(),
+		httpRoutes: infs[httpRoutes].GetStore(),
+	}
 	tlsSynced := false
 	for {
 		select {
@@ -223,6 +227,7 @@ type publisher struct {
 // nil while TLSRoutes are not watched.
 type view struct {
 	gateways, classes     cache.Store
+	namespaces, services  cache.Store
 	httpRoutes, tlsRoutes cache.Store
 }
 
@@ -234,7 +239,7 @@ func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfi
 	if gw == nil {
 		return nil, nil, nil
 	}
-	httpProxies = published(routes(v.httpRoutes), gw, p.host, p.port)
+	httpProxies = published(v, gw, p.host, p.port)
 	if v.tlsRoutes == nil {
 		return httpProxies, nil, nil
 	}
@@ -242,7 +247,7 @@ func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfi
 	for _, p := range httpProxies {
 		names[p.GetBaseConfig().Name] = true
 	}
-	tlsProxies, refused = publishedTLS(routes(v.tlsRoutes), gw, names)
+	tlsProxies, refused = publishedTLS(v, gw, names)
 	return httpProxies, tlsProxies, refused
 }
 
@@ -414,22 +419,18 @@ func tunnelDefaults(common, file *v1.ClientCommonConfig) {
 	}
 }
 
-// published is one http proxy per hostname of each route gw accepted.
-// The Gateway's allowedRoutes decides which namespaces may publish.
-// Wildcards and routes without hostnames are skipped: the edge only gets
-// certificates for exact names.
-// ponytail: a hostname outside the Gateway listener's hostname is still
-// published and gets a certificate, then a 404 from the Gateway; intersect
-// with the listeners if that ever matters.
-func published(rs []route, gw *gateway, host string, port int) []v1.ProxyConfigurer {
+// published is one http proxy per hostname of each HTTPRoute gw
+// accepted that a listener which accepted it takes: the listeners'
+// hostnames and allowedRoutes decide which namespace may publish which
+// name. Wildcards and routes without hostnames are skipped: the edge
+// only gets certificates for exact names.
+func published(v view, gw *gateway, host string, port int) []v1.ProxyConfigurer {
 	names := map[string]bool{}
-	for _, r := range rs {
-		if !gw.accepts(&r) {
-			continue
-		}
+	for _, r := range routes(v.httpRoutes) {
+		ls := gw.accepted(&r, &httpKind, labelsOf(v, r.Metadata.Namespace))
 		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
-			if len(k8svalidation.IsDNS1123Subdomain(h)) == 0 {
+			if len(k8svalidation.IsDNS1123Subdomain(h)) == 0 && covers(ls, h) {
 				names[h] = true
 			}
 		}
