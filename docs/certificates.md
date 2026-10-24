@@ -132,6 +132,13 @@ vault_secret_id: ...      # this edge's own
   meanwhile is not brought back.
 - **An edge that had certificates on disk before** writes them to Vault
   at its first boot with it, rather than order them again.
+- **What Vault returns is checked before an edge uses it** or copies it
+  to its disk: a certificate must be for its name, valid now (it may
+  start up to five minutes ahead), and stored with its key; metadata
+  and challenges must be JSON; no value may exceed 64 KiB. An edge logs
+  anything else and keeps its disk's copy. This stops a broken or
+  tampered value from reaching every edge; it does not make the AppRole
+  any less powerful, since whoever holds it reads every key on the path.
 
 The AppRole's policy should allow its path and nothing else:
 

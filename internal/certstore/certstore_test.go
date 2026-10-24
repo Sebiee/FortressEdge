@@ -359,8 +359,9 @@ func TestSharedRefusesWhatItCannotUse(t *testing.T) {
 		})
 	}
 
-	// A certificate another edge renewed is taken, with its key.
-	crt2, key2 := pair(t, "app.example.com", now.Add(-time.Minute), now.Add(time.Hour))
+	// A certificate another edge renewed is taken, with its key, even from
+	// a CA whose clock is a little ahead.
+	crt2, key2 := pair(t, "app.example.com", now.Add(time.Minute), now.Add(time.Hour))
 	must(t, other.Store(ctx, site+".key", key2))
 	must(t, other.Store(ctx, site+".crt", crt2))
 	if got, err := s.Load(ctx, site+".crt"); err != nil || !bytes.Equal(got, crt2) {
