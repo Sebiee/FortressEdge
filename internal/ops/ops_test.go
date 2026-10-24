@@ -499,33 +499,36 @@ type fakeEdge struct {
 	applies  int
 	rebooted bool
 	// full makes XDP refuse a block list other than the one it holds, as
-	// a full map does; storeErr makes the disk refuse.
-	full     bool
-	storeErr error
+	// a full map does; half makes it fail with only part of one in; storeErr
+	// makes the disk refuse.
+	full, half bool
+	storeErr   error
 }
 
 func (e *fakeEdge) apply() Apply {
 	return Apply{
-		Steps: []Step{
-			func(p config.Policy) error {
-				e.applies++
-				e.limits = p.Limits
-				return nil
-			},
-			func(p config.Policy) error {
-				if e.full && !slices.Equal(p.Block, e.block) {
-					return errors.New("xdp block list: no space")
-				}
-				e.block = p.Block
-				return nil
-			},
-		},
+		Steps: []Step{func(p config.Policy) error {
+			switch {
+			case slices.Equal(p.Block, e.block):
+			case e.full:
+				return errors.New("xdp block list: no space")
+			case e.half && len(p.Block) > 1:
+				e.block = p.Block[len(p.Block)-1:]
+				return errors.New("xdp block list: no space; restoring the previous list: no memory")
+			}
+			e.block = p.Block
+			return nil
+		}},
 		Store: func(b []byte) error {
 			if e.storeErr != nil {
 				return e.storeErr
 			}
 			return os.WriteFile(e.file, b, 0o600)
 		},
+		Commit: []func(config.Policy){func(p config.Policy) {
+			e.applies++
+			e.limits = p.Limits
+		}},
 		Reboot: func() { e.rebooted = true },
 	}
 }
@@ -635,20 +638,21 @@ func TestPolicyRefusedChangesNothing(t *testing.T) {
 	const nextReboot = next + "  max_connections: 10\n"
 	noSpace := errors.New("write policy.yml: no space left on device")
 	for _, tc := range []struct {
-		name     string
-		body     string
-		full     bool
-		storeErr error
+		name       string
+		body       string
+		full, half bool
+		storeErr   error
 	}{
-		{"xdp cannot hold it", next, true, nil},
-		{"xdp cannot hold one that reboots", nextReboot, true, nil},
-		{"the disk cannot store it", next, false, noSpace},
-		{"the disk cannot store one that reboots", nextReboot, false, noSpace},
+		{"xdp cannot hold it", next, true, false, nil},
+		{"xdp cannot hold one that reboots", nextReboot, true, false, nil},
+		{"xdp fails part way", next, false, true, nil},
+		{"the disk cannot store it", next, false, false, noSpace},
+		{"the disk cannot store one that reboots", nextReboot, false, false, noSpace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, e := policyEdge(t, before)
 			block, limits := e.block, e.limits
-			e.full, e.storeErr = tc.full, tc.storeErr
+			e.full, e.half, e.storeErr = tc.full, tc.half, tc.storeErr
 			if rec := putPolicy(h, opsID, tc.body); rec.Code != http.StatusInternalServerError || e.rebooted {
 				t.Fatalf("status=%d reboot=%v body=%q", rec.Code, e.rebooted, rec.Body.String())
 			}
@@ -661,8 +665,11 @@ func TestPolicyRefusedChangesNothing(t *testing.T) {
 			if st := statusOf(t, h); st["blocked"] != float64(1) {
 				t.Errorf("status blocked %v, want the previous 1", st["blocked"])
 			}
+			if st, _ := statusOf(t, h)["policy_degraded"].([]any); len(st) != 0 {
+				t.Errorf("policy_degraded %v: the previous policy is back whole", st)
+			}
 			// Once the edge can take it, the same body is applied.
-			e.full, e.storeErr = false, nil
+			e.full, e.half, e.storeErr = false, false, nil
 			if rec := putPolicy(h, opsID, tc.body); rec.Code != 200 || len(e.block) != 2 || e.stored(t) != tc.body {
 				t.Fatalf("then: status=%d body=%q block=%v", rec.Code, rec.Body.String(), e.block)
 			}

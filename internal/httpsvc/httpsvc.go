@@ -222,10 +222,11 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	acc := &accessLogs{st: st}
 	degraded := slices.Clone(more.Degraded)
 	// Not a reason to stop: the policy is on the disk, so every boot would.
-	if err := acc.apply(cfg.Policy); err != nil {
+	if err := acc.open(cfg.Policy); err != nil {
 		slog.Error("stored policy: access log not in force until the next apply", "err", err)
 		degraded = append(degraded, err.Error()+"; running without it until the next apply")
 	}
+	acc.set(cfg.Policy)
 	track := newConns()
 	logx.SetConnections(track.Len)
 	lim := newLivePolicy(cfg.Policy)
@@ -267,11 +268,10 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			f(w)
 		}
 	})
-	apply.Steps = append(apply.Steps, acc.apply, func(p config.Policy) error {
-		vis.update(p)
+	apply.Steps = append(apply.Steps, acc.open)
+	apply.Commit = append(apply.Commit, acc.set, vis.update, func(p config.Policy) {
 		domains.SetTunnelGrace(p.TunnelGrace)
 		socks.setDeadTimeout(p.TunnelDeadTimeout)
-		return nil
 	})
 	oh.SetApply(apply)
 	slog.Info("ops api up", "logs", config.OpsLogsPath, "status", config.OpsStatusPath, "metrics", config.OpsMetricsPath,
@@ -309,19 +309,33 @@ type accessLogs struct {
 	enabled bool             // for any site
 }
 
-func (a *accessLogs) apply(p config.Policy) error {
+// open opens the access log's files when p turns the log on and they are
+// not open yet: the part of a policy here that can fail. Nothing is
+// written to them, or pruned, before set.
+func (a *accessLogs) open(p config.Policy) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	enabled := p.AccessLogAnywhere()
-	if enabled && a.w == nil {
-		w, err := logx.OpenAccess(config.AccessLogDir, p.AccessLog.MaxSize, p.AccessLog.MaxFiles)
-		if err != nil {
-			return fmt.Errorf("access log: %w", err)
-		}
-		a.w = w
-		a.st.access.Store(newAccessLog(w))
-	} else if a.w != nil {
+	if a.w != nil || !p.AccessLogAnywhere() {
+		return nil
+	}
+	w, err := logx.OpenAccess(config.AccessLogDir, p.AccessLog.MaxSize, p.AccessLog.MaxFiles)
+	if err != nil {
+		return fmt.Errorf("access log: %w", err)
+	}
+	a.w = w
+	return nil
+}
+
+// set puts p's access log in force, if open could open its files.
+func (a *accessLogs) set(p config.Policy) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	enabled := p.AccessLogAnywhere() && a.w != nil
+	if a.w != nil {
 		a.w.SetLimits(p.AccessLog.MaxSize, p.AccessLog.MaxFiles)
+		if a.st.access.Load() == nil {
+			a.st.access.Store(newAccessLog(a.w))
+		}
 	}
 	switch {
 	case enabled && (!a.enabled || a.cur != p.AccessLog):
@@ -331,7 +345,6 @@ func (a *accessLogs) apply(p config.Policy) error {
 		slog.Info("access log off")
 	}
 	a.cur, a.enabled = p.AccessLog, enabled
-	return nil
 }
 
 func (a *accessLogs) on() bool {

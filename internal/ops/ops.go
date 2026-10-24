@@ -59,16 +59,20 @@ func parseCursor(s string) (cursor, error) {
 	return cursor{boot, n}, nil
 }
 
-// A Step puts one part of a policy in force, such as XDP's block list or
-// the visitor limits. It changes nothing when it fails, and running it
-// with the policy that was in force undoes it.
+// A Step makes one part of the edge that can fail, such as XDP's block
+// list, match a policy. Run again with the policy that was in force, it
+// puts that part back, whether it succeeded or failed part way.
 type Step func(config.Policy) error
 
 // Apply is how a PUT puts a policy in force and keeps it.
 type Apply struct {
+	// Steps run first, in order.
 	Steps []Step
 	// Store keeps the body on the data disk, once every step succeeded.
 	Store func(policy []byte) error
+	// Commit puts the parts that cannot fail in force, once it is stored:
+	// the visitor limits, say.
+	Commit []func(config.Policy)
 	// Reboot runs after the response is flushed, for a policy that changes
 	// a limit the servers fix when they start.
 	Reboot func()
@@ -332,21 +336,23 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// put runs the steps that put p in force, in order, then stores body.
-// When one fails, or the store does, it runs the steps that ran again with
-// prev, newest first. A step that cannot be undone leaves the edge
+// put runs the steps that put p in force, in order, stores body, then
+// commits p. When a step fails, or the store does, it runs the steps that
+// ran again with prev, newest first, the one that failed among them, and
+// commits nothing. A step that cannot be put back leaves the edge
 // degraded.
 func (h *Handler) put(p, prev config.Policy, body []byte) error {
 	steps := h.apply.Steps
 	ran := 0
 	var err error
-	for ; ran < len(steps); ran++ {
-		if err = steps[ran](p); err != nil {
-			break
-		}
+	for ; ran < len(steps) && err == nil; ran++ {
+		err = steps[ran](p)
 	}
 	if err == nil {
 		if err = h.apply.Store(body); err == nil {
+			for _, commit := range h.apply.Commit {
+				commit(p)
+			}
 			return nil
 		}
 	}
