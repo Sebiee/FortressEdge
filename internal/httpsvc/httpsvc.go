@@ -500,11 +500,13 @@ func (c *tlsOnlyConn) Read(b []byte) (int, error) {
 }
 
 // quietOnly makes s's connections on ln send nothing until a handler runs
-// for one of their requests; port 80's handlers hide every name the edge
-// does not serve. net/http answers a request it cannot read (no Host or a
-// bad one, an unknown version or transfer encoding, headers too large)
-// with its own 400, 417, 431, 501 or 505 before any handler runs, and
-// their words would tell a stranger that the edge is there, and runs Go.
+// for their request, and serve that one request only; port 80's handlers
+// hide every name the edge does not serve. net/http answers a request it
+// cannot read (no Host or a bad one, an unknown version or transfer
+// encoding, headers too large) with its own 400, 417, 431, 501 or 505
+// before any handler runs, and their words would tell a stranger that the
+// edge is there, and runs Go. A served name is public, so the request
+// after its redirect may be a stranger's too.
 func quietOnly(s *http.Server, ln net.Listener) net.Listener {
 	h := s.Handler
 	s.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
@@ -514,6 +516,7 @@ func quietOnly(s *http.Server, ln net.Listener) net.Listener {
 		if c, ok := r.Context().Value(quietConnKey{}).(*quietConn); ok {
 			c.answered.Store(true)
 		}
+		w.Header().Set("Connection", "close")
 		h.ServeHTTP(w, r)
 	})
 	return quietListener{ln}

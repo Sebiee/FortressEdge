@@ -700,8 +700,11 @@ func TestPort80SendsOnlyRedirects(t *testing.T) {
 		b, _ := io.ReadAll(c)
 		return b
 	}
-	if b := send("GET /x HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n"); !strings.HasPrefix(string(b), "HTTP/1.1 308 ") {
-		t.Fatalf("a served name got %q", b)
+	// A served name is public (certificate transparency), so the request
+	// after its redirect is a stranger's too.
+	b := send("GET /x HTTP/1.1\r\nHost: app.example.com\r\n\r\nGET / HTTP/1.1\r\n\r\n")
+	if !strings.HasPrefix(string(b), "HTTP/1.1 308 ") || strings.Count(string(b), "HTTP/1.1 ") != 1 {
+		t.Fatalf("a served name, then a request with no Host: %q", b)
 	}
 	for _, req := range []string{
 		"GET / HTTP/1.1\r\n\r\n",
