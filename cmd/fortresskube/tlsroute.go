@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/cache"
 )
 
 var tlsRoutes = schema.GroupVersionResource{Group: gatewayGroup, Version: "v1", Resource: "tlsroutes"}
@@ -54,22 +56,24 @@ const (
 	refusedHostname      = "invalid_hostname"      // a wildcard, or not a DNS name
 	refusedBackend       = "invalid_backend"       // no backendRefs, not a Service, or no port
 	refusedNamespace     = "backend_namespace"     // a Service in another namespace: no ReferenceGrant check
+	refusedService       = "backend_service"       // the Service is missing, ExternalName, or headless
 	refusedALPN          = "invalid_alpn"          // fortressedge.io/alpn
 	refusedHTTPRoute     = "hostname_of_httproute" // a name is an HTTP name or a TCP route
 	refusedOlderTLSRoute = "hostname_of_tlsroute"  // an older TLSRoute has it
 )
 
 var refusalReasons = []string{
-	refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
+	refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
 }
 
 // publishedTLS is one tcp-tls proxy per hostname of each TLSRoute gw
-// accepted, dialing the route's first backend Service directly: the edge
-// ends TLS, so the Gateway's proxy, which routes a TLS stream by its
-// server name, cannot take the stream. A hostname an HTTPRoute publishes
-// (httpNames) is refused, and so is one an older TLSRoute has.
-func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
-	rs = slices.DeleteFunc(rs, func(r route) bool { return !gw.accepts(&r) })
+// accepted that a listener which accepted it takes, dialing the cluster
+// IP of the route's first backend Service directly: the edge ends TLS,
+// so the Gateway's proxy, which routes a TLS stream by its server name,
+// cannot take the stream. A hostname an HTTPRoute publishes (httpNames)
+// is refused, and so is one an older TLSRoute has.
+func publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
+	rs := routes(v.tlsRoutes)
 	// The oldest route keeps a hostname two routes name.
 	slices.SortFunc(rs, func(a, b route) int {
 		if c := a.Metadata.CreationTimestamp.Compare(b.Metadata.CreationTimestamp.Time); c != 0 {
@@ -83,8 +87,12 @@ func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.Prox
 		taken   = map[string]bool{}
 	)
 	for _, r := range rs {
+		ls := gw.accepted(&r, &tlsKind, labelsOf(v, r.Metadata.Namespace))
+		if len(ls) == 0 {
+			continue
+		}
 		key, annotation := r.key(), r.Metadata.Annotations[alpnAnnotation]
-		host, port, reason := backendOf(&r)
+		ip, port, reason := backendOf(&r, v.services)
 		if reason == "" {
 			reason = checkALPN(annotation)
 		}
@@ -102,6 +110,8 @@ func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.Prox
 			case strings.Contains(h, "*") || len(k8svalidation.IsDNS1123Subdomain(h)) > 0:
 				refused = append(refused, refusal{key, h, refusedHostname})
 				continue
+			case !covers(ls, h):
+				continue
 			case httpNames[h]:
 				refused = append(refused, refusal{key, h, refusedHTTPRoute})
 				continue
@@ -111,7 +121,7 @@ func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.Prox
 			}
 			taken[h] = true
 			p := &v1.TCPTLSProxyConfig{CustomDomains: []string{h}, ALPN: alpn}
-			p.Name, p.Type, p.LocalIP, p.LocalPort = tlsProxyPrefix+h, string(v1.ProxyTypeTCPTLS), host, port
+			p.Name, p.Type, p.LocalIP, p.LocalPort = tlsProxyPrefix+h, string(v1.ProxyTypeTCPTLS), ip, port
 			out = append(out, p)
 		}
 	}
@@ -122,20 +132,43 @@ func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.Prox
 }
 
 // backendOf is the route's first backend, a Service of its own
-// namespace, as <name>.<namespace>.svc and its port; or why there is none.
-func backendOf(r *route) (host string, port int, reason string) {
+// namespace, as its cluster IP and its port; or why there is none.
+func backendOf(r *route, services cache.Store) (ip string, port int, reason string) {
 	ns := r.Metadata.Namespace
 	if len(r.Spec.Rules) == 0 || len(r.Spec.Rules[0].BackendRefs) == 0 {
 		return "", 0, refusedBackend
 	}
 	b := r.Spec.Rules[0].BackendRefs[0]
-	if deref(b.Group, "") != "" || deref(b.Kind, "Service") != "Service" || b.Name == "" || b.Port == nil || *b.Port < 1 || *b.Port > 65535 {
+	if deref(b.Group, "") != "" || deref(b.Kind, "Service") != "Service" || len(k8svalidation.IsDNS1035Label(b.Name)) > 0 ||
+		b.Port == nil || *b.Port < 1 || *b.Port > 65535 {
 		return "", 0, refusedBackend
 	}
 	if deref(b.Namespace, ns) != ns {
 		return "", 0, refusedNamespace
 	}
-	return fmt.Sprintf("%s.%s.svc", b.Name, ns), int(*b.Port), ""
+	ip, ok := clusterIP(services, ns, b.Name)
+	if !ok {
+		return "", 0, refusedService
+	}
+	return ip, int(*b.Port), ""
+}
+
+// clusterIP is the cluster IP of the Service ns/name. A missing Service
+// has none, nor has a headless or an ExternalName one: a name to resolve
+// could point anywhere, the cloud's metadata service and the API server
+// included.
+func clusterIP(services cache.Store, ns, name string) (string, bool) {
+	var svc struct {
+		Spec struct {
+			Type      string `json:"type"`
+			ClusterIP string `json:"clusterIP"`
+		} `json:"spec"`
+	}
+	if !get(services, ns+"/"+name, &svc) || svc.Spec.Type == "ExternalName" {
+		return "", false
+	}
+	ip, err := netip.ParseAddr(svc.Spec.ClusterIP)
+	return ip.String(), err == nil
 }
 
 func splitALPN(s string) []string {

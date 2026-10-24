@@ -7,8 +7,17 @@ Gateway's Service, so the edge gets a certificate for each exact name. A
 new app needs only its HTTPRoute; deleting the route, or the Gateway
 rejecting it, removes the name, and other names keep running.
 
-- The Gateway's `allowedRoutes` decides which namespaces may publish:
-  only routes with `Accepted=True` from that Gateway count, as the
+- The Gateway's listeners decide which namespace may publish which
+  name. A route's hostname is published only when a listener that
+  accepted the route takes it: the listener's protocol carries the
+  route's kind (`HTTP` or `HTTPS` for an HTTPRoute, `TLS` for a
+  TLSRoute), its `allowedRoutes` admit the route's namespace and kind,
+  and its `hostname` covers the name (a listener without one covers
+  every name, `*.example.com` every name under `example.com`). A
+  `parentRefs` entry's `sectionName` and `port` pick the listeners, as
+  Gateway API defines them. The Gateway ignores a route's other
+  hostnames, and so does `fortresskube`.
+- Only routes with `Accepted=True` from that Gateway count, as the
   controller of its GatewayClass (`controllerName`) wrote it for the
   route's current `metadata.generation`, at a `parentRefs` entry the
   route still has. A status another controller or a tenant wrote, or
@@ -51,6 +60,9 @@ metadata: { name: fortresskube }
 rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "gatewayclasses", "httproutes", "tlsroutes"] # tlsroutes for TCP routes
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "services"] # allowedRoutes selectors; the Services dialed
     verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -271,25 +283,54 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
 # pgJDBC 42.7.4+: jdbc:postgresql://db.dev.example.com:443/app?sslmode=verify-full&sslNegotiation=direct
 ```
 
-- `fortresskube` dials the Service itself,
-  `<name>.<namespace>.svc:<port>`, not the Gateway: the Gateway's proxy
-  routes a TLS stream by its server name, and the edge has already
-  ended that TLS. The Gateway needs a TLS listener that accepts the
-  route (`allowedRoutes` decides which namespaces may publish, as for
-  HTTPRoutes), and a network policy must let `fortresskube` reach the
-  Service.
+- `fortresskube` dials the Service itself, at its cluster IP read from
+  the API, not the Gateway: the Gateway's proxy routes a TLS stream by
+  its server name, and the edge has already ended that TLS. The Gateway
+  needs a TLS listener that accepts the route and covers its hostnames
+  (as above), the route's status needs `ResolvedRefs=True` too, and a
+  network policy must let `fortresskube` reach the Service.
 - The backend must be a `Service` in the route's own namespace, with a
   `port`; a route that names another namespace is refused, as
-  `fortresskube` does not check ReferenceGrants.
+  `fortresskube` does not check ReferenceGrants. A missing Service, a
+  headless one, and an `ExternalName` one are refused
+  (`backend_service`): a name to resolve could lead anywhere, the cloud's
+  metadata service and the API server included.
 - Wildcard hostnames are refused. A hostname an HTTPRoute publishes
   stays an HTTP name, and the TLSRoute's is refused; of two TLSRoutes
-  with one hostname, the older keeps it. A refused route or hostname is
-  logged once, and counted in its metrics; the others go on.
+  with one hostname, the older keeps it, so give each team its own
+  listener hostname: then no other namespace can hold its names. A
+  refused route or hostname is logged once, and counted in its metrics;
+  the others go on.
 - `fortresskube` needs `list` and `watch` on `tlsroutes` (above). A
   cluster without TLSRoutes is logged at start and left out. A discovery
   that fails otherwise is tried again, and a missing permission is
   warned about after 30 s; HTTPRoutes are published meanwhile, and the
   TLSRoutes join once their first full list is in.
+- Limit what `fortresskube` itself can reach: it connects on the
+  internet's behalf, so a NetworkPolicy keeps a mistaken route away
+  from the cloud's metadata service, the nodes, and the control plane.
+  It needs the edge, the API server, DNS for the edge's name, and the
+  Gateway's and the TLSRoutes' pods:
+
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata: { name: fortresskube, namespace: fortress }
+  spec:
+    podSelector: { matchLabels: { app: fortresskube } }
+    policyTypes: [Egress]
+    egress:
+      - to: [{ namespaceSelector: {} }] # pods, not nodes: the Gateway, the TLSRoutes' backends, DNS
+      - to: [{ ipBlock: { cidr: 203.0.113.10/32 } }] # the edge
+        ports: [{ protocol: TCP, port: 443 }]
+      - to: [{ ipBlock: { cidr: 192.0.2.20/32 } }] # the API server's endpoint: kubectl get endpointslices -l kubernetes.io/service-name=kubernetes
+        ports: [{ protocol: TCP, port: 6443 }]
+  ```
+
+  Services are matched after their cluster IP is translated, so the
+  pods behind them are what the policy sees; 169.254.0.0/16 and the
+  nodes stay out. With Cilium, a CiliumNetworkPolicy with
+  `toEntities: [kube-apiserver]` replaces the API server's `ipBlock`.
 - An edge older than 0.7.0 refuses the `tcp-tls` proxies:
   `fortresskube` logs that the edge needs an upgrade, and its HTTP
   names are unaffected.
