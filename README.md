@@ -45,11 +45,12 @@ Dark node --TCP 443-->  frp over WebSocket, with a client certificate
 | Part | Holds | Comes from |
 | --- | --- | --- |
 | `fortress.yml` | whom the edge trusts: your client CA, the ACME server and its CA | baked into the release ISO (`fortressctl bake`, or the Terraform provider) |
-| `fqdn` and address | the edge's DNS name and static address | the machine's cloud-init (NoCloud) drive: `user-data` and `network-config` |
+| `fqdn` and address | the edge's DNS name and static address, and with Vault its own secret ID | the machine's cloud-init (NoCloud) drive: `user-data` and `network-config` |
 | `policy.yml` | who may reach the edge and how much: block list, limits | `fortressctl apply`, while the edge runs |
 
-None of them holds a secret, and one ISO serves every edge that shares a
-`fortress.yml`. There is no other way in: no shell, no config upload. An
+The ISO holds no secret, and one ISO serves every edge that shares a
+`fortress.yml`. The only secret, the Vault secret ID of edges that share
+certificates, is each edge's own, in its `user-data`. There is no other way in: no shell, no config upload. An
 edge whose config is missing or wrong says why on its console. Details in
 [docs/provisioning.md](docs/provisioning.md).
 
@@ -243,10 +244,11 @@ fortressctl apply edge1.example.com -f policy.yml \
 | `renew_interval` | `4h` | How often ACME certificates are checked and renewed once due |
 | `ntp` | `pool.ntp.org` | Time servers the clock keeps to, `host` or `host:port`, one or a list; three or more outvote one that is wrong. See [the clock](docs/operations.md#clock) |
 | `quic` | `false` | Dark nodes may also connect over QUIC on UDP 443 |
-| `vault`, `vault_ca`, `vault_mount`, `vault_path`, `vault_role_id`, `vault_secret_id` | none | A Vault KV v2 path where the edges that serve the same names share their certificates, with the AppRole that may use it. See [several edges](docs/certificates.md#several-edges-for-the-same-names) |
+| `vault`, `vault_ca`, `vault_mount`, `vault_path`, `vault_role_id` | none | A Vault KV v2 path where the edges that serve the same names share their certificates, with the AppRole that may use it. See [several edges](docs/certificates.md#several-edges-for-the-same-names) |
 
 The cloud-init drive: `fqdn` in `user-data`, a DNS name with a domain,
-which is the tunnel name dark nodes and operators connect to; and a
+which is the tunnel name dark nodes and operators connect to; with
+`vault`, the edge's own `vault_secret_id` in `user-data` too; and a
 static address and gateway in `network-config` (v1 or v2). Nothing else
 in `user-data` is read.
 

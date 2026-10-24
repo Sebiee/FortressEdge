@@ -32,8 +32,9 @@ type Config struct {
 	QUIC bool `yaml:"quic"`
 	// Vault is the https URL of a Vault whose KV v2 path the edges that
 	// serve the same names share their certificates in. Empty keeps them
-	// on each edge's disk only. With it, all of VaultMount, VaultPath,
-	// VaultRoleID, and VaultSecretID are required.
+	// on each edge's disk only. With it, all of VaultMount, VaultPath, and
+	// VaultRoleID are required, and each edge needs its own
+	// vault_secret_id in user-data: the ISO holds no secret.
 	Vault string `yaml:"vault"`
 	// VaultCA is the PEM CA, or chain, that signed Vault's HTTPS
 	// certificate: the only roots the connection trusts. Empty trusts the
@@ -43,10 +44,9 @@ type Config struct {
 	VaultMount string `yaml:"vault_mount"`
 	// VaultPath is these edges' path in the mount, such as prod/public.
 	VaultPath string `yaml:"vault_path"`
-	// VaultRoleID and VaultSecretID are the AppRole the edge logs in with;
-	// its policy should allow the path and nothing else.
-	VaultRoleID   string `yaml:"vault_role_id"`
-	VaultSecretID string `yaml:"vault_secret_id"`
+	// VaultRoleID is the AppRole the edges log in with; its policy should
+	// allow the path and nothing else.
+	VaultRoleID string `yaml:"vault_role_id"`
 }
 
 // Check reports what is wrong with c, as the edge would. An error names the

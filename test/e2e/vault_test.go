@@ -36,20 +36,22 @@ func TestEdgesShareCertificatesThroughVault(t *testing.T) {
 	// On QEMU's user-mode network, the guest reaches this host at 10.0.2.2.
 	conf := "vault: https://10.0.2.2:" + port + "\n" +
 		"vault_mount: edge-certs\nvault_path: test/private\n" +
-		"vault_role_id: " + vault.RoleID + "\nvault_secret_id: " + vault.SecretID + "\n" +
+		"vault_role_id: " + vault.RoleID + "\n" +
 		"vault_ca: |\n" + lab.Indent(vault.CA)
+	// Each edge's own secret ID, on its NoCloud drive: the ISO holds none.
+	secret := "vault_secret_id: " + vault.SecretID + "\n"
 	tunnelCert := func() bool {
 		return slices.ContainsFunc(vault.Keys(), func(k string) bool {
 			return strings.HasSuffix(k, "/"+lab.Tunnel+"/"+lab.Tunnel+".crt")
 		})
 	}
 
-	a := lab.BootEdge(t, lab.EdgeOptions{Config: conf})
+	a := lab.BootEdge(t, lab.EdgeOptions{Config: conf, UserData: secret})
 	require.True(t, tunnelCert(), "the tunnel certificate is not in Vault: %v", vault.Keys())
 	first := lab.Serial(t, a.Ops, lab.OpsURL+"status")
 
 	// The parent test owns it: a subtest's cleanup would stop it.
-	b := lab.BootEdge(t, lab.EdgeOptions{Config: conf, SharePebble: a.Pebble})
+	b := lab.BootEdge(t, lab.EdgeOptions{Config: conf, UserData: secret, SharePebble: a.Pebble})
 	step(t, "a second edge starts with the first's certificate", func(t *testing.T) {
 		assert.Equal(t, first, lab.Serial(t, b.Ops, lab.OpsURL+"status"))
 		assert.Equal(t, []string{lab.Tunnel}, a.Pebble.Issued(), "ordered again")

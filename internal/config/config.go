@@ -3,13 +3,14 @@
 //
 //	fortress.yml    baked into the ISO by fortressctl bake: what the edge
 //	                trusts and how it runs. A new ISO changes it.
-//	user-data       the NoCloud drive: fqdn, the edge's DNS name. Nothing
-//	                else in it is read.
+//	user-data       the NoCloud drive: fqdn, the edge's DNS name, and with
+//	                vault, vault_secret_id. Nothing else in it is read.
 //	network-config  the NoCloud drive: the static address.
 //	policy.yml      the /var disk, from fortressctl apply: who may reach the
 //	                edge and how much. It changes while the edge runs.
 //
-// None of them holds a secret.
+// Only vault_secret_id is a secret. It differs per edge, so it is on the
+// edge's own drive and never in the ISO, which is shared and copied.
 package config
 
 import (
@@ -142,7 +143,7 @@ type Vault struct {
 	Mount    string // the KV v2 mount
 	Path     string // the path in it, for these edges only
 	RoleID   string
-	SecretID string
+	SecretID string // the edge's own, from user-data
 }
 
 // Policy is policy.yml: what the edge lets through. It is the part an
@@ -378,7 +379,6 @@ type edgeConfig struct {
 	VMount   string  `yaml:"vault_mount"`
 	VPath    string  `yaml:"vault_path"`
 	VRole    string  `yaml:"vault_role_id"`
-	VSecret  string  `yaml:"vault_secret_id"`
 }
 
 // policyConfig is policy.yml.
@@ -415,7 +415,7 @@ type siteYAML struct {
 // with a pointer to where it belongs.
 var (
 	edgeKeys = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic",
-		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id", "vault_secret_id"}
+		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id"}
 	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
 		"trace", "sites", "tunnel_grace", "tunnel_dead_timeout", "collector"}
 )
@@ -708,6 +708,8 @@ func checkKeys(doc []byte, file string, known, other []string, elsewhere string)
 		case slices.Contains(known, k):
 		case slices.Contains(other, k):
 			return fmt.Errorf("%s: %s %s", file, k, elsewhere)
+		case k == "vault_secret_id":
+			return fmt.Errorf("%s: vault_secret_id is secret and differs per edge: it goes in the edge's user-data, on its NoCloud drive", file)
 		default:
 			return fmt.Errorf("%s: unknown key %q", file, k)
 		}
@@ -745,12 +747,14 @@ func checkNested(doc []byte, keys ...string) error {
 	return nil
 }
 
-// applyUserData takes fqdn from a cloud-config and nothing else: the
-// platform writes the rest (hostname, users, keys) for guests that have
-// a shell, and this one has none.
+// applyUserData takes fqdn from a cloud-config, and vault_secret_id when
+// fortress.yml sets vault, and nothing else: the platform writes the rest
+// (hostname, users, keys) for guests that have a shell, and this one has
+// none.
 func applyUserData(c *Config, userData []byte) error {
 	var ud struct {
-		FQDN string `yaml:"fqdn"`
+		FQDN          string `yaml:"fqdn"`
+		VaultSecretID string `yaml:"vault_secret_id"`
 	}
 	if err := yaml.Unmarshal(userData, &ud); err != nil {
 		return fmt.Errorf("user-data: %w", err)
@@ -763,6 +767,15 @@ func applyUserData(c *Config, userData []byte) error {
 		return fmt.Errorf("user-data: fqdn %q: %w; on Proxmox, name the VM edge1.example.com or give it a DNS domain", name, err)
 	}
 	c.Tunnel = name
+	secret := strings.TrimSpace(ud.VaultSecretID)
+	switch {
+	case c.Vault != nil && secret == "":
+		return fmt.Errorf("user-data: vault_secret_id is required: %s sets vault, and this edge logs in with its AppRole's secret ID", EdgeFile)
+	case c.Vault == nil && secret != "":
+		return fmt.Errorf("user-data: vault_secret_id without vault in %s", EdgeFile)
+	case c.Vault != nil:
+		c.Vault.SecretID = secret
+	}
 	return nil
 }
 
@@ -834,10 +847,10 @@ var vaultPathRegex = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
 func applyVault(c *Config, e edgeConfig) error {
 	v := Vault{
 		URL: strings.TrimSpace(e.Vault), Mount: strings.Trim(strings.TrimSpace(e.VMount), "/"),
-		Path: strings.Trim(strings.TrimSpace(e.VPath), "/"), RoleID: strings.TrimSpace(e.VRole), SecretID: strings.TrimSpace(e.VSecret),
+		Path: strings.Trim(strings.TrimSpace(e.VPath), "/"), RoleID: strings.TrimSpace(e.VRole),
 	}
 	ca := strings.TrimSpace(e.VaultCA)
-	if v.URL == "" && v.Mount == "" && v.Path == "" && v.RoleID == "" && v.SecretID == "" && ca == "" {
+	if v.URL == "" && v.Mount == "" && v.Path == "" && v.RoleID == "" && ca == "" {
 		return nil
 	}
 	u, err := url.Parse(v.URL)
@@ -850,8 +863,8 @@ func applyVault(c *Config, e edgeConfig) error {
 			return fmt.Errorf("%s: %s: want a KV v2 path such as edge-certs or prod/public", EdgeFile, k.key)
 		}
 	}
-	if v.RoleID == "" || v.SecretID == "" {
-		return fmt.Errorf("%s: vault_role_id and vault_secret_id: the AppRole the edge logs in with is required", EdgeFile)
+	if v.RoleID == "" {
+		return fmt.Errorf("%s: vault_role_id: the AppRole the edges log in with is required", EdgeFile)
 	}
 	if ca != "" {
 		if _, err := pemCerts([]byte(ca)); err != nil {

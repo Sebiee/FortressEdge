@@ -5,12 +5,14 @@ An edge's config has three parts, and each has one owner:
 | Part | Holds | Comes from | Changes by |
 | --- | --- | --- | --- |
 | `fortress.yml` | whom the edge trusts and how it runs: the ACME server and its CA, the client CA, NTP, QUIC | the ISO, baked with `fortressctl bake` | a new ISO and a restart |
-| `fqdn` and address | the edge's DNS name and static address | the machine's NoCloud (cloud-init) drive: `user-data` and `network-config` | the platform's settings and a restart |
+| `fqdn` and address | the edge's DNS name and static address, and with Vault its own secret ID | the machine's NoCloud (cloud-init) drive: `user-data` and `network-config` | the platform's settings and a restart |
 | `policy.yml` | who may reach the edge and how much, and what it records: `block`, `exempt`, `limits`, `access_log`, `trace`, `sites` | `fortressctl apply`, kept on the data disk | `fortressctl apply`, while the edge runs |
 
-None of them holds a secret, so the ISO can be a build artifact and the
-drive can be what any platform writes. There is no other way to
-configure an edge: no maintenance mode, no config upload, no shell.
+The ISO holds no secret, so it can be a build artifact, and the drive can
+be what any platform writes. The one exception is the Vault secret ID of
+edges that share certificates: it is each edge's own, in its `user-data`
+([below](#with-vault-the-secret-id)). There is no other way to configure
+an edge: no maintenance mode, no config upload, no shell.
 
 The machine needs:
 
@@ -88,14 +90,15 @@ policy, carries over.
 
 ## The NoCloud drive: fqdn and address
 
-The edge reads `fqdn` from `user-data` and nothing else there, and the
-first static address, gateway, and DNS servers from `network-config`
-(v1 or v2). That is what platforms write from their own settings. On
-Proxmox, the `fqdn` is the VM's name with its DNS domain: a VM named
-`edge1` with the domain `example.com`, or one named `edge1.example.com`.
-Proxmox writes the bare name `edge1` as `fqdn` when the VM has no DNS
-domain; the edge refuses that, because the name is what dark nodes ask
-for by SNI and what the certificates are issued for.
+The edge reads `fqdn` from `user-data` (with Vault, `vault_secret_id`
+too) and nothing else there, and the first static address, gateway, and
+DNS servers from `network-config` (v1 or v2). That is what platforms
+write from their own settings. On Proxmox, the `fqdn` is the VM's name
+with its DNS domain: a VM named `edge1` with the domain `example.com`,
+or one named `edge1.example.com`. Proxmox writes the bare name `edge1`
+as `fqdn` when the VM has no DNS domain; the edge refuses that, because
+the name is what dark nodes ask for by SNI and what the certificates are
+issued for.
 
 Proxmox writes, for instance:
 
@@ -122,6 +125,27 @@ adds the route to the gateway. Without DNS servers, the edge uses
 1.1.1.1. Elsewhere, write the same two files onto a drive labelled
 `cidata` with `meta-data` (such as `cloud-localds`), or let libvirt or the
 cloud do it.
+
+### With Vault: the secret ID
+
+Edges that share their certificates through Vault
+([certificates.md](certificates.md#several-edges-for-the-same-names))
+log in with one AppRole, whose `vault_role_id` is in `fortress.yml`, and
+each with a secret ID of its own, bound to its address, in `user-data`:
+
+```yaml
+#cloud-config
+fqdn: edge1.example.com
+vault_secret_id: 2f1b...
+```
+
+`fortress.yml` refuses `vault_secret_id`: an ISO is shared and copied,
+and whoever holds a secret ID reads every private key on the path. Keep
+the drive, and wherever its `user-data` comes from, as you keep the keys.
+Proxmox writes no such key from the VM's settings, so give the VM a
+`user-data` of your own, with `fqdn` in it, as a snippet:
+`qm set <vmid> --cicustom user=local:snippets/edge1-user-data.yaml`.
+Proxmox still writes `network-config` from the VM's settings.
 
 ## Terraform
 
@@ -191,6 +215,28 @@ resource "proxmox_virtual_environment_vm" "edge1" {
   }
 }
 ```
+
+With Vault, each edge's `user-data` is a snippet, given to the VM in
+place of the one Proxmox would write:
+
+```hcl
+resource "proxmox_virtual_environment_file" "edge1_user_data" {
+  node_name    = "pve"
+  datastore_id = "local" # a datastore that holds snippets
+  content_type = "snippets"
+  source_raw {
+    file_name = "edge1-user-data.yaml"
+    data      = <<-EOT
+      #cloud-config
+      fqdn: edge1.example.com
+      vault_secret_id: ${var.edge1_vault_secret_id}
+    EOT
+  }
+}
+```
+
+and, in the VM's `initialization`, `user_data_file_id =
+proxmox_virtual_environment_file.edge1_user_data.id`.
 
 `fortressedge_iso` takes the `fortress.yml` settings as attributes of the
 same names (`client_ca`, `acme`, `acme_ca`, `ntp`, and the rest), checked

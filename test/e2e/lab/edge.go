@@ -28,6 +28,7 @@ type EdgeOptions struct {
 	Policy       string // applied with fortressctl apply once the edge is up
 	Pebble       PebbleOptions
 	FQDN         string   // user-data's fqdn; empty is Tunnel
+	UserData     string   // user-data lines after Proxmox's
 	NoDrive      bool     // boot without the NoCloud drive
 	NTP          []string // fortress.yml's ntp; empty is the lab's server
 	// SharePebble is another edge's Pebble, for edges that share
@@ -80,7 +81,7 @@ func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 		"client_ca: |\n" + Indent(readFile(t, filepath.Join(e.PKI, "ca.crt"))))
 	e.VM.ISO = Bake(t, e.Dir, cmp.Or(o.ISO, *iso), edge)
 	if drive != "" {
-		Drive(t, drive, UserData(cmp.Or(o.FQDN, Tunnel)), e.VM.NetworkConfig())
+		Drive(t, drive, append(UserData(cmp.Or(o.FQDN, Tunnel)), o.UserData...), e.VM.NetworkConfig())
 	}
 	opsCrt, opsKey := e.Cert(ca.RoleOps, "alice")
 	e.Web = e.VM.Client(t, e.Roots, "", "")
