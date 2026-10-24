@@ -10,8 +10,6 @@ import (
 	"sync"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
@@ -27,20 +25,12 @@ const alpnAnnotation = "fortressedge.io/alpn"
 // HTTPRoute hostname's, which is the name itself.
 const tlsProxyPrefix = "tls:"
 
-type tlsRoute struct {
-	Spec struct {
-		Hostnames []string `json:"hostnames"`
-		Rules     []struct {
-			BackendRefs []struct {
-				Group     *string `json:"group"`
-				Kind      *string `json:"kind"`
-				Name      string  `json:"name"`
-				Namespace *string `json:"namespace"`
-				Port      *int32  `json:"port"`
-			} `json:"backendRefs"`
-		} `json:"rules"`
-	} `json:"spec"`
-	Status routeStatus `json:"status"`
+type backendRef struct {
+	Group     *string `json:"group"`
+	Kind      *string `json:"kind"`
+	Name      string  `json:"name"`
+	Namespace *string `json:"namespace"`
+	Port      *int32  `json:"port"`
 }
 
 // refusal is a TLSRoute, or one of its hostnames, that fortresskube does
@@ -73,56 +63,40 @@ var refusalReasons = []string{
 	refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
 }
 
-// publishedTLS is one tcp-tls proxy per hostname of each TLSRoute the
-// Gateway gwNS/gwName reports as Accepted, dialing the route's first
-// backend Service directly: the edge ends TLS, so the Gateway's proxy,
-// which routes a TLS stream by its server name, cannot take the stream.
-// A hostname an HTTPRoute publishes (httpNames) is refused, and so is one
-// an older TLSRoute has.
-func publishedTLS(objs []any, gwNS, gwName string, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
-	type candidate struct {
-		u *unstructured.Unstructured
-		r tlsRoute
-	}
-	var routes []candidate
-	for _, o := range objs {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		var r tlsRoute
-		if runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &r) != nil || !r.Status.acceptedBy(u.GetNamespace(), gwNS, gwName) {
-			continue
-		}
-		routes = append(routes, candidate{u, r})
-	}
+// publishedTLS is one tcp-tls proxy per hostname of each TLSRoute gw
+// accepted, dialing the route's first backend Service directly: the edge
+// ends TLS, so the Gateway's proxy, which routes a TLS stream by its
+// server name, cannot take the stream. A hostname an HTTPRoute publishes
+// (httpNames) is refused, and so is one an older TLSRoute has.
+func publishedTLS(rs []route, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
+	rs = slices.DeleteFunc(rs, func(r route) bool { return !gw.accepts(&r) })
 	// The oldest route keeps a hostname two routes name.
-	slices.SortFunc(routes, func(a, b candidate) int {
-		if c := a.u.GetCreationTimestamp().Compare(b.u.GetCreationTimestamp().Time); c != 0 {
+	slices.SortFunc(rs, func(a, b route) int {
+		if c := a.Metadata.CreationTimestamp.Compare(b.Metadata.CreationTimestamp.Time); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.u.GetNamespace()+"/"+a.u.GetName(), b.u.GetNamespace()+"/"+b.u.GetName())
+		return cmp.Compare(a.key(), b.key())
 	})
 	var (
 		out     []v1.ProxyConfigurer
 		refused []refusal
 		taken   = map[string]bool{}
 	)
-	for _, c := range routes {
-		ns, key := c.u.GetNamespace(), c.u.GetNamespace()+"/"+c.u.GetName()
-		host, port, reason := backendOf(&c.r, ns)
+	for _, r := range rs {
+		key, annotation := r.key(), r.Metadata.Annotations[alpnAnnotation]
+		host, port, reason := backendOf(&r)
 		if reason == "" {
-			reason = checkALPN(c.u.GetAnnotations()[alpnAnnotation])
+			reason = checkALPN(annotation)
 		}
-		if reason == "" && len(c.r.Spec.Hostnames) == 0 {
+		if reason == "" && len(r.Spec.Hostnames) == 0 {
 			reason = refusedNoHostnames
 		}
 		if reason != "" {
 			refused = append(refused, refusal{route: key, reason: reason})
 			continue
 		}
-		alpn := splitALPN(c.u.GetAnnotations()[alpnAnnotation])
-		for _, h := range c.r.Spec.Hostnames {
+		alpn := splitALPN(annotation)
+		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
 			switch {
 			case strings.Contains(h, "*") || len(k8svalidation.IsDNS1123Subdomain(h)) > 0:
@@ -149,7 +123,8 @@ func publishedTLS(objs []any, gwNS, gwName string, httpNames map[string]bool) ([
 
 // backendOf is the route's first backend, a Service of its own
 // namespace, as <name>.<namespace>.svc and its port; or why there is none.
-func backendOf(r *tlsRoute, ns string) (host string, port int, reason string) {
+func backendOf(r *route) (host string, port int, reason string) {
+	ns := r.Metadata.Namespace
 	if len(r.Spec.Rules) == 0 || len(r.Spec.Rules[0].BackendRefs) == 0 {
 		return "", 0, refusedBackend
 	}
