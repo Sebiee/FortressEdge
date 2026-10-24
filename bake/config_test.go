@@ -45,12 +45,11 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		VaultMount:    "edge-certs",
 		VaultPath:     "test/private",
 		VaultRoleID:   "role",
-		VaultSecretID: "secret",
 	}
 	if err := c.Check(); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Parse([]byte("#cloud-config\nfqdn: edge1.example.com\n"),
+	cfg, err := config.Parse([]byte("#cloud-config\nfqdn: edge1.example.com\nvault_secret_id: secret\n"),
 		[]byte("version: 2\nethernets:\n  eth0:\n    addresses: [192.0.2.10/24]\n    gateway4: 192.0.2.1\n"), c.YAML(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +59,7 @@ func TestConfigYAMLIsWhatTheEdgeReads(t *testing.T) {
 		t.Fatalf("%+v", cfg)
 	}
 	if v := cfg.Vault; v == nil || v.URL != c.Vault || string(v.CA) != strings.TrimSpace(c.VaultCA) || v.Mount != c.VaultMount ||
-		v.Path != c.VaultPath || v.RoleID != c.VaultRoleID || v.SecretID != c.VaultSecretID {
+		v.Path != c.VaultPath || v.RoleID != c.VaultRoleID || v.SecretID != "secret" {
 		t.Fatalf("vault: %+v", cfg.Vault)
 	}
 }
