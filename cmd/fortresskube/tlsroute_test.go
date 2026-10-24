@@ -181,21 +181,25 @@ func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
 		"team-b/headless: backend_service",
 		"team-b/missing: backend_service",
 		"team-b/badname: invalid_backend",
+		"team-b/unresolved: unresolved_backend",
 	}, reasons)
 }
 
 // The oldest route the Gateway accepted holds a name even while it
 // cannot publish it: the name does not pass to a younger route because
-// the older one's Service is gone for a while, or its annotation is
-// wrong.
+// the older one's Service is gone for a while (and the Gateway says its
+// references do not resolve), or its annotation is wrong.
 func TestOlderTLSRouteHoldsItsNames(t *testing.T) {
 	old, young := time.Unix(1_700_000_000, 0), time.Unix(1_800_000_000, 0)
+	unresolved := []map[string]any{status(public, controller, 1, "True", "False")}
 	v := apiView(t, gatewayObj(t), classObj(t, "cilium", controller), clusterIPSvc(t, "prod", "db", "10.0.0.1"),
-		clusterIPSvc(t, "staging", "db", "10.0.0.3"),
-		testRoute{kind: "TLSRoute", ns: "dev", name: "db", age: old, hostnames: []string{"db.example.com"}, backend: svc("gone", 5432)}.obj(t),
+		clusterIPSvc(t, "staging", "db", "10.0.0.3"), clusterIPSvc(t, "qa", "db", "10.0.0.4"),
+		testRoute{kind: "TLSRoute", ns: "dev", name: "db", age: old, hostnames: []string{"db.example.com"}, backend: svc("gone", 5432), status: unresolved}.obj(t),
+		testRoute{kind: "TLSRoute", ns: "qa", name: "db", age: old, hostnames: []string{"qa.example.com"}, backend: svc("db", 5432), status: unresolved}.obj(t),
 		testRoute{kind: "TLSRoute", ns: "staging", name: "db", age: old, annotations: map[string]string{alpnAnnotation: "acme-tls/1"},
 			hostnames: []string{"cache.example.com"}, backend: svc("db", 5432)}.obj(t),
-		testRoute{kind: "TLSRoute", ns: "prod", name: "db", age: young, hostnames: []string{"db.example.com", "cache.example.com", "free.example.com"}, backend: svc("db", 5432)}.obj(t),
+		testRoute{kind: "TLSRoute", ns: "prod", name: "db", age: young,
+			hostnames: []string{"db.example.com", "qa.example.com", "cache.example.com", "free.example.com"}, backend: svc("db", 5432)}.obj(t),
 	)
 	_, tlsProxies, refused := testPublisher.publication(v)
 
@@ -206,8 +210,10 @@ func TestOlderTLSRouteHoldsItsNames(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{
 		"dev/db: backend_service",
+		"qa/db: unresolved_backend",
 		"staging/db: invalid_alpn",
 		"prod/db db.example.com: hostname_of_tlsroute",
+		"prod/db qa.example.com: hostname_of_tlsroute",
 		"prod/db cache.example.com: hostname_of_tlsroute",
 	}, reasons)
 }
