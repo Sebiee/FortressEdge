@@ -565,7 +565,8 @@ logs.
 once, WebSockets and streams included: each holds a connection to the
 dark node and the origin until it ends. A source at that count gets a
 `429` for its next request, as one over its rate does, even with tokens
-left.
+left. This holds with `requests_per_second: 0` too; `request_burst: 0`
+then turns it off.
 
 A request whose body or response stops moving ends after a minute, as
 does an HTTP/2 connection the visitor takes nothing from: each read of a
