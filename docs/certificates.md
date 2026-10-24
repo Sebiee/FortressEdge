@@ -48,6 +48,9 @@ ever given to the edge. TCP 443 and QUIC present the same tunnel
 certificate; QUIC shows it only to the tunnel name.
 
 - **The tunnel name** is issued at boot, before anything listens.
+- **A stored certificate the edge cannot use**, such as a damaged file
+  or a key that is not the certificate's, is removed and ordered again,
+  for the tunnel name as for a site, rather than stopping the boot.
 - **A site** is issued as soon as a dark node publishes the hostname, not
   on the first visit. A name that comes back later reuses the certificate
   on disk.

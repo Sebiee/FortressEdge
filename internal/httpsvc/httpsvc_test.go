@@ -2,6 +2,7 @@ package httpsvc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -25,6 +26,8 @@ import (
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
 
+	"github.com/Sebiee/fortressedge/internal/certstore"
+	"github.com/Sebiee/fortressedge/internal/certstore/vaulttest"
 	"github.com/Sebiee/fortressedge/internal/config"
 )
 
@@ -546,6 +549,51 @@ func TestUnreadableTunnelCertificateIsOrderedAgain(t *testing.T) {
 				t.Fatalf("%d issued; served %q", iss.count(), servedSerial(d, tunnel))
 			}
 		})
+	}
+}
+
+// With Vault, a tunnel certificate there that the edge cannot use is not
+// copied to the disk; an edge with none of its own orders a new one, and
+// Vault gets it.
+func TestUnusableTunnelCertificateInVaultIsOrderedAgain(t *testing.T) {
+	const tunnel = "tunnel.example.com"
+	srv, err := vaulttest.Start("127.0.0.1:0", "edge-certs", "test/private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+	vault := func() *certstore.Vault {
+		v, err := certstore.NewVault(certstore.VaultConfig{URL: srv.URL, CA: srv.CA, Mount: srv.Mount, Path: srv.Path, RoleID: srv.RoleID, SecretID: srv.SecretID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	iss := &testIssuer{lifetime: func(int) (time.Duration, time.Duration) { return 0, time.Hour }}
+	ik := iss.IssuerKey()
+	crt, _ := certPEM(t, tunnel, time.Now().Add(time.Hour))
+	_, strayKey := certPEM(t, tunnel, time.Now().Add(time.Hour))
+	other := vault()
+	for k, v := range map[string][]byte{
+		certmagic.StorageKeys.SiteCert(ik, tunnel):       crt,
+		certmagic.StorageKeys.SitePrivateKey(ik, tunnel): strayKey,
+		certmagic.StorageKeys.SiteMeta(ik, tunnel):       []byte(`{"sans":["tunnel.example.com"]}`),
+	} {
+		if err := other.Store(t.Context(), k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	magic, cache := testMagic(t, iss, time.Hour)
+	shared := certstore.NewShared(magic.Storage, vault())
+	shared.Seed(t.Context())
+	magic.Storage = shared
+	if err := manage(t.Context(), magic, cache, tunnel); err != nil {
+		t.Fatal(err)
+	}
+	got, err := other.Load(t.Context(), certmagic.StorageKeys.SiteCert(ik, tunnel))
+	if err != nil || bytes.Equal(got, crt) || iss.count() != 1 {
+		t.Fatalf("Vault holds the old certificate (%v) after %d orders", err, iss.count())
 	}
 }
 

@@ -284,13 +284,25 @@ func (d *Domains) unmanageLocked(name string) {
 }
 
 // manage puts name's certificate in the cache as a managed certificate:
-// loaded from disk, or obtained when there is none. certmagic's timer
-// renews cached managed certificates. One that already expired, after the
-// edge was off for a while, is renewed here first. Every call is
-// non-interactive: certmagic's Sync variants prompt on the console for an
-// email address.
+// loaded from disk, or obtained when there is none, or none it can use.
+// certmagic's timer renews cached managed certificates. One that already
+// expired, after the edge was off for a while, is renewed here first.
+// Every call is non-interactive: certmagic's Sync variants prompt on the
+// console for an email address.
 func manage(ctx context.Context, magic *certmagic.Config, cache *certmagic.Cache, name string) error {
 	cert, err := magic.CacheManagedCertificate(ctx, name)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && ctx.Err() == nil {
+		// A key of another certificate, metadata that does not decode: a
+		// disk fault, or what was written to Vault. certmagic orders only
+		// when nothing is stored, so what is stored goes first.
+		slog.Warn("acme: stored certificate unusable; ordering a new one", "name", name, "err", err)
+		for _, iss := range magic.Issuers {
+			if err := magic.Storage.Delete(ctx, certmagic.StorageKeys.CertsSitePrefix(iss.IssuerKey(), name)); err != nil {
+				return fmt.Errorf("acme: removing %s's unusable certificate: %w", name, err)
+			}
+		}
+		err = fs.ErrNotExist
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		// ObtainCertAsync retries for up to 30 days; cancelling ctx stops it.
 		if err := magic.ObtainCertAsync(ctx, name); err != nil {
