@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"path"
 	"regexp"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"golang.org/x/time/rate"
 
 	"github.com/Sebiee/fortressedge/internal/certstore"
 	"github.com/Sebiee/fortressedge/internal/config"
@@ -42,6 +44,8 @@ type Domains struct {
 
 	certMu sync.Mutex
 	orders map[certOrder]int64 // obtains and renewals, by name and result
+	failed map[string]failure  // names whose last order failed, kept when they leave
+	gate   *rate.Limiter       // new orders, every name together
 
 	// held are certificates, still valid, of names no dark node publishes
 	// now: from the disk at boot, or taken when a name's last route left.
@@ -111,25 +115,80 @@ type certOrder struct {
 	ok      bool
 }
 
-// certEvent is certmagic's event hook: it counts obtains and renewals.
-// An error would stop an obtain that is starting, so it returns none.
-func (d *Domains) certEvent(_ context.Context, event string, data map[string]any) error {
-	if event != "cert_obtained" && event != "cert_failed" {
-		return nil
-	}
+// failure is a name's orders that failed in a row, and when the last did.
+type failure struct {
+	n    int
+	last time.Time
+}
+
+// certEvent is certmagic's event hook. A new order waits for the gate;
+// renewals do not, since each certificate renews at most once a third of
+// its life, and a short-lived one held back could expire. It counts
+// obtains and renewals, and remembers each name's failures. It returns an
+// error, which stops the order, only when the order was cancelled while
+// it waited.
+func (d *Domains) certEvent(ctx context.Context, event string, data map[string]any) error {
 	name, _ := data["identifier"].(string)
 	renewal, _ := data["renewal"].(bool)
+	switch event {
+	case "cert_obtaining":
+		if renewal {
+			return nil
+		}
+		return d.gate.Wait(ctx)
+	case "cert_obtained", "cert_failed":
+	default:
+		return nil
+	}
+	ok := event == "cert_obtained"
+	now := time.Now()
 	d.certMu.Lock()
+	defer d.certMu.Unlock()
 	if d.orders == nil {
 		d.orders = map[certOrder]int64{}
 	}
-	d.orders[certOrder{name: name, renewal: renewal, ok: event == "cert_obtained"}]++
-	d.certMu.Unlock()
+	d.orders[certOrder{name: name, renewal: renewal, ok: ok}]++
+	if ok {
+		delete(d.failed, name)
+		return nil
+	}
+	if d.failed == nil {
+		d.failed = map[string]failure{}
+	}
+	maps.DeleteFunc(d.failed, func(_ string, f failure) bool { return now.Sub(f.last) > failedForget })
+	d.failed[name] = failure{n: d.failed[name].n + 1, last: now}
 	return nil
 }
 
+// waitFailed waits until name may be ordered again after its failures.
+func (d *Domains) waitFailed(ctx context.Context, name string) error {
+	d.certMu.Lock()
+	f, ok := d.failed[name]
+	d.certMu.Unlock()
+	if !ok {
+		return nil
+	}
+	wait := failedWait
+	for i := 1; i < f.n && wait < failedWaitMax; i++ {
+		wait *= 2
+	}
+	left := time.Until(f.last.Add(min(wait, failedWaitMax)))
+	if left <= 0 {
+		return nil
+	}
+	slog.Info("acme: waiting before ordering again", "name", name, "failures", f.n, "wait", left.Round(time.Second))
+	t := time.NewTimer(left)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func NewDomains(tunnel string) *Domains {
-	return &Domains{tunnel: hostname(tunnel)}
+	return &Domains{tunnel: hostname(tunnel), gate: rate.NewLimiter(rate.Every(orderEvery), orderBurst)}
 }
 
 // setMagic starts managing the names registered before ACME was ready.
@@ -209,7 +268,7 @@ func (d *Domains) startLocked(name string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.names[name] = cancel
 	go func(magic *certmagic.Config, cache *certmagic.Cache) {
-		err := manage(ctx, magic, cache, name)
+		err := d.manage(ctx, magic, cache, name)
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("acme: certificate", "name", name, "err", err)
 		}
@@ -306,10 +365,11 @@ func (d *Domains) unmanageLocked(name string) {
 // manage puts name's certificate in the cache as a managed certificate:
 // loaded from disk, or obtained when there is none, or none it can use.
 // certmagic's timer renews cached managed certificates. One that already
-// expired, after the edge was off for a while, is renewed here first.
-// Every call is non-interactive: certmagic's Sync variants prompt on the
-// console for an email address.
-func manage(ctx context.Context, magic *certmagic.Config, cache *certmagic.Cache, name string) error {
+// expired, after the edge was off for a while, is renewed here first. A
+// name whose orders failed waits first (waitFailed). Every call is
+// non-interactive: certmagic's Sync variants prompt on the console for an
+// email address.
+func (d *Domains) manage(ctx context.Context, magic *certmagic.Config, cache *certmagic.Cache, name string) error {
 	cert, err := magic.CacheManagedCertificate(ctx, name)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) && ctx.Err() == nil {
 		// A key of another certificate, metadata that does not decode: a
@@ -324,6 +384,9 @@ func manage(ctx context.Context, magic *certmagic.Config, cache *certmagic.Cache
 		err = fs.ErrNotExist
 	}
 	if errors.Is(err, fs.ErrNotExist) {
+		if err := d.waitFailed(ctx, name); err != nil {
+			return err
+		}
 		// ObtainCertAsync retries for up to 30 days; cancelling ctx stops it.
 		if err := magic.ObtainCertAsync(ctx, name); err != nil {
 			return err
@@ -331,6 +394,9 @@ func manage(ctx context.Context, magic *certmagic.Config, cache *certmagic.Cache
 		cert, err = magic.CacheManagedCertificate(ctx, name)
 	}
 	if err != nil || !cert.Expired() {
+		return err
+	}
+	if err := d.waitFailed(ctx, name); err != nil {
 		return err
 	}
 	if err := magic.RenewCertAsync(ctx, name, false); err != nil {
@@ -367,7 +433,7 @@ func (d *Domains) acme(ctx context.Context, cfg config.Config) (*certmagic.Confi
 		d.mu.Unlock()
 	}
 	d.loadHeld(ctx, magic)
-	if err := manage(ctx, magic, cache, cfg.Tunnel); err != nil {
+	if err := d.manage(ctx, magic, cache, cfg.Tunnel); err != nil {
 		return nil, err
 	}
 	slog.Info("tls: tunnel certificate ready", "name", cfg.Tunnel, "renew_interval", cfg.RenewInterval)

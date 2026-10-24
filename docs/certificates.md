@@ -62,6 +62,16 @@ certificate; QUIC shows it only to the tunnel name.
   before the edge serves it; one that is merely due waits for the timer.
 - **A name no dark node publishes** is no longer checked or renewed. Its
   certificate stays on disk until the name returns.
+- **New orders are capped**, every name together: 30 at once, then one
+  every two minutes; renewals are not held back. A name whose order
+  failed is not ordered again for a minute, doubling with each failure
+  up to six hours, even when its dark node publishes it again; its
+  failures are forgotten a day after the last. A dark node may publish
+  any hostname, and each new one costs an order: the cap keeps one that
+  publishes many from spending the CA's limits for every other name
+  (Let's Encrypt allows an account 300 new orders in 3 hours), but it can
+  still delay other new names on the edge, and with wildcard DNS it can
+  use up a registered domain's 50 certificates a week.
 - **Wildcard** routes get no certificate: TLS-ALPN-01 cannot issue one.
 
 For a CA with short-lived certificates, keep `renew_interval` well under

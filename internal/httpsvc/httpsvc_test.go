@@ -473,7 +473,7 @@ func TestRenewalTimer(t *testing.T) {
 	iss := &testIssuer{lifetime: func(int) (time.Duration, time.Duration) { return 0, life }}
 	magic, cache := testMagic(t, iss, 100*time.Millisecond)
 	d := NewDomains("tunnel.example.com")
-	if err := manage(t.Context(), magic, cache, "tunnel.example.com"); err != nil {
+	if err := d.manage(t.Context(), magic, cache, "tunnel.example.com"); err != nil {
 		t.Fatal(err)
 	}
 	d.setMagic(magic, cache)
@@ -498,7 +498,7 @@ func TestExpiredCertificateIsRenewedBeforeUse(t *testing.T) {
 	d := NewDomains("tunnel.example.com")
 	for range 2 { // obtain, then boot again with the expired one on disk
 		cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: "tunnel.example.com"}})
-		if err := manage(t.Context(), magic, cache, "tunnel.example.com"); err != nil {
+		if err := d.manage(t.Context(), magic, cache, "tunnel.example.com"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -541,10 +541,10 @@ func TestUnreadableTunnelCertificateIsOrderedAgain(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := manage(t.Context(), magic, cache, tunnel); err != nil {
+			d := NewDomains(tunnel)
+			if err := d.manage(t.Context(), magic, cache, tunnel); err != nil {
 				t.Fatal(err)
 			}
-			d := NewDomains(tunnel)
 			d.setMagic(magic, cache)
 			if iss.count() != 1 || servedSerial(d, tunnel) == "" {
 				t.Fatalf("%d issued; served %q", iss.count(), servedSerial(d, tunnel))
@@ -589,7 +589,7 @@ func TestUnusableTunnelCertificateInVaultIsOrderedAgain(t *testing.T) {
 	shared := certstore.NewShared(magic.Storage, vault())
 	shared.Seed(t.Context())
 	magic.Storage = shared
-	if err := manage(t.Context(), magic, cache, tunnel); err != nil {
+	if err := NewDomains(tunnel).manage(t.Context(), magic, cache, tunnel); err != nil {
 		t.Fatal(err)
 	}
 	got, err := other.Load(t.Context(), certmagic.StorageKeys.SiteCert(ik, tunnel))
