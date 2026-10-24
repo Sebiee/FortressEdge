@@ -29,6 +29,7 @@ import (
 	"github.com/Sebiee/fortressedge/internal/certstore"
 	"github.com/Sebiee/fortressedge/internal/certstore/vaulttest"
 	"github.com/Sebiee/fortressedge/internal/config"
+	"github.com/Sebiee/fortressedge/internal/metrics"
 )
 
 func TestHostForwardedToVhost(t *testing.T) {
@@ -595,6 +596,73 @@ func TestUnusableTunnelCertificateInVaultIsOrderedAgain(t *testing.T) {
 	if err != nil || bytes.Equal(got, crt) || iss.count() != 1 {
 		t.Fatalf("Vault holds the old certificate (%v) after %d orders", err, iss.count())
 	}
+}
+
+// New orders, of every name together, are capped: orderBurst at once,
+// then one each orderEvery. A node that publishes names faster waits.
+func TestOrdersAreCapped(t *testing.T) {
+	burst, every := orderBurst, orderEvery
+	orderBurst, orderEvery = 2, time.Hour
+	t.Cleanup(func() { orderBurst, orderEvery = burst, every })
+	iss := &testIssuer{lifetime: func(int) (time.Duration, time.Duration) { return 0, time.Hour }}
+	magic, cache := testMagic(t, iss, time.Hour)
+	d := NewDomains("tunnel.example.com")
+	magic.OnEvent = d.certEvent
+	d.setMagic(magic, cache)
+	names := []string{"a.example.com", "b.example.com", "c.example.com"}
+	for _, name := range names {
+		d.Domain(name, true)
+	}
+	eventually(t, func() bool { return iss.count() >= 2 }, "fewer orders than the burst")
+	time.Sleep(300 * time.Millisecond)
+	if n := iss.count(); n != 2 {
+		t.Fatalf("%d orders where 2 are allowed", n)
+	}
+	for _, name := range names {
+		d.Domain(name, false)
+	}
+}
+
+// failingIssuer refuses every order, and counts them.
+type failingIssuer struct{ orders atomic.Int32 }
+
+func (*failingIssuer) IssuerKey() string { return "failing" }
+
+func (i *failingIssuer) Issue(context.Context, *x509.CertificateRequest) (*certmagic.IssuedCertificate, error) {
+	i.orders.Add(1)
+	return nil, fmt.Errorf("refused")
+}
+
+// failedOrders is whether the metrics count n failed orders for name.
+func failedOrders(d *Domains, name string, n int) bool {
+	var buf bytes.Buffer
+	w := metrics.NewWriter(&buf)
+	d.writeMetrics(w)
+	_ = w.Flush()
+	return strings.Contains(buf.String(), fmt.Sprintf("fortressedge_certificate_obtains_total{name=%q,result=\"failed\"} %d\n", name, n))
+}
+
+// A name whose order failed waits before it is ordered again, and a dark
+// node that unpublishes and publishes it again does not skip the wait.
+func TestFailedNameWaitsAcrossRepublish(t *testing.T) {
+	wait := failedWait
+	failedWait = 500 * time.Millisecond
+	t.Cleanup(func() { failedWait = wait })
+	iss := &failingIssuer{}
+	magic, cache := testMagic(t, iss, time.Hour)
+	d := NewDomains("tunnel.example.com")
+	magic.OnEvent = d.certEvent
+	d.setMagic(magic, cache)
+	d.Domain("a.example.com", true)
+	eventually(t, func() bool { return failedOrders(d, "a.example.com", 1) }, "no failed order")
+	d.Domain("a.example.com", false)
+	d.Domain("a.example.com", true)
+	time.Sleep(200 * time.Millisecond)
+	if n := iss.orders.Load(); n != 1 {
+		t.Fatalf("%d orders: ordered again at once after a republish", n)
+	}
+	eventually(t, func() bool { return iss.orders.Load() == 2 }, "not ordered again once the wait was over")
+	d.Domain("a.example.com", false)
 }
 
 // testMagic is acmeConfig's shape with iss instead of an ACME directory.

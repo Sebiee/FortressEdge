@@ -84,6 +84,26 @@ func (d *Domains) SetTunnelGrace(grace time.Duration) {
 // maxHeld bounds the certificates read from the disk at boot.
 const maxHeld = 4096
 
+// New orders, of every name together, pass a token bucket: orderBurst at
+// once, then one each orderEvery, so a node that publishes names cannot
+// spend the CA's limits (Let's Encrypt: 300 new orders per account in 3
+// hours) for every other name.
+var (
+	orderBurst = 30
+	orderEvery = 2 * time.Minute
+)
+
+// A name whose order failed is not ordered again for failedWait, doubled
+// with each further failure up to failedWaitMax, however often its dark
+// node publishes it again. Its failures are forgotten a day after the
+// last one.
+var failedWait = time.Minute
+
+const (
+	failedWaitMax = 6 * time.Hour
+	failedForget  = 24 * time.Hour
+)
+
 // certOrder is one kind of certificate order's outcome for one name.
 type certOrder struct {
 	name    string
