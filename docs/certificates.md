@@ -133,8 +133,13 @@ vault_secret_id: ...      # this edge's own
   seconds. An edge that sees no new write for a minute, by its own clock
   (no other clock, and nothing written in the lock, counts), takes it
   over: its holder died. One that has waited two minutes on a lock still
-  being written gives up and orders by itself, as when Vault is down, so
-  a stuck holder or a forged lock costs a boot two minutes at most.
+  being written gives up and orders by itself, so a stuck holder or a
+  forged lock costs a boot two minutes at most. An order that keeps
+  failing holds its lock while it is retried, and one that waits for the
+  order cap holds it meanwhile, so another edge then orders the same
+  name too. Edges of earlier releases on the same path still take a lock
+  over by the expiry its holder wrote, by their clocks: the rule holds
+  once every edge on the path runs this one.
 - **A validation can reach any of them.** With two addresses in DNS, the
   CA's TLS-ALPN-01 connection may reach the edge that did not order. It
   answers from the challenge the other stored in Vault, as long as it
@@ -153,11 +158,15 @@ vault_secret_id: ...      # this edge's own
   at its first boot with it, rather than order them again.
 - **What Vault returns is checked before an edge uses it** or copies it
   to its disk: a certificate must be for its name, valid now (it may
-  start up to five minutes ahead), and stored with its key; metadata
-  and challenges must be JSON; no value may exceed 64 KiB. An edge logs
-  anything else and keeps its disk's copy. This stops a broken or
-  tampered value from reaching every edge; it does not make the AppRole
-  any less powerful, since whoever holds it reads every key on the path.
+  start up to five minutes ahead), and stored with its key; its
+  metadata must be what certmagic reads, and challenges JSON; no value
+  may exceed 64 KiB. An edge logs anything else and keeps its disk's
+  copy; with none, it orders the name again. An expired certificate it
+  has no copy of is taken and renewed. This keeps a value no edge could
+  use (a damaged file, a wrong name, a mismatched or expired pair) from
+  reaching every edge. A well-formed certificate for the right name
+  passes, from any CA: whoever holds the AppRole can still replace one,
+  and reads every key on the path.
 
 The AppRole's policy should allow its path and nothing else:
 

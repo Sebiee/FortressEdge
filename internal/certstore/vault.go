@@ -367,7 +367,7 @@ func (v *Vault) Lock(ctx context.Context, name string) error {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("vault: lock %s: another edge has held it for %s", name, 2*lockTTL)
+			return fmt.Errorf("vault: lock %s: %w for %s", name, errHeldTooLong, 2*lockTTL)
 		}
 		select {
 		case <-time.After(time.Second):
@@ -377,7 +377,10 @@ func (v *Vault) Lock(ctx context.Context, name string) error {
 	}
 }
 
-var errLocked = errors.New("vault: locked")
+var (
+	errLocked      = errors.New("vault: locked")
+	errHeldTooLong = errors.New("held by another edge")
+)
 
 // lockData is what a lock holds. This edge reads none of it; edges
 // before it take a lock over once expires has passed.
