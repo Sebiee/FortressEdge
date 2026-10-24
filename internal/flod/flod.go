@@ -3,9 +3,13 @@
 package flod
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -34,11 +38,20 @@ var reasonNames = []string{
 	"drop_icmp",
 }
 
+// sweepEvery is how often ended bans leave the bans map.
+const sweepEvery = time.Minute
+
 // Filter is a loaded XDP program and its maps. Close detaches it.
 type Filter struct {
 	objs flodObjects
 	l    link.Link
 	mode string
+
+	// banMu serializes Ban and sweep, the only writers of the bans map, so
+	// a sweep never deletes a ban made after it read the map.
+	banMu sync.Mutex
+	stop  chan struct{}
+	swept chan struct{}
 }
 
 // SYNRate is how many new TCP connections one source may open: perSecond
@@ -66,10 +79,8 @@ func Attach(ifaceName string, block []netip.Prefix, quic bool, syn SYNRate) (*Fi
 	if err := f.SetSYNRate(syn); err != nil {
 		return nil, err
 	}
-	for _, p := range block {
-		if err := f.putBlock(p, 0); err != nil {
-			return nil, err
-		}
+	if err := f.SetBlock(block); err != nil {
+		return nil, err
 	}
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
@@ -95,6 +106,8 @@ func Attach(ifaceName string, block []netip.Prefix, quic bool, syn SYNRate) (*Fi
 		return nil, fmt.Errorf("attach xdp: %w", err)
 	}
 	f.l = l
+	f.stop, f.swept = make(chan struct{}), make(chan struct{})
+	go f.sweepBans()
 	ok = true
 	return f, nil
 }
@@ -107,14 +120,20 @@ func (f *Filter) Close() {
 	if f == nil {
 		return
 	}
+	if f.stop != nil {
+		close(f.stop)
+		<-f.swept
+	}
 	if f.l != nil {
 		f.l.Close()
 	}
 	f.objs.Close()
 }
 
-// SetBlock replaces the permanent drop list (expire_ns == 0). Runtime bans
-// (expire_ns != 0) stay. The XDP program keeps running.
+// SetBlock replaces the block list while the XDP program runs. The new
+// prefixes go in before the old ones leave, so no source either list
+// blocks slips through meanwhile, and a failure puts the previous list
+// back as it was.
 func (f *Filter) SetBlock(block []netip.Prefix) error {
 	if f == nil {
 		return nil
@@ -139,40 +158,70 @@ func (f *Filter) SetBlock(block []netip.Prefix) error {
 			keep6[flodLpm6{Prefixlen: uint32(bits), Addr: addr.As16()}] = struct{}{}
 		}
 	}
-	if err := syncStatic(f.objs.Block4, keep4); err != nil {
+	add4, drop4, err := diff(f.objs.Block4, keep4)
+	if err != nil {
 		return err
 	}
-	return syncStatic(f.objs.Block6, keep6)
-}
-
-func syncStatic[K comparable](m *ebpf.Map, keep map[K]struct{}) error {
-	var key K
-	var val flodBlockval
-	it := m.Iterate()
-	var drop []K
-	for it.Next(&key, &val) {
-		if val.ExpireNs != 0 {
-			continue
-		}
-		if _, ok := keep[key]; !ok {
-			drop = append(drop, key)
-		}
-	}
-	if err := it.Err(); err != nil {
+	add6, drop6, err := diff(f.objs.Block6, keep6)
+	if err != nil {
 		return err
 	}
-	for _, k := range drop {
-		if err := m.Delete(k); err != nil {
-			return err
-		}
-	}
-	zero := flodBlockval{}
-	for k := range keep {
-		if err := m.Put(k, zero); err != nil {
-			return err
+	ops := slices.Concat(add4, add6, drop4, drop6)
+	for i, op := range ops {
+		if err := op.do(); err != nil {
+			for _, done := range slices.Backward(ops[:i]) {
+				if uerr := done.undo().do(); uerr != nil {
+					err = fmt.Errorf("%w; restoring the previous list: %w", err, uerr)
+				}
+			}
+			return fmt.Errorf("xdp block list: %w", err)
 		}
 	}
 	return nil
+}
+
+// blockOp adds one prefix to a block map, or removes it.
+type blockOp struct {
+	m   *ebpf.Map
+	key any
+	add bool
+}
+
+func (op blockOp) do() error {
+	if op.add {
+		return op.m.Put(op.key, uint8(1))
+	}
+	return op.m.Delete(op.key)
+}
+
+func (op blockOp) undo() blockOp {
+	op.add = !op.add
+	return op
+}
+
+// diff returns the operations that turn m's keys into keep's.
+func diff[K comparable](m *ebpf.Map, keep map[K]struct{}) (add, drop []blockOp, err error) {
+	var (
+		key K
+		val uint8
+	)
+	have := map[K]struct{}{}
+	it := m.Iterate()
+	for it.Next(&key, &val) {
+		have[key] = struct{}{}
+		if _, ok := keep[key]; !ok {
+			drop = append(drop, blockOp{m: m, key: key})
+		}
+	}
+	if err := it.Err(); err != nil {
+		return nil, nil, err
+	}
+	for k := range keep {
+		if _, ok := have[k]; !ok {
+			add = append(add, blockOp{m: m, key: k, add: true})
+		}
+	}
+	return add, drop, nil
 }
 
 // SetSYNRate changes the SYN limit while XDP runs. Sources keep the
@@ -191,28 +240,82 @@ func (f *Filter) SetSYNRate(syn SYNRate) error {
 	return nil
 }
 
-// Ban pins addr until ttl elapses (monotonic clock, same as BPF): the
-// address itself for IPv4, its /64 for IPv6, which is what one user
-// usually holds. ttl <= 0 is forever. XDP then drops that source before
-// its next handshake.
+// Ban drops addr's packets in XDP until ttl elapses (monotonic clock, same
+// as BPF): the address itself for IPv4, its /64 for IPv6, which is what one
+// user usually holds.
 func (f *Filter) Ban(addr netip.Addr, ttl time.Duration) error {
 	if f == nil || !addr.IsValid() {
 		return nil
 	}
+	if ttl <= 0 {
+		return fmt.Errorf("ban: ttl %v", ttl)
+	}
+	now := monotonicNS()
+	if now == 0 {
+		return fmt.Errorf("ban: monotonic clock")
+	}
+	f.banMu.Lock()
+	defer f.banMu.Unlock()
+	return f.objs.Bans.Put(sourceKey(addr), now+uint64(ttl))
+}
+
+// sourceKey is addr's source in XDP: the address for IPv4, its /64 for
+// IPv6.
+func sourceKey(addr netip.Addr) flodSrcKey {
 	addr = addr.Unmap()
-	var expire uint64
-	if ttl > 0 {
-		now := monotonicNS()
-		if now == 0 {
-			return fmt.Errorf("ban: monotonic clock")
+	if addr.Is4() {
+		k := flodSrcKey{Family: 4}
+		a := addr.As4()
+		copy(k.Ip[:], a[:])
+		return k
+	}
+	k := flodSrcKey{Family: 6}
+	a := addr.As16()
+	copy(k.Ip[:8], a[:8])
+	return k
+}
+
+func (f *Filter) sweepBans() {
+	defer close(f.swept)
+	tick := time.NewTicker(sweepEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-f.stop:
+			return
+		case <-tick.C:
+			if err := f.sweep(); err != nil {
+				slog.Warn("xdp: sweeping ended bans", "err", err)
+			}
 		}
-		expire = now + uint64(ttl)
 	}
-	p := netip.PrefixFrom(addr, 32)
-	if addr.Is6() {
-		p, _ = addr.Prefix(64) // bpf/flod.c deletes an expired IPv6 ban by this key
+}
+
+// sweep deletes the bans that have ended, so they leave room for new ones.
+func (f *Filter) sweep() error {
+	f.banMu.Lock()
+	defer f.banMu.Unlock()
+	now := monotonicNS()
+	var (
+		key   flodSrcKey
+		until uint64
+		ended []flodSrcKey
+	)
+	it := f.objs.Bans.Iterate()
+	for it.Next(&key, &until) {
+		if until <= now {
+			ended = append(ended, key)
+		}
 	}
-	return f.putBlock(p, expire)
+	if err := it.Err(); err != nil {
+		return err
+	}
+	for _, k := range ended {
+		if err := f.objs.Bans.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *Filter) Stats() map[string]uint64 {
@@ -255,25 +358,6 @@ func (f *Filter) EtherTypes() map[string]uint64 {
 		out[name] = n
 	}
 	return out
-}
-
-func (f *Filter) putBlock(p netip.Prefix, expire uint64) error {
-	if !p.IsValid() {
-		return nil
-	}
-	addr := p.Addr().Unmap()
-	bits := p.Bits()
-	if addr.Is4() && bits > 32 {
-		bits = 32
-	}
-	val := flodBlockval{ExpireNs: expire}
-	if addr.Is4() {
-		return f.objs.Block4.Put(&flodLpm4{Prefixlen: uint32(bits), Addr: addr.As4()}, &val)
-	}
-	if addr.Is6() {
-		return f.objs.Block6.Put(&flodLpm6{Prefixlen: uint32(bits), Addr: addr.As16()}, &val)
-	}
-	return nil
 }
 
 func monotonicNS() uint64 {

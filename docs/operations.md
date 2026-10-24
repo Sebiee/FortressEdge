@@ -616,7 +616,9 @@ cannot fill the log), and `edge: source banned` for each ban.
 `http_rate_limited`, `conn_limited`, `bans`, and `xdp_drop_synrate` for
 the XDP SYN limit. A ban lasts `ban` and ends by itself; to lift it
 sooner, reboot the edge. Then raise the limit, or add the source to
-`exempt`.
+`exempt`. XDP keeps bans apart from the block list and holds 65,536 at
+once; ended bans leave within a minute. A ban past that fails with `edge:
+ban failed`, and the source's requests are still refused.
 
 Addresses in `exempt` skip the per-source limits and bans: a load
 generator, a monitoring probe, an office behind one address. The XDP SYN

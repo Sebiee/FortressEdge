@@ -62,21 +62,34 @@ struct {
 // LLC marks an IEEE 802.3 frame, whose type field is a length (STP, for one).
 #define ETHERTYPE_LLC 0
 
+// The policy's block list. Each map holds twice the prefixes of its family
+// a policy may list, so a new list goes in before the old one leaves.
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, 1024);
+	__uint(max_entries, 16384);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct lpm4);
-	__type(value, struct blockval);
+	__type(value, __u8);
 } block4 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, 1024);
+	__uint(max_entries, 16384);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct lpm6);
-	__type(value, struct blockval);
+	__type(value, __u8);
 } block6 SEC(".maps");
+
+// Bans: each banned source, to the monotonic time its ban ends. Only
+// userspace writes here: it bans and deletes ended bans, so the two cannot
+// race. A hash, not an LRU, so new bans cannot push out old ones.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 65536);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct src_key);
+	__type(value, __u64);
+} bans SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -187,34 +200,19 @@ static __always_inline int blocked4(__u32 saddr) {
 	struct lpm4 k = {};
 	k.prefixlen = 32;
 	__builtin_memcpy(&k.addr, &saddr, 4);
-	struct blockval *v = bpf_map_lookup_elem(&block4, &k);
-	if (!v) {
-		return 0;
-	}
-	if (v->expire_ns == 0 || bpf_ktime_get_ns() < v->expire_ns) {
-		return 1;
-	}
-	// Exact /32 ban key. A covering config prefix is expire 0 and never reaches here.
-	bpf_map_delete_elem(&block4, &k);
-	return 0;
+	return bpf_map_lookup_elem(&block4, &k) != 0;
 }
 
 static __always_inline int blocked6(void *saddr) {
 	struct lpm6 k = {};
 	k.prefixlen = 128;
 	__builtin_memcpy(&k.addr, saddr, 16);
-	struct blockval *v = bpf_map_lookup_elem(&block6, &k);
-	if (!v) {
-		return 0;
-	}
-	if (v->expire_ns == 0 || bpf_ktime_get_ns() < v->expire_ns) {
-		return 1;
-	}
-	// Bans on IPv6 are the source's /64.
-	k.prefixlen = 64;
-	__builtin_memset(&k.addr[8], 0, 8);
-	bpf_map_delete_elem(&block6, &k);
-	return 0;
+	return bpf_map_lookup_elem(&block6, &k) != 0;
+}
+
+static __always_inline int banned(struct src_key *src) {
+	__u64 *until = bpf_map_lookup_elem(&bans, src);
+	return until && bpf_ktime_get_ns() < *until;
 }
 
 static __always_inline int ephemeral(__u16 port_be) {
@@ -289,12 +287,14 @@ static __always_inline int filter_udp(struct xdp_md *ctx, void *iph, struct udph
 	return count(REASON_DROP_PORT, XDP_DROP);
 }
 
-static __always_inline int filter_l4(struct xdp_md *ctx, void *iph, void *l4, void *data_end, __u8 proto, struct src_key *src) {
+// family is a constant from handle_v4 or handle_v6, never read back from
+// memory: the verifier must know which header iph points at.
+static __always_inline int filter_l4(struct xdp_md *ctx, void *iph, __u32 family, void *l4, void *data_end, __u8 proto, struct src_key *src) {
 	if (proto == IPPROTO_TCP) {
 		return filter_tcp(l4, data_end, src);
 	}
 	if (proto == IPPROTO_UDP) {
-		return filter_udp(ctx, iph, l4, data_end, src->family);
+		return filter_udp(ctx, iph, l4, data_end, family);
 	}
 	return count(REASON_DROP_PROTO, XDP_DROP);
 }
@@ -304,17 +304,17 @@ static __always_inline int handle_v6(struct xdp_md *ctx, void *nh, void *data_en
 	if ((void *)(ip6 + 1) > data_end) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
-	if (blocked6(&ip6->saddr)) {
+	// One IPv6 user usually holds a whole /64, so limits and bans count per /64.
+	struct src_key src = {};
+	src.family = 6;
+	__builtin_memcpy(&src.ip, &ip6->saddr, 8);
+	if (blocked6(&ip6->saddr) || banned(&src)) {
 		return count(REASON_DROP_BLOCK, XDP_DROP);
 	}
 	if (ip6->nexthdr == IPPROTO_ICMPV6) {
 		return count(REASON_PASS_ICMP6, XDP_PASS);
 	}
-	// One IPv6 user usually holds a whole /64, so rate limits count per /64.
-	struct src_key src = {};
-	src.family = 6;
-	__builtin_memcpy(&src.ip, &ip6->saddr, 8);
-	return filter_l4(ctx, ip6, ip6 + 1, data_end, ip6->nexthdr, &src);
+	return filter_l4(ctx, ip6, 6, ip6 + 1, data_end, ip6->nexthdr, &src);
 }
 
 static __always_inline int handle_v4(struct xdp_md *ctx, void *nh, void *data_end) {
@@ -325,7 +325,10 @@ static __always_inline int handle_v4(struct xdp_md *ctx, void *nh, void *data_en
 	if (ip->ihl < 5) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
-	if (blocked4(ip->saddr)) {
+	struct src_key src = {};
+	src.family = 4;
+	__builtin_memcpy(&src.ip, &ip->saddr, 4);
+	if (blocked4(ip->saddr) || banned(&src)) {
 		return count(REASON_DROP_BLOCK, XDP_DROP);
 	}
 	if (bpf_ntohs(ip->frag_off) & IP_OFFMASK) {
@@ -345,10 +348,7 @@ static __always_inline int handle_v4(struct xdp_md *ctx, void *nh, void *data_en
 		}
 		return count(REASON_DROP_ICMP, XDP_DROP);
 	}
-	struct src_key src = {};
-	src.family = 4;
-	__builtin_memcpy(&src.ip, &ip->saddr, 4);
-	return filter_l4(ctx, ip, l4, data_end, ip->protocol, &src);
+	return filter_l4(ctx, ip, 4, l4, data_end, ip->protocol, &src);
 }
 
 SEC("xdp")

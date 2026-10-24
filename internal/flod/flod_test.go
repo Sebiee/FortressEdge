@@ -4,6 +4,7 @@ package flod
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
@@ -14,89 +15,42 @@ import (
 )
 
 func TestAttachLoopback(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
-	f, err := Attach("lo", nil, false, SYNRate{64, 128})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
+	attach(t, nil, SYNRate{64, 128})
 }
 
+// The block list covers its prefixes; a ban covers an IPv4 address or an
+// IPv6 /64, and nothing past it.
 func TestLPMBlock(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
+	f := attach(t, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("2001:db8::/32")}, SYNRate{64, 128})
+	for _, ip := range []string{"203.0.113.9", "2001:db9::1"} {
+		if err := f.Ban(netip.MustParseAddr(ip), time.Minute); err != nil {
+			t.Fatal(err)
+		}
 	}
-	cidr := netip.MustParsePrefix("192.0.2.0/24")
-	v6 := netip.MustParsePrefix("2001:db8::/32")
-	f, err := Attach("lo", []netip.Prefix{cidr, v6}, false, SYNRate{64, 128})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-
-	var hit flodBlockval
-	if err := f.objs.Block4.Lookup(&flodLpm4{Prefixlen: 32, Addr: netip.MustParseAddr("192.0.2.10").As4()}, &hit); err != nil {
-		t.Fatalf("v4 lpm: %v", err)
-	}
-	if hit.ExpireNs != 0 {
-		t.Fatal("config block should be forever")
-	}
-	if err := f.objs.Block6.Lookup(&flodLpm6{Prefixlen: 128, Addr: netip.MustParseAddr("2001:db8::1").As16()}, &hit); err != nil {
-		t.Fatalf("v6 lpm: %v", err)
-	}
-
-	ip := netip.MustParseAddr("203.0.113.9")
-	if err := f.Ban(ip, time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.objs.Block4.Lookup(&flodLpm4{Prefixlen: 32, Addr: ip.As4()}, &hit); err != nil {
-		t.Fatalf("ban lookup: %v", err)
-	}
-	if hit.ExpireNs == 0 {
-		t.Fatal("ban should expire")
-	}
-
-	// An IPv6 ban covers the source's /64.
-	if err := f.Ban(netip.MustParseAddr("2001:db9::1"), time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.objs.Block6.Lookup(&flodLpm6{Prefixlen: 128, Addr: netip.MustParseAddr("2001:db9::ffff:1").As16()}, &hit); err != nil || hit.ExpireNs == 0 {
-		t.Fatalf("v6 ban /64: %v %+v", err, hit)
-	}
-	if err := f.objs.Block6.Lookup(&flodLpm6{Prefixlen: 128, Addr: netip.MustParseAddr("2001:db9:0:1::1").As16()}, &hit); err == nil {
-		t.Fatal("v6 ban leaked past its /64")
+	for src, want := range map[string]string{
+		"192.0.2.10": "drop_block", "2001:db8::1": "drop_block", "192.0.3.1": "pass",
+		"203.0.113.9": "drop_block", "203.0.113.10": "pass",
+		"2001:db9::ffff:1": "drop_block", "2001:db9:0:1::1": "pass",
+	} {
+		if got := reason(t, f, syn(netip.MustParseAddr(src))); got != want {
+			t.Errorf("%s: %s, want %s", src, got, want)
+		}
 	}
 }
 
+// A new block list leaves bans alone.
 func TestSetBlockKeepsBan(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
-	old := netip.MustParsePrefix("192.0.2.0/24")
-	next := netip.MustParsePrefix("198.51.100.0/24")
-	f, err := Attach("lo", []netip.Prefix{old}, false, SYNRate{})
-	if err != nil {
+	f := attach(t, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, SYNRate{})
+	if err := f.Ban(netip.MustParseAddr("203.0.113.9"), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	ban := netip.MustParseAddr("203.0.113.9")
-	if err := f.Ban(ban, time.Minute); err != nil {
+	if err := f.SetBlock([]netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.SetBlock([]netip.Prefix{next}); err != nil {
-		t.Fatal(err)
-	}
-	var hit flodBlockval
-	if err := f.objs.Block4.Lookup(&flodLpm4{Prefixlen: 32, Addr: netip.MustParseAddr("192.0.2.10").As4()}, &hit); err == nil {
-		t.Fatal("old prefix still present")
-	}
-	if err := f.objs.Block4.Lookup(&flodLpm4{Prefixlen: 32, Addr: netip.MustParseAddr("198.51.100.1").As4()}, &hit); err != nil || hit.ExpireNs != 0 {
-		t.Fatalf("new prefix: %v %+v", err, hit)
-	}
-	if err := f.objs.Block4.Lookup(&flodLpm4{Prefixlen: 32, Addr: ban.As4()}, &hit); err != nil || hit.ExpireNs == 0 {
-		t.Fatalf("ban: %v %+v", err, hit)
+	for src, want := range map[string]string{"192.0.2.10": "pass", "198.51.100.1": "drop_block", "203.0.113.9": "drop_block"} {
+		if got := reason(t, f, syn(netip.MustParseAddr(src))); got != want {
+			t.Errorf("%s: %s, want %s", src, got, want)
+		}
 	}
 }
 
@@ -412,5 +366,29 @@ func TestQUICPasses(t *testing.T) {
 			t.Errorf("quic=%v: 5000 long-header packets from one node: %v, want all %s", quic, got, want)
 		}
 		f.Close()
+	}
+}
+
+// A sweep deletes the bans that ended and keeps the others, so a full
+// bans map makes room again.
+func TestSweepDropsEndedBans(t *testing.T) {
+	f := attach(t, nil, SYNRate{})
+	ended, live := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("2001:db8:5::1")
+	if err := f.Ban(ended, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Ban(live, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := f.sweep(); err != nil {
+		t.Fatal(err)
+	}
+	var until uint64
+	if err := f.objs.Bans.Lookup(sourceKey(ended), &until); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("ended ban: %v, want it gone", err)
+	}
+	if got := reason(t, f, syn(live)); got != "drop_block" {
+		t.Errorf("live ban after a sweep: %s", got)
 	}
 }
