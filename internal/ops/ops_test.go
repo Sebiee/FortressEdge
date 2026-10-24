@@ -2,7 +2,6 @@ package ops
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -90,7 +89,7 @@ func TestRoles(t *testing.T) {
 	}
 	writeLogs(t, access, "# boot "+testBoot+"\n{}\n", "")
 	h := New(testConfig(), nil, testBoot, dir)
-	h.SetApply(func([]byte) (Outcome, error) { return Outcome{}, nil }, nil)
+	h.SetApply(Apply{Store: func([]byte) error { return nil }})
 	for _, tc := range []struct {
 		id, method, path string
 		want             int
@@ -490,55 +489,184 @@ func policyRequest(method, path, id, body string) *http.Request {
 	return r
 }
 
-func TestPolicyPut(t *testing.T) {
-	h := New(testConfig(), nil, testBoot, t.TempDir())
-	var applied []string
-	var rebooted bool
-	h.SetApply(func(b []byte) (Outcome, error) {
-		applied = append(applied, string(b))
-		switch {
-		case bytes.Contains(b, []byte("bad")):
-			return Outcome{}, &config.InvalidError{Err: errors.New("policy.yml: bad")}
-		case bytes.Contains(b, []byte("max_connections")):
-			return Outcome{Reboot: true}, nil
-		}
-		return Outcome{}, nil
-	}, func() { rebooted = true })
-	put := func(id, body string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, policyRequest(http.MethodPut, config.OpsPolicyPath, id, body))
-		return rec
-	}
+// fakeEdge is what a policy puts in force, as ops reaches it through
+// Apply: XDP's block list, the visitor limits, and policy.yml on the data
+// disk.
+type fakeEdge struct {
+	block    []netip.Prefix
+	limits   config.Limits
+	file     string
+	applies  int
+	rebooted bool
+	// full makes XDP refuse a block list other than the one it holds, as
+	// a full map does; storeErr makes the disk refuse.
+	full     bool
+	storeErr error
+}
 
-	if rec := put(nodeID, "block: [1.2.3.4]\n"); rec.Code != 403 || len(applied) != 0 {
-		t.Fatalf("id gate: status=%d applied=%q", rec.Code, applied)
+func (e *fakeEdge) apply() Apply {
+	return Apply{
+		Steps: []Step{
+			func(p config.Policy) error {
+				e.applies++
+				e.limits = p.Limits
+				return nil
+			},
+			func(p config.Policy) error {
+				if e.full && !slices.Equal(p.Block, e.block) {
+					return errors.New("xdp block list: no space")
+				}
+				e.block = p.Block
+				return nil
+			},
+		},
+		Store: func(b []byte) error {
+			if e.storeErr != nil {
+				return e.storeErr
+			}
+			return os.WriteFile(e.file, b, 0o600)
+		},
+		Reboot: func() { e.rebooted = true },
 	}
-	rec := put(opsID, "block: [1.2.3.4]\n")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "applied") || rebooted {
-		t.Fatalf("live: status=%d reboot=%v body=%q", rec.Code, rebooted, rec.Body.String())
+}
+
+func (e *fakeEdge) stored(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(e.file)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
-	if rec.Header().Get("ETag") != config.PolicyETag([]byte("block: [1.2.3.4]\n")) {
+	return string(b)
+}
+
+// policyEdge serves the ops API of a fake edge that booted with body as
+// its stored policy.
+func policyEdge(t *testing.T, body string) (*Handler, *fakeEdge) {
+	t.Helper()
+	cfg := testConfig()
+	p, err := config.ParsePolicy([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Policy = p
+	e := &fakeEdge{block: p.Block, limits: p.Limits, file: filepath.Join(t.TempDir(), "policy.yml")}
+	var stored []byte
+	if body != "" {
+		stored = []byte(body)
+		if err := os.WriteFile(e.file, stored, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := New(cfg, stored, testBoot, t.TempDir())
+	h.SetApply(e.apply())
+	return h, e
+}
+
+func putPolicy(h *Handler, id, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, policyRequest(http.MethodPut, config.OpsPolicyPath, id, body))
+	return rec
+}
+
+func getPolicy(t *testing.T, h *Handler) string {
+	t.Helper()
+	rec := serve(t, h, config.OpsPolicyPath, logsID)
+	if rec.Code != 200 || rec.Header().Get("ETag") != config.PolicyETag(rec.Body.Bytes()) {
+		t.Fatalf("get: status=%d etag=%q", rec.Code, rec.Header().Get("ETag"))
+	}
+	return rec.Body.String()
+}
+
+// statusOf is /~!ops/status, decoded.
+func statusOf(t *testing.T, h *Handler) map[string]any {
+	t.Helper()
+	rec := serve(t, h, config.OpsStatusPath, opsID)
+	var st map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("status=%d %v", rec.Code, err)
+	}
+	return st
+}
+
+func TestPolicyPut(t *testing.T) {
+	h, e := policyEdge(t, "")
+	const live = "block: [1.2.3.4]\nlimits:\n  requests_per_second: 5\n"
+	if rec := putPolicy(h, nodeID, live); rec.Code != 403 || e.applies != 0 {
+		t.Fatalf("id gate: status=%d applies=%d", rec.Code, e.applies)
+	}
+	rec := putPolicy(h, opsID, live)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "applied") || e.rebooted {
+		t.Fatalf("live: status=%d reboot=%v body=%q", rec.Code, e.rebooted, rec.Body.String())
+	}
+	if rec.Header().Get("ETag") != config.PolicyETag([]byte(live)) {
 		t.Fatalf("etag %q", rec.Header().Get("ETag"))
 	}
+	if len(e.block) != 1 || e.limits.RequestsPerSecond != 5 || e.stored(t) != live || statusOf(t, h)["blocked"] != float64(1) {
+		t.Fatalf("in force: block %v, limits %+v, stored %q, status %v", e.block, e.limits, e.stored(t), statusOf(t, h)["blocked"])
+	}
 	// The same body again is not applied again.
-	if rec := put(opsID, "block: [1.2.3.4]\n"); rec.Code != 200 || !strings.Contains(rec.Body.String(), "unchanged") || len(applied) != 1 {
-		t.Fatalf("again: status=%d body=%q applied=%q", rec.Code, rec.Body.String(), applied)
+	if rec := putPolicy(h, opsID, live); rec.Code != 200 || !strings.Contains(rec.Body.String(), "unchanged") || e.applies != 1 {
+		t.Fatalf("again: status=%d body=%q applies=%d", rec.Code, rec.Body.String(), e.applies)
 	}
-	// Refused: the policy the edge had stays.
-	if rec := put(opsID, "bad\n"); rec.Code != 400 {
-		t.Fatalf("invalid: status=%d body=%q", rec.Code, rec.Body.String())
+	// Refused before anything runs: the policy the edge had stays.
+	if rec := putPolicy(h, opsID, "block: [nope]\n"); rec.Code != 400 || e.applies != 1 {
+		t.Fatalf("invalid: status=%d body=%q applies=%d", rec.Code, rec.Body.String(), e.applies)
 	}
-	get := httptest.NewRecorder()
-	h.ServeHTTP(get, request(config.OpsPolicyPath, logsID))
-	if get.Code != 200 || get.Body.String() != "block: [1.2.3.4]\n" || get.Header().Get("ETag") != config.PolicyETag([]byte("block: [1.2.3.4]\n")) {
-		t.Fatalf("get: status=%d body=%q", get.Code, get.Body.String())
+	if got := getPolicy(t, h); got != live {
+		t.Fatalf("get: %q", got)
 	}
-	rec = put(opsID, "limits:\n  max_connections: 10\n")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "rebooting") || !rebooted {
-		t.Fatalf("boot limit: status=%d reboot=%v body=%q", rec.Code, rebooted, rec.Body.String())
+	const reboot = "limits:\n  max_connections: 10\n"
+	rec = putPolicy(h, opsID, reboot)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "rebooting") || !e.rebooted || e.stored(t) != reboot || len(e.block) != 0 {
+		t.Fatalf("boot limit: status=%d reboot=%v body=%q stored=%q block=%v", rec.Code, e.rebooted, rec.Body.String(), e.stored(t), e.block)
 	}
-	if rec := put(opsID, strings.Repeat("#", maxPolicy+1)); rec.Code != http.StatusRequestEntityTooLarge {
+	if rec := putPolicy(h, opsID, strings.Repeat("#", maxPolicy+1)); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("too large: status=%d", rec.Code)
+	}
+}
+
+// A policy the edge cannot put in force is refused, and the edge keeps
+// the one it had: in XDP, in the limits, on the disk, and in the status.
+// One that would reboot the edge is tried the same way before it is
+// stored, not at the next boot, where nothing could be sent to fix it.
+func TestPolicyRefusedChangesNothing(t *testing.T) {
+	const before = "block: [192.0.2.9]\nlimits:\n  requests_per_second: 2\n  request_burst: 2\n"
+	const next = "block: [192.0.2.9, 198.51.100.0/24]\nlimits:\n  requests_per_second: 5\n  request_burst: 5\n"
+	const nextReboot = next + "  max_connections: 10\n"
+	noSpace := errors.New("write policy.yml: no space left on device")
+	for _, tc := range []struct {
+		name     string
+		body     string
+		full     bool
+		storeErr error
+	}{
+		{"xdp cannot hold it", next, true, nil},
+		{"xdp cannot hold one that reboots", nextReboot, true, nil},
+		{"the disk cannot store it", next, false, noSpace},
+		{"the disk cannot store one that reboots", nextReboot, false, noSpace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, e := policyEdge(t, before)
+			block, limits := e.block, e.limits
+			e.full, e.storeErr = tc.full, tc.storeErr
+			if rec := putPolicy(h, opsID, tc.body); rec.Code != http.StatusInternalServerError || e.rebooted {
+				t.Fatalf("status=%d reboot=%v body=%q", rec.Code, e.rebooted, rec.Body.String())
+			}
+			if !slices.Equal(e.block, block) || e.limits != limits {
+				t.Errorf("in force: block %v, limits %+v; want the previous %v, %+v", e.block, e.limits, block, limits)
+			}
+			if e.stored(t) != before || getPolicy(t, h) != before {
+				t.Errorf("stored %q, get %q; want the previous", e.stored(t), getPolicy(t, h))
+			}
+			if st := statusOf(t, h); st["blocked"] != float64(1) {
+				t.Errorf("status blocked %v, want the previous 1", st["blocked"])
+			}
+			// Once the edge can take it, the same body is applied.
+			e.full, e.storeErr = false, nil
+			if rec := putPolicy(h, opsID, tc.body); rec.Code != 200 || len(e.block) != 2 || e.stored(t) != tc.body {
+				t.Fatalf("then: status=%d body=%q block=%v", rec.Code, rec.Body.String(), e.block)
+			}
+		})
 	}
 }
 

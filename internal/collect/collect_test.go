@@ -28,11 +28,16 @@ type edge struct {
 }
 
 func newEdge(t *testing.T, boot string) *edge {
+	return newEdgeOf(t, boot, "tunnel.example.com", "")
+}
+
+// newEdgeOf is an edge of tunnel whose policy names collector.
+func newEdgeOf(t *testing.T, boot, tunnel, collector string) *edge {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Config{
 		Iface: "eth0", Addr: netip.MustParsePrefix("10.4.1.11/24"), Gateway: netip.MustParseAddr("10.4.1.1"),
-		Tunnel: "tunnel.example.com",
+		Tunnel: tunnel, Policy: config.Policy{Collector: collector},
 	}
 	e := &edge{dir: dir, h: ops.New(cfg, nil, boot, dir)}
 	e.h.SetMetrics(func(w *metrics.Writer) {

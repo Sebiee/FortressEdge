@@ -42,14 +42,15 @@ func policyEdge(t *testing.T) (e Edge, applied *[]string) {
 	pool.AppendCertsFromPEM(caPEM)
 
 	applied = new([]string)
-	h := ops.New(config.Config{Tunnel: tunnel}, nil, "boot", t.TempDir())
-	h.SetApply(func(b []byte) (ops.Outcome, error) {
-		if _, err := config.ParsePolicy(b); err != nil {
-			return ops.Outcome{}, &config.InvalidError{Err: err}
-		}
+	defaults, err := config.ParsePolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ops.New(config.Config{Tunnel: tunnel, Policy: defaults}, nil, "boot", t.TempDir())
+	h.SetApply(ops.Apply{Store: func(b []byte) error {
 		*applied = append(*applied, string(b))
-		return ops.Outcome{}, nil
-	}, nil)
+		return nil
+	}})
 	srv := httptest.NewUnstartedServer(h)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{server}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}
 	srv.StartTLS()
