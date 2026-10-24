@@ -712,6 +712,11 @@ func TestUnreadBodyHoldsNoConnection(t *testing.T) {
 	if !strings.HasPrefix(string(b), "HTTP/1.1 308 ") || err != nil {
 		t.Fatalf("got %q, then %v", b, err)
 	}
+	// A name the edge hides: net/http reads the body before it closes.
+	b, err = exchangeRaw(t, addr, "POST /x HTTP/1.1\r\nHost: nobody.example.com\r\nContent-Length: 10\r\n\r\n")
+	if len(b) != 0 || err != nil {
+		t.Fatalf("hidden name: got %q, then %v", b, err)
+	}
 
 	// A connection a handler hijacked is its own, even once that handler
 	// has returned.
