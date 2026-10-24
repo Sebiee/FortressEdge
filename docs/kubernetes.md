@@ -16,7 +16,11 @@ rejecting it, removes the name, and other names keep running.
   every name, `*.example.com` every name under `example.com`). A
   `parentRefs` entry's `sectionName` and `port` pick the listeners, as
   Gateway API defines them. The Gateway ignores a route's other
-  hostnames, and so does `fortresskube`.
+  hostnames, and so does `fortresskube`. For a TLSRoute, whose Service
+  `fortresskube` dials in the Gateway's place, only the most specific
+  TLS listener that covers a name counts, whatever its port (`db.example.com`
+  before `*.team-a.example.com` before `*.example.com`): the Gateway
+  routes the name to that listener alone.
 - Only routes with `Accepted=True` from that Gateway count, as the
   controller of its GatewayClass (`controllerName`) wrote it for the
   route's current `metadata.generation`, at a `parentRefs` entry the
@@ -318,7 +322,10 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
   (`backend_service`): a name to resolve could lead anywhere, the cloud's
   metadata service and the API server included.
 - Wildcard hostnames are refused. A hostname an HTTPRoute publishes
-  stays an HTTP name, and the TLSRoute's is refused; of two TLSRoutes
+  stays an HTTP name, and the TLSRoute's is refused: an HTTP listener
+  whose hostname covers a TLS listener's (none, or `*.example.com`
+  over `*.team-a.example.com`) lets every namespace it admits take that
+  TLS listener's names, so keep their hostnames apart. Of two TLSRoutes
   with one hostname, the older keeps it, even while it cannot publish
   it (its Service gone for a while, say). A route deleted and created
   again is the younger, so give each team its own listener hostname:

@@ -100,8 +100,9 @@ func TestPublishedTLS(t *testing.T) {
 // A route publishes only the names that a listener which accepted it
 // takes: one whose protocol carries the route's kind, whose
 // allowedRoutes have the route's namespace, and whose hostname covers
-// the name. A TLSRoute's Service is dialed at its cluster IP, and only
-// when the Gateway resolved it.
+// the name; for a TLSRoute, the most specific TLS listener for the name,
+// as the Gateway would route that name to it alone. A TLSRoute's Service
+// is dialed at its cluster IP, and only when the Gateway resolved it.
 func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
 	team := func(name string) map[string]any {
 		return map[string]any{"namespaces": map[string]any{"from": "Selector", "selector": map[string]any{
@@ -114,6 +115,8 @@ func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
 		map[string]any{"name": "tls-a", "protocol": "TLS", "port": 443, "hostname": "*.team-a.example.com", "allowedRoutes": team("team-a")},
 		map[string]any{"name": "tls-b", "protocol": "TLS", "port": 443, "hostname": "*.team-b.example.com", "allowedRoutes": team("team-b")},
 		map[string]any{"name": "tls-infra", "protocol": "TLS", "port": 8443, "hostname": "db.infra.example.com"},
+		map[string]any{"name": "tls-shared", "protocol": "TLS", "port": 443, "hostname": "*.example.com",
+			"allowedRoutes": map[string]any{"namespaces": map[string]any{"from": "All"}}},
 	)
 	ref := func(extra map[string]any) map[string]any {
 		r := maps.Clone(public)
@@ -152,6 +155,7 @@ func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
 		tls("team-b", "headless", []string{"headless.team-b.example.com"}, "headless").obj(t),
 		tls("team-b", "missing", []string{"missing.team-b.example.com"}, "missing").obj(t),
 		tls("team-b", "badname", []string{"badname.team-b.example.com"}, "Steal_DB").obj(t),
+		tls("team-b", "shared", []string{"shared.example.com"}, "steal").obj(t),
 	)
 	httpProxies, tlsProxies, refused := testPublisher.publication(v)
 
@@ -166,6 +170,7 @@ func TestPublishedOnlyNamesAListenerTakes(t *testing.T) {
 		"db.team-b.example.com":  "10.0.0.20:5432",
 		"x.y.team-b.example.com": "10.0.0.20:5432",
 		"db.infra.example.com":   "10.0.0.30:5432",
+		"shared.example.com":     "10.0.0.20:5432",
 	}, targets)
 	var reasons []string
 	for _, r := range refused {
