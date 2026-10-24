@@ -13,7 +13,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -200,39 +199,31 @@ func run() error {
 	defer frps.Stop()
 	consoleStatus(true, true, cfg)
 	var wantReboot atomic.Bool
-	var applyMu sync.Mutex
 	routes := func(name string) (httpsvc.TCPRoute, bool) {
 		r, ok := frps.TCPRoute(name)
 		return httpsvc.TCPRoute{Group: r.Group, ALPN: r.ALPN, Dial: r.Dial}, ok
 	}
-	err = httpsvc.Serve(ctx, cfg, policy, filt, domains, frps.Control, frps.Vhost, routes, func(b []byte) (ops.Outcome, error) {
-		applyMu.Lock()
-		defer applyMu.Unlock()
-		p, aerr := config.ParsePolicy(b)
-		if aerr != nil {
-			return ops.Outcome{}, &config.InvalidError{Err: aerr}
-		}
-		if aerr = initos.StorePolicy(config.PolicyFile, b); aerr != nil {
-			return ops.Outcome{}, aerr
-		}
-		next := cfg
-		next.Policy = p
-		if p.RebootFrom(cfg.Policy) {
-			return ops.Outcome{Reboot: true, Cfg: next}, nil
-		}
-		if aerr = filt.SetBlock(p.Block); aerr != nil {
-			return ops.Outcome{}, aerr
-		}
-		// httpsvc puts the other limits in force when this returns.
-		if aerr = filt.SetSYNRate(flod.SYNRate{PerSecond: p.Limits.NewConnsPerSecond, Burst: p.Limits.NewConnBurst}); aerr != nil {
-			return ops.Outcome{}, aerr
-		}
-		cfg = next
-		consoleStatus(true, true, cfg)
-		return ops.Outcome{Cfg: next}, nil
-	}, func() {
-		wantReboot.Store(true)
-		stop()
+	// A policy that reboots takes XDP's parts at once too: a block list
+	// XDP cannot hold is refused now, before it is stored for a boot that
+	// could not load it.
+	err = httpsvc.Serve(ctx, cfg, policy, filt, domains, frps.Control, frps.Vhost, routes, ops.Apply{
+		Steps: []ops.Step{
+			func(p config.Policy) error { return filt.SetBlock(p.Block) },
+			func(p config.Policy) error {
+				return filt.SetSYNRate(flod.SYNRate{PerSecond: p.Limits.NewConnsPerSecond, Burst: p.Limits.NewConnBurst})
+			},
+			func(p config.Policy) error {
+				next := cfg
+				next.Policy = p
+				consoleStatus(true, true, next)
+				return nil
+			},
+		},
+		Store: func(b []byte) error { return initos.StorePolicy(config.PolicyFile, b) },
+		Reboot: func() {
+			wantReboot.Store(true)
+			stop()
+		},
 	}, httpsvc.Extras{
 		Metrics: []func(*metrics.Writer){frps.WriteMetrics, clk.WriteMetrics},
 		Status: map[string]func() any{

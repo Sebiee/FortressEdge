@@ -209,8 +209,9 @@ func (e Extras) ready() bool { return e.Ready != nil && e.Ready() }
 
 // Serve runs the HTTP and HTTPS servers until ctx ends, and the TCP
 // routes on the HTTPS port. policy is the policy.yml cfg holds, as
-// stored; apply stores and applies a new one.
-func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, routes TCPRoutes, apply ops.ApplyFunc, reboot func(), more Extras) error {
+// stored; apply puts a new one in force and stores it, after the parts
+// this process holds.
+func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, routes TCPRoutes, apply ops.Apply, more Extras) error {
 	st := &httpStats{}
 	domains.SetTunnelGrace(cfg.TunnelGrace)
 	socks := &sockets{}
@@ -259,21 +260,18 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			f(w)
 		}
 	})
-	if apply != nil {
-		oh.SetApply(func(b []byte) (ops.Outcome, error) {
-			out, err := apply(b)
-			if err == nil && !out.Reboot {
-				oh.SetConfig(out.Cfg)
-				vis.update(out.Cfg.Policy)
-				domains.SetTunnelGrace(out.Cfg.TunnelGrace)
-				socks.setDeadTimeout(out.Cfg.TunnelDeadTimeout)
-				if aerr := acc.apply(out.Cfg.Policy); aerr != nil {
-					slog.Error("access log", "err", aerr)
-				}
-			}
-			return out, err
-		}, reboot)
-	}
+	apply.Steps = append(apply.Steps, func(p config.Policy) error {
+		// The access log is the part that can fail: first, so nothing has
+		// changed when it does.
+		if err := acc.apply(p); err != nil {
+			return err
+		}
+		vis.update(p)
+		domains.SetTunnelGrace(p.TunnelGrace)
+		socks.setDeadTimeout(p.TunnelDeadTimeout)
+		return nil
+	})
+	oh.SetApply(apply)
 	slog.Info("ops api up", "logs", config.OpsLogsPath, "status", config.OpsStatusPath, "metrics", config.OpsMetricsPath,
 		"policy", config.OpsPolicyPath)
 	// Sites are frps's proxy in this process. The request is already parsed.

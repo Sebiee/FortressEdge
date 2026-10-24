@@ -59,16 +59,20 @@ func parseCursor(s string) (cursor, error) {
 	return cursor{boot, n}, nil
 }
 
-// Outcome is what applying a policy did. Reboot means the process must
-// restart into it; otherwise the caller already applied it.
-type Outcome struct {
-	Reboot bool
-	Cfg    config.Config
-}
+// A Step puts one part of a policy in force, such as XDP's block list or
+// the visitor limits. It changes nothing when it fails, and running it
+// with the policy that was in force undoes it.
+type Step func(config.Policy) error
 
-// ApplyFunc stores and applies a policy.yml body. A *config.InvalidError
-// is the body's fault.
-type ApplyFunc func(policy []byte) (Outcome, error)
+// Apply is how a PUT puts a policy in force and keeps it.
+type Apply struct {
+	Steps []Step
+	// Store keeps the body on the data disk, once every step succeeded.
+	Store func(policy []byte) error
+	// Reboot runs after the response is flushed, for a policy that changes
+	// a limit the servers fix when they start.
+	Reboot func()
+}
 
 // maxPolicy bounds a policy.yml body: a block list of some ten thousand
 // prefixes.
@@ -76,15 +80,17 @@ const maxPolicy = 1 << 20
 
 type Handler struct {
 	mu     sync.RWMutex
-	cfg    config.Config
-	policy []byte // policy.yml as stored; nil before the first apply
+	cfg    config.Config // its policy is the one in force
+	policy []byte        // policy.yml as stored; nil before the first apply
+	// boot is the policy the edge started with, whose boot limits the
+	// servers keep until they restart.
+	boot   config.Policy
 	bootID string
 	dir    string
 	extra  func() map[string]any
 	// metrics writes the edge's metrics; the ops API adds its own.
 	metrics func(*metrics.Writer)
-	apply   ApplyFunc
-	reboot  func()
+	apply   Apply
 	// applyMu keeps a PUT's compare, apply, and swap of policy together.
 	applyMu sync.Mutex
 }
@@ -92,7 +98,7 @@ type Handler struct {
 // New serves cfg's logs and status. policy is the policy.yml cfg was
 // parsed with, as stored.
 func New(cfg config.Config, policy []byte, bootID, dir string) *Handler {
-	return &Handler{cfg: cfg, policy: policy, bootID: bootID, dir: dir}
+	return &Handler{cfg: cfg, policy: policy, boot: cfg.Policy, bootID: bootID, dir: dir}
 }
 
 func (h *Handler) SetStatus(fn func() map[string]any) { h.extra = fn }
@@ -101,20 +107,8 @@ func (h *Handler) SetStatus(fn func() map[string]any) { h.extra = fn }
 // boot time.
 func (h *Handler) SetMetrics(fn func(*metrics.Writer)) { h.metrics = fn }
 
-// SetApply registers the policy PUT. reboot runs after the response is
-// flushed when the change cannot be applied in place.
-func (h *Handler) SetApply(fn ApplyFunc, reboot func()) {
-	h.apply = fn
-	h.reboot = reboot
-}
-
-// SetConfig swaps the config later requests see, so status follows a
-// policy applied in place.
-func (h *Handler) SetConfig(cfg config.Config) {
-	h.mu.Lock()
-	h.cfg = cfg
-	h.mu.Unlock()
-}
+// SetApply registers the policy PUT.
+func (h *Handler) SetApply(a Apply) { h.apply = a }
 
 func (h *Handler) config() config.Config {
 	h.mu.RLock()
@@ -259,10 +253,14 @@ func (h *Handler) getPolicy(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(b)
 }
 
-// putPolicy replaces the policy whole. The same body again changes
-// nothing, so a pipeline can PUT on every run.
+// putPolicy replaces the policy whole, in order: it is checked, put in
+// force, stored, and only then shown. A failure at any step leaves the
+// previous policy in force, stored, and shown, so the disk never holds a
+// policy the edge refused, and the next boot never meets one. A policy
+// that changes a boot limit goes the same way, then reboots. The same
+// body again changes nothing, so a pipeline can PUT on every run.
 func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
-	if h.apply == nil {
+	if h.apply.Store == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -275,6 +273,7 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 	defer h.applyMu.Unlock()
 	h.mu.RLock()
 	same := bytes.Equal(b, h.policy) && (b != nil) == (h.policy != nil)
+	prev := h.cfg.Policy
 	h.mu.RUnlock()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if same {
@@ -282,22 +281,24 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "fortressedge: policy unchanged\n")
 		return
 	}
-	out, err := h.apply(b)
-	slog.Info("ops: policy put", "id", callerOf(r), "etag", config.PolicyETag(b), "err", err, "reboot", out.Reboot)
+	p, err := config.ParsePolicy(b)
+	code := http.StatusBadRequest
+	if err == nil {
+		code = http.StatusInternalServerError
+		err = h.put(p, prev, b)
+	}
+	reboot := err == nil && p.RebootFrom(h.boot)
+	slog.Info("ops: policy put", "id", callerOf(r), "etag", config.PolicyETag(b), "err", err, "reboot", reboot)
 	if err != nil {
-		var inv *config.InvalidError
-		if errors.As(err, &inv) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), code)
 		return
 	}
 	h.mu.Lock()
+	h.cfg.Policy = p
 	h.policy = b
 	h.mu.Unlock()
 	w.Header().Set("ETag", config.PolicyETag(b))
-	if out.Reboot {
+	if reboot {
 		io.WriteString(w, "fortressedge: policy stored, rebooting to apply it\n")
 	} else {
 		io.WriteString(w, "fortressedge: policy applied\n")
@@ -305,9 +306,34 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
 	}
-	if out.Reboot && h.reboot != nil {
-		h.reboot()
+	if reboot && h.apply.Reboot != nil {
+		h.apply.Reboot()
 	}
+}
+
+// put runs the steps that put p in force, in order, then stores body.
+// When one fails, or the store does, it runs the steps that ran again with
+// prev, newest first.
+func (h *Handler) put(p, prev config.Policy, body []byte) error {
+	steps := h.apply.Steps
+	ran := 0
+	var err error
+	for ; ran < len(steps); ran++ {
+		if err = steps[ran](p); err != nil {
+			break
+		}
+	}
+	if err == nil {
+		if err = h.apply.Store(body); err == nil {
+			return nil
+		}
+	}
+	for _, step := range slices.Backward(steps[:ran]) {
+		if uerr := step(prev); uerr != nil {
+			err = fmt.Errorf("%w; restoring the previous policy: %w", err, uerr)
+		}
+	}
+	return err
 }
 
 // errCursor is a cursor query that does not parse.

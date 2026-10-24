@@ -61,11 +61,12 @@ func TestAReadOfOneEdgeIsTheLocations(t *testing.T) {
 	// httptest's certificate is for this name, which stands for the tunnel.
 	const tunnel = "example.com"
 	roots := x509.NewCertPool()
-	edges := map[string]*edge{"a": newEdge(t, "boota"), "b": newEdge(t, "bootb")}
+	col := httptest.NewUnstartedServer(nil)
+	t.Cleanup(col.Close)
+	at := col.Listener.Addr().String()
+	edges := map[string]*edge{"a": newEdgeOf(t, "boota", tunnel, at), "b": newEdgeOf(t, "bootb", tunnel, at)}
 	var list []Edge
 	for name, e := range edges {
-		cfg := config.Config{Tunnel: tunnel}
-		e.h.SetConfig(cfg)
 		srv := httptest.NewUnstartedServer(e.h)
 		// The edge's TLS layer checks the certificate against the client CA;
 		// here any is taken, and the ops API reads its SPIFFE ID.
@@ -82,11 +83,8 @@ func TestAReadOfOneEdgeIsTheLocations(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.copyAll()
-	col := httptest.NewServer(c)
-	t.Cleanup(col.Close)
-	for _, e := range edges {
-		e.h.SetConfig(config.Config{Tunnel: tunnel, Policy: config.Policy{Collector: col.Listener.Addr().String()}})
-	}
+	col.Config.Handler = c
+	col.Start()
 
 	rc, rk := logReader(t, tunnel, "reader")
 	pair, err := tls.LoadX509KeyPair(rc, rk)
