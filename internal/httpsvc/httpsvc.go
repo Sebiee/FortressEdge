@@ -501,20 +501,25 @@ func (c *tlsOnlyConn) Read(b []byte) (int, error) {
 
 // unreadBodyDeadline gives net/http stallTimeout to read what h left unread
 // of a request body: it reads up to 256 KiB more after the handler, to
-// keep an HTTP/1 connection, with no deadline, so a body that never comes
-// would hold the connection for good. net/http sets its own deadline for
-// the connection's next request.
+// keep an HTTP/1 connection, and before it closes one whose handler hid
+// the name, with no deadline, so a body that never comes would hold the
+// connection for good. net/http sets its own deadline for the
+// connection's next request.
 func unreadBodyDeadline(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if r.ProtoMajor != 1 {
+				return
+			}
+			// Write fails once a handler has hijacked the connection (a
+			// WebSocket, frp control): its deadlines are not net/http's.
+			// It sends nothing, even after hide: net/http writes no
+			// response for a handler that panicked.
+			if _, err := w.Write(nil); err == nil {
+				_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(stallTimeout))
+			}
+		}()
 		h.ServeHTTP(w, r)
-		if r.ProtoMajor != 1 {
-			return
-		}
-		// Write fails once a handler has hijacked the connection (a
-		// WebSocket, frp control): its deadlines are not net/http's.
-		if _, err := w.Write(nil); err == nil {
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(stallTimeout))
-		}
 	})
 }
 
