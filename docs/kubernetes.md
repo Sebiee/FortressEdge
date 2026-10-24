@@ -8,13 +8,19 @@ new app needs only its HTTPRoute; deleting the route, or the Gateway
 rejecting it, removes the name, and other names keep running.
 
 - The Gateway's `allowedRoutes` decides which namespaces may publish:
-  only routes with `Accepted=True` from that Gateway count.
+  only routes with `Accepted=True` from that Gateway count, as the
+  controller of its GatewayClass (`controllerName`) wrote it for the
+  route's current `metadata.generation`, at a `parentRefs` entry the
+  route still has. A status another controller or a tenant wrote, or
+  one older than the route's spec, does not count.
 - Wildcards and routes without `hostnames` are skipped.
 - The Gateway needs a plain HTTP listener on port 80; the edge terminates
   TLS. `-backend` defaults to Cilium's Service name,
   `cilium-gateway-NAME.NAMESPACE.svc:80`.
-- Nothing is published until the first full list of routes arrives, and
-  an API server outage keeps the last list.
+- Nothing is published until the first full list of each resource it
+  reads arrives, and an API server outage keeps the last lists. A list
+  still missing after 30 s is warned about: usually a permission the
+  ClusterRole below lacks.
 - The frpc admin API's reload is refused: it would replace the routes
   with the file's proxies.
 - Outside a cluster, `-kubeconfig` (or `KUBECONFIG`) points it at one.
@@ -44,7 +50,7 @@ kind: ClusterRole
 metadata: { name: fortresskube }
 rules:
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes", "tlsroutes"] # tlsroutes for TCP routes
+    resources: ["gateways", "gatewayclasses", "httproutes", "tlsroutes"] # tlsroutes for TCP routes
     verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -1,64 +1,196 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/fatedier/frp/pkg/config"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/msg"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/cache"
 )
 
-func route(t *testing.T, ns string, hostnames []string, parents ...map[string]any) any {
+const controller = "example.com/gateway-controller"
+
+var public = map[string]any{"name": "public", "namespace": "infra"}
+
+// obj is m as an informer's store holds it.
+func obj(t *testing.T, m map[string]any) *unstructured.Unstructured {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{
-		"apiVersion": "gateway.networking.k8s.io/v1",
-		"kind":       "HTTPRoute",
-		"metadata":   map[string]any{"namespace": ns, "name": "r"},
-		"spec":       map[string]any{"hostnames": hostnames},
-		"status":     map[string]any{"parents": parents},
-	})
+	b, err := json.Marshal(m)
 	require.NoError(t, err)
 	u := &unstructured.Unstructured{}
 	require.NoError(t, u.UnmarshalJSON(b))
 	return u
 }
 
-func parent(ref map[string]any, accepted string) map[string]any {
+// gatewayObj is the Gateway infra/public, of the class cilium.
+func gatewayObj(t *testing.T) *unstructured.Unstructured {
+	return obj(t, map[string]any{
+		"apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
+		"metadata": map[string]any{"namespace": "infra", "name": "public"},
+		"spec":     map[string]any{"gatewayClassName": "cilium"},
+	})
+}
+
+func classObj(t *testing.T, name, controllerName string) *unstructured.Unstructured {
+	return obj(t, map[string]any{
+		"apiVersion": "gateway.networking.k8s.io/v1", "kind": "GatewayClass",
+		"metadata": map[string]any{"name": name},
+		"spec":     map[string]any{"controllerName": controllerName},
+	})
+}
+
+// testRoute is a route; a field left zero is the common case.
+type testRoute struct {
+	kind        string // HTTPRoute (when "") or TLSRoute
+	ns, name    string
+	age         time.Time
+	generation  int64 // 1 when 0
+	annotations map[string]string
+	hostnames   []string
+	parentRefs  []map[string]any // public when nil
+	backend     map[string]any   // the first rule's backendRef; none when nil
+	status      []map[string]any // accepted at each parentRef when nil
+}
+
+func (r testRoute) obj(t *testing.T) *unstructured.Unstructured {
+	t.Helper()
+	r.kind = cmp.Or(r.kind, "HTTPRoute")
+	r.generation = cmp.Or(r.generation, 1)
+	if r.parentRefs == nil {
+		r.parentRefs = []map[string]any{public}
+	}
+	if r.status == nil {
+		for _, ref := range r.parentRefs {
+			r.status = append(r.status, status(ref, controller, r.generation, "True", "True"))
+		}
+	}
+	meta := map[string]any{"namespace": r.ns, "name": cmp.Or(r.name, "r"), "generation": r.generation, "creationTimestamp": r.age.UTC().Format(time.RFC3339)}
+	if r.annotations != nil {
+		meta["annotations"] = r.annotations
+	}
+	spec := map[string]any{"parentRefs": r.parentRefs, "hostnames": r.hostnames}
+	if r.backend != nil {
+		spec["rules"] = []map[string]any{{"backendRefs": []map[string]any{r.backend}}}
+	}
+	return obj(t, map[string]any{
+		"apiVersion": "gateway.networking.k8s.io/v1", "kind": r.kind,
+		"metadata": meta, "spec": spec, "status": map[string]any{"parents": r.status},
+	})
+}
+
+// status is a route's status at ref, as controllerName wrote it for
+// generation.
+func status(ref map[string]any, controllerName string, generation int64, accepted, resolvedRefs string) map[string]any {
 	return map[string]any{
-		"parentRef":  ref,
-		"conditions": []map[string]any{{"type": "Accepted", "status": accepted}},
+		"parentRef":      ref,
+		"controllerName": controllerName,
+		"conditions": []map[string]any{
+			{"type": "Accepted", "status": accepted, "observedGeneration": generation},
+			{"type": "ResolvedRefs", "status": resolvedRefs, "observedGeneration": generation},
+		},
 	}
 }
 
-func TestPublished(t *testing.T) {
-	public := map[string]any{"name": "public", "namespace": "infra"}
-	objs := []any{
-		route(t, "blog", []string{"Blog.example.com", "*.example.com", "app.example.com"}, parent(public, "True")),
-		route(t, "shop", []string{"app.example.com"}, parent(public, "True")),
-		route(t, "evil", []string{"rejected.example.com"}, parent(public, "False")),
-		route(t, "infra", []string{"implicit-ns.example.com"}, parent(map[string]any{"name": "public"}, "True")),
-		route(t, "blog", []string{"other-gw.example.com"}, parent(map[string]any{"name": "internal", "namespace": "infra"}, "True")),
-		route(t, "blog", []string{"service.example.com"}, parent(map[string]any{"name": "public", "namespace": "infra", "group": "", "kind": "Service"}, "True")),
-		route(t, "blog", nil, parent(public, "True")),
-		route(t, "blog", []string{"unreconciled.example.com"}),
+// apiView is a view of objs, as the informers' stores hold them, with
+// TLSRoutes watched.
+func apiView(t *testing.T, objs ...*unstructured.Unstructured) view {
+	t.Helper()
+	newStore := func() cache.Store { return cache.NewStore(cache.MetaNamespaceKeyFunc) }
+	v := view{gateways: newStore(), classes: newStore(), httpRoutes: newStore(), tlsRoutes: newStore()}
+	stores := map[string]cache.Store{"Gateway": v.gateways, "GatewayClass": v.classes, "HTTPRoute": v.httpRoutes, "TLSRoute": v.tlsRoutes}
+	for _, o := range objs {
+		require.NoError(t, stores[o.GetKind()].Add(o))
 	}
+	return v
+}
 
-	got := published(objs, "infra", "public", "gw.infra.svc", 80)
+var testPublisher = &publisher{gwNS: "infra", gwName: "public", host: "gw.infra.svc", port: 80}
 
-	var names []string
+// names is the domains of proxies.
+func names(proxies []v1.ProxyConfigurer) []string {
+	out := []string{}
+	for _, p := range proxies {
+		var m msg.NewProxy
+		p.MarshalToMsg(&m)
+		out = append(out, m.CustomDomains...)
+	}
+	return out
+}
+
+func TestPublished(t *testing.T) {
+	v := apiView(t, gatewayObj(t), classObj(t, "cilium", controller),
+		testRoute{ns: "blog", name: "blog", hostnames: []string{"Blog.example.com", "*.example.com", "app.example.com"}}.obj(t),
+		testRoute{ns: "shop", hostnames: []string{"app.example.com"}}.obj(t),
+		testRoute{ns: "blog", name: "nohosts"}.obj(t),
+	)
+
+	got, _, _ := testPublisher.publication(v)
+
 	for _, p := range got {
 		h := p.(*v1.HTTPProxyConfig)
 		require.Equal(t, "http", h.Type)
 		require.Equal(t, []string{h.Name}, h.CustomDomains)
 		require.Equal(t, "gw.infra.svc", h.LocalIP)
 		require.Equal(t, 80, h.LocalPort)
-		names = append(names, h.Name)
 	}
-	require.Equal(t, []string{"app.example.com", "blog.example.com", "implicit-ns.example.com"}, names)
+	require.Equal(t, []string{"app.example.com", "blog.example.com"}, names(got))
+}
+
+// A route counts as accepted only by the word of the Gateway's own
+// controller, for the route's current generation, at a parentRef the
+// route still has.
+func TestPublishedTrustsOnlyTheGatewaysController(t *testing.T) {
+	other := map[string]any{"name": "internal", "namespace": "infra"}
+	section := map[string]any{"name": "public", "namespace": "infra", "sectionName": "http"}
+	cases := []testRoute{
+		{hostnames: []string{"accepted.example.com"}},
+		{hostnames: []string{"section.example.com"}, parentRefs: []map[string]any{section}},
+		{ns: "infra", hostnames: []string{"implicit-ns.example.com"}, parentRefs: []map[string]any{{"name": "public"}}},
+		{generation: 5, hostnames: []string{"current.example.com"}},
+		{hostnames: []string{"rejected.example.com"}, status: []map[string]any{status(public, controller, 1, "False", "True")}},
+		{hostnames: []string{"unreconciled.example.com"}, status: []map[string]any{}},
+		{hostnames: []string{"foreign.example.com"}, status: []map[string]any{status(public, "attacker.example/whatever", 1, "True", "True")}},
+		{generation: 5, hostnames: []string{"stale.example.com"}, status: []map[string]any{status(public, controller, 1, "True", "True")}},
+		{hostnames: []string{"dropped.example.com"}, parentRefs: []map[string]any{other},
+			status: []map[string]any{status(public, controller, 1, "True", "True"), status(other, controller, 1, "True", "True")}},
+		{hostnames: []string{"other-section.example.com"}, status: []map[string]any{status(section, controller, 1, "True", "True")}},
+		{hostnames: []string{"other-gw.example.com"}, parentRefs: []map[string]any{other}},
+		{hostnames: []string{"service.example.com"}, parentRefs: []map[string]any{{"name": "public", "namespace": "infra", "group": "", "kind": "Service"}}},
+	}
+	want := []string{"accepted.example.com", "current.example.com", "implicit-ns.example.com", "section.example.com"}
+	for _, kind := range []string{"HTTPRoute", "TLSRoute"} {
+		t.Run(kind, func(t *testing.T) {
+			objs := []*unstructured.Unstructured{gatewayObj(t), classObj(t, "cilium", controller)}
+			for i, r := range cases {
+				r.kind, r.ns, r.name, r.backend = kind, cmp.Or(r.ns, "blog"), fmt.Sprint("r", i), map[string]any{"name": "app", "port": 80}
+				objs = append(objs, r.obj(t))
+			}
+			httpProxies, tlsProxies, _ := testPublisher.publication(apiView(t, objs...))
+			got := names(append(httpProxies, tlsProxies...))
+			slices.Sort(got)
+			require.Equal(t, want, got)
+		})
+	}
+
+	accepted := testRoute{hostnames: []string{"accepted.example.com"}}.obj(t)
+	for name, objs := range map[string][]*unstructured.Unstructured{
+		"no gateway":             {classObj(t, "cilium", controller), accepted},
+		"no gateway class":       {gatewayObj(t), accepted},
+		"another class's status": {gatewayObj(t), classObj(t, "cilium", "example.com/other-controller"), accepted},
+	} {
+		httpProxies, _, _ := testPublisher.publication(apiView(t, objs...))
+		require.Empty(t, httpProxies, name)
+	}
 }
 
 // The file's own settings stand; the keys it leaves out get

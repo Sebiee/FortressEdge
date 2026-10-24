@@ -23,51 +23,27 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// tlsRouteObj is a TLSRoute in ns, created at age, to backend
-// (name:port in ns) or none.
-func tlsRouteObj(t *testing.T, ns, name string, age time.Time, annotations map[string]string, hostnames []string, backend map[string]any, parents ...map[string]any) *unstructured.Unstructured {
-	t.Helper()
-	spec := map[string]any{"hostnames": hostnames}
-	if backend != nil {
-		spec["rules"] = []map[string]any{{"backendRefs": []map[string]any{backend}}}
-	}
-	meta := map[string]any{"namespace": ns, "name": name, "creationTimestamp": age.UTC().Format(time.RFC3339)}
-	if annotations != nil {
-		meta["annotations"] = annotations
-	}
-	b, err := json.Marshal(map[string]any{
-		"apiVersion": "gateway.networking.k8s.io/v1",
-		"kind":       "TLSRoute",
-		"metadata":   meta,
-		"spec":       spec,
-		"status":     map[string]any{"parents": parents},
-	})
-	require.NoError(t, err)
-	u := &unstructured.Unstructured{}
-	require.NoError(t, u.UnmarshalJSON(b))
-	return u
-}
-
 func svc(name string, port int) map[string]any { return map[string]any{"name": name, "port": port} }
 
 func TestPublishedTLS(t *testing.T) {
-	public := map[string]any{"name": "public", "namespace": "infra"}
-	ok := parent(public, "True")
 	old, young := time.Unix(1_700_000_000, 0), time.Unix(1_800_000_000, 0)
 	pg := map[string]string{alpnAnnotation: "postgresql"}
-	objs := []any{
-		tlsRouteObj(t, "dev", "db", young, pg, []string{"DB.dev.example.com", "*.dev.example.com", "app.example.com"}, svc("postgresql-rw", 5432), ok),
-		tlsRouteObj(t, "prod", "db", old, map[string]string{alpnAnnotation: " postgresql , x "}, []string{"db.prod.example.com", "db.dev.example.com"}, svc("postgresql-rw", 5432), ok),
-		tlsRouteObj(t, "dev", "cache", old, nil, []string{"cache.dev.example.com"}, svc("valkey", 6379), ok),
-		tlsRouteObj(t, "dev", "rejected", old, nil, []string{"rejected.example.com"}, svc("x", 1), parent(public, "False")),
-		tlsRouteObj(t, "dev", "nobackend", old, nil, []string{"nb.example.com"}, nil, ok),
-		tlsRouteObj(t, "dev", "noport", old, nil, []string{"np.example.com"}, map[string]any{"name": "x"}, ok),
-		tlsRouteObj(t, "dev", "foreign", old, nil, []string{"f.example.com"}, map[string]any{"name": "x", "port": 1, "namespace": "prod"}, ok),
-		tlsRouteObj(t, "dev", "notsvc", old, nil, []string{"ns.example.com"}, map[string]any{"name": "x", "port": 1, "kind": "ServiceImport", "group": "multicluster.x-k8s.io"}, ok),
-		tlsRouteObj(t, "dev", "acme", old, map[string]string{alpnAnnotation: "acme-tls/1"}, []string{"acme.example.com"}, svc("x", 1), ok),
-		tlsRouteObj(t, "dev", "nohosts", old, nil, nil, svc("x", 1), ok),
+	tls := func(ns, name string, age time.Time, annotations map[string]string, hostnames []string, backend map[string]any) *unstructured.Unstructured {
+		return testRoute{kind: "TLSRoute", ns: ns, name: name, age: age, annotations: annotations, hostnames: hostnames, backend: backend}.obj(t)
 	}
-	got, refused := publishedTLS(objs, "infra", "public", map[string]bool{"app.example.com": true})
+	v := apiView(t, gatewayObj(t), classObj(t, "cilium", controller),
+		testRoute{ns: "web", hostnames: []string{"app.example.com"}}.obj(t),
+		tls("dev", "db", young, pg, []string{"DB.dev.example.com", "*.dev.example.com", "app.example.com"}, svc("postgresql-rw", 5432)),
+		tls("prod", "db", old, map[string]string{alpnAnnotation: " postgresql , x "}, []string{"db.prod.example.com", "db.dev.example.com"}, svc("postgresql-rw", 5432)),
+		tls("dev", "cache", old, nil, []string{"cache.dev.example.com"}, svc("valkey", 6379)),
+		tls("dev", "nobackend", old, nil, []string{"nb.example.com"}, nil),
+		tls("dev", "noport", old, nil, []string{"np.example.com"}, map[string]any{"name": "x"}),
+		tls("dev", "foreign", old, nil, []string{"f.example.com"}, map[string]any{"name": "x", "port": 1, "namespace": "prod"}),
+		tls("dev", "notsvc", old, nil, []string{"ns.example.com"}, map[string]any{"name": "x", "port": 1, "kind": "ServiceImport", "group": "multicluster.x-k8s.io"}),
+		tls("dev", "acme", old, map[string]string{alpnAnnotation: "acme-tls/1"}, []string{"acme.example.com"}, svc("x", 1)),
+		tls("dev", "nohosts", old, nil, nil, svc("x", 1)),
+	)
+	_, got, refused := testPublisher.publication(v)
 
 	type pub struct {
 		name, domain, target string
@@ -127,19 +103,32 @@ func TestPublicationFollowsTheAPI(t *testing.T) {
 	gvk := func(kind string) schema.GroupVersionKind {
 		return schema.GroupVersionKind{Group: gatewayGroup, Version: "v1", Kind: kind}
 	}
-	scheme.AddKnownTypeWithName(gvk("HTTPRouteList"), &unstructured.UnstructuredList{})
-	scheme.AddKnownTypeWithName(gvk("TLSRouteList"), &unstructured.UnstructuredList{})
-	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-		httpRoutes: "HTTPRouteList", tlsRoutes: "TLSRouteList",
-	})
+	resources := map[schema.GroupVersionResource]string{
+		httpRoutes: "HTTPRouteList", tlsRoutes: "TLSRouteList", gateways: "GatewayList", gatewayClasses: "GatewayClassList",
+	}
+	for _, list := range resources {
+		scheme.AddKnownTypeWithName(gvk(list), &unstructured.UnstructuredList{})
+	}
+	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, resources)
+	_, err := dyn.Resource(gateways).Namespace("infra").Create(ctx, gatewayObj(t), metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = dyn.Resource(gatewayClasses).Create(ctx, classObj(t, "cilium", controller), metav1.CreateOptions{})
+	require.NoError(t, err)
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0)
-	httpInf, tlsInf := factory.ForResource(httpRoutes).Informer(), factory.ForResource(tlsRoutes).Informer()
+	v := view{}
+	var synced []cache.InformerSynced
+	for r, store := range map[schema.GroupVersionResource]*cache.Store{
+		httpRoutes: &v.httpRoutes, tlsRoutes: &v.tlsRoutes, gateways: &v.gateways, gatewayClasses: &v.classes,
+	} {
+		inf := factory.ForResource(r).Informer()
+		*store = inf.GetStore()
+		synced = append(synced, inf.HasSynced)
+	}
 	factory.Start(ctx.Done())
-	require.True(t, cache.WaitForCacheSync(ctx.Done(), httpInf.HasSynced, tlsInf.HasSynced))
+	require.True(t, cache.WaitForCacheSync(ctx.Done(), synced...))
 
-	ok := parent(map[string]any{"name": "public", "namespace": "infra"}, "True")
-	names := func() []string {
-		_, tls, _ := publication(httpInf.GetStore(), tlsInf.GetStore(), "infra", "public", "gw.infra.svc", 80)
+	tlsNames := func() []string {
+		_, tls, _ := testPublisher.publication(v)
 		var out []string
 		for _, p := range tls {
 			out = append(out, p.GetBaseConfig().Name)
@@ -148,14 +137,14 @@ func TestPublicationFollowsTheAPI(t *testing.T) {
 	}
 	wait := func(want []string) {
 		t.Helper()
-		require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, want, names()) }, 5*time.Second, 20*time.Millisecond)
+		require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, want, tlsNames()) }, 5*time.Second, 20*time.Millisecond)
 	}
-	tr := tlsRouteObj(t, "dev", "db", time.Now(), nil, []string{"db.example.com"}, svc("pg", 5432), ok)
-	_, err := dyn.Resource(tlsRoutes).Namespace("dev").Create(ctx, tr, metav1.CreateOptions{})
+	tr := testRoute{kind: "TLSRoute", ns: "dev", name: "db", age: time.Now(), hostnames: []string{"db.example.com"}, backend: svc("pg", 5432)}.obj(t)
+	_, err = dyn.Resource(tlsRoutes).Namespace("dev").Create(ctx, tr, metav1.CreateOptions{})
 	require.NoError(t, err)
 	wait([]string{"tls:db.example.com"})
 
-	hr := route(t, "dev", []string{"db.example.com"}, ok).(*unstructured.Unstructured)
+	hr := testRoute{ns: "dev", hostnames: []string{"db.example.com"}}.obj(t)
 	_, err = dyn.Resource(httpRoutes).Namespace("dev").Create(ctx, hr, metav1.CreateOptions{})
 	require.NoError(t, err)
 	wait(nil)

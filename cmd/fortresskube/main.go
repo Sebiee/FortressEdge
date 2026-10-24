@@ -30,8 +30,6 @@ import (
 	"github.com/fatedier/frp/pkg/util/log"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/discovery"
@@ -145,11 +143,15 @@ func run() error {
 		UpdateFunc: func(_, obj any) { poke(obj) },
 		DeleteFunc: poke,
 	}
-	inf := factory.ForResource(httpRoutes).Informer()
-	if _, err := inf.AddEventHandler(handler); err != nil {
-		return err
+	infs := map[schema.GroupVersionResource]cache.SharedIndexInformer{}
+	for _, r := range []schema.GroupVersionResource{httpRoutes, gateways, gatewayClasses} {
+		inf := factory.ForResource(r).Informer()
+		if _, err := inf.AddEventHandler(handler); err != nil {
+			return err
+		}
+		go inf.Run(ctx.Done())
+		infs[r] = inf
 	}
-	go inf.Run(ctx.Done())
 	// TLSRoutes, when the cluster serves them. They never hold up the
 	// HTTPRoutes: until their first full list, none is published.
 	var tlsInf atomic.Pointer[cache.SharedIndexInformer]
@@ -157,9 +159,9 @@ func run() error {
 		tlsInf.Store(&i)
 		poke(nil)
 	})
-	// Publishing before the first full list would drop every name the
+	// Publishing before the first full lists would drop every name the
 	// edge already serves.
-	if !cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+	if !waitSynced(ctx, infs) {
 		return <-errc
 	}
 	log.Infof("watching httproutes accepted by gateway %s/%s, forwarding to %s", gwNS, gwName, *backend)
@@ -179,21 +181,22 @@ func run() error {
 		}()
 	}
 	edge := &edgeSupport{status: ts}
+	pub := &publisher{gwNS: gwNS, gwName: gwName, host: host, port: port}
+	v := view{gateways: infs[gateways].GetStore(), classes: infs[gatewayClasses].GetStore(), httpRoutes: infs[httpRoutes].GetStore()}
 	tlsSynced := false
 	for {
 		select {
 		case err := <-errc:
 			return err
 		case <-changed:
-			var tlsStore cache.Store
 			if i := tlsInf.Load(); i != nil {
 				if !tlsSynced {
 					tlsSynced = true
 					log.Infof("watching tlsroutes accepted by gateway %s/%s, forwarding to their Services", gwNS, gwName)
 				}
-				tlsStore = (*i).GetStore()
+				v.tlsRoutes = (*i).GetStore()
 			}
-			httpProxies, tlsProxies, refused := publication(inf.GetStore(), tlsStore, gwNS, gwName, host, port)
+			httpProxies, tlsProxies, refused := pub.publication(v)
 			for _, r := range stats.update(len(httpProxies), len(tlsProxies), refused) {
 				log.Warnf("tlsroute not published: %s", r)
 			}
@@ -209,20 +212,63 @@ func run() error {
 	}
 }
 
-// publication is what fortresskube publishes from the routes the stores
-// hold: an http proxy per HTTPRoute name, then a tcp-tls proxy per
-// TLSRoute name that no HTTPRoute has. A nil tlsStore has no TLSRoutes.
-func publication(httpStore, tlsStore cache.Store, gwNS, gwName, host string, port int) (httpProxies, tlsProxies []v1.ProxyConfigurer, refused []refusal) {
-	httpProxies = published(httpStore.List(), gwNS, gwName, host, port)
-	if tlsStore == nil {
+// publisher publishes the routes its Gateway accepted.
+type publisher struct {
+	gwNS, gwName string
+	host         string // where the http proxies forward to
+	port         int
+}
+
+// view is what a publication reads: the informers' stores. tlsRoutes is
+// nil while TLSRoutes are not watched.
+type view struct {
+	gateways, classes     cache.Store
+	httpRoutes, tlsRoutes cache.Store
+}
+
+// publication is what p publishes from v: an http proxy per HTTPRoute
+// name, then a tcp-tls proxy per TLSRoute name that no HTTPRoute has.
+// Without its Gateway, or the Gateway's class, it publishes none.
+func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfigurer, refused []refusal) {
+	gw := gatewayOf(v, p.gwNS, p.gwName)
+	if gw == nil {
+		return nil, nil, nil
+	}
+	httpProxies = published(routes(v.httpRoutes), gw, p.host, p.port)
+	if v.tlsRoutes == nil {
 		return httpProxies, nil, nil
 	}
 	names := map[string]bool{}
 	for _, p := range httpProxies {
 		names[p.GetBaseConfig().Name] = true
 	}
-	tlsProxies, refused = publishedTLS(tlsStore.List(), gwNS, gwName, names)
+	tlsProxies, refused = publishedTLS(routes(v.tlsRoutes), gw, names)
 	return httpProxies, tlsProxies, refused
+}
+
+// waitSynced waits for the informers' first full lists, and warns once
+// of each still missing after 30 seconds.
+func waitSynced(ctx context.Context, infs map[schema.GroupVersionResource]cache.SharedIndexInformer) bool {
+	var synced []cache.InformerSynced
+	for _, i := range infs {
+		synced = append(synced, i.HasSynced)
+	}
+	for warned := false; ; warned = true {
+		wait, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ok := cache.WaitForCacheSync(wait.Done(), synced...)
+		cancel()
+		if ok {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		for r, i := range infs {
+			if !warned && !i.HasSynced() {
+				log.Warnf("%s: no full list after 30s; fortresskube needs list and watch on %s", r.Resource, r.GroupResource())
+			}
+		}
+	}
 }
 
 // watchTLSRoutes starts watching TLSRoutes once discovery says the
@@ -255,20 +301,8 @@ func watchTLSRoutes(ctx context.Context, rc *rest.Config, factory dynamicinforme
 		return
 	}
 	go inf.Run(ctx.Done())
-	for warned := false; ; warned = true {
-		wait, cancel := context.WithTimeout(ctx, 30*time.Second)
-		ok := cache.WaitForCacheSync(wait.Done(), inf.HasSynced)
-		cancel()
-		if ok {
-			synced(inf)
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		if !warned {
-			log.Warnf("tlsroutes: no full list after 30s; fortresskube needs list and watch on %s", tlsRoutes.GroupResource())
-		}
+	if waitSynced(ctx, map[schema.GroupVersionResource]cache.SharedIndexInformer{tlsRoutes: inf}) {
+		synced(inf)
 	}
 }
 
@@ -342,36 +376,6 @@ func oldEdge(err string) bool {
 	return strings.Contains(err, "unknown proxy type") || strings.Contains(err, "type [tcp-tls] not supported")
 }
 
-type httpRoute struct {
-	Spec struct {
-		Hostnames []string `json:"hostnames"`
-	} `json:"spec"`
-	Status routeStatus `json:"status"`
-}
-
-// routeStatus is a route's status, as Gateways write it.
-type routeStatus struct {
-	Parents []struct {
-		ParentRef struct {
-			Group     *string `json:"group"`
-			Kind      *string `json:"kind"`
-			Namespace *string `json:"namespace"`
-			Name      string  `json:"name"`
-		} `json:"parentRef"`
-		Conditions []struct {
-			Type   string `json:"type"`
-			Status string `json:"status"`
-		} `json:"conditions"`
-	} `json:"parents"`
-}
-
-// published is one http proxy per hostname of each route the Gateway
-// gwNS/gwName reports as Accepted. The Gateway's allowedRoutes decides which
-// namespaces may publish. Wildcards and routes without hostnames are
-// skipped: the edge only gets certificates for exact names.
-// ponytail: a hostname outside the Gateway listener's hostname is still
-// published and gets a certificate, then a 404 from the Gateway; intersect
-// with the listeners if that ever matters.
 // Where frpc's defaults suit a process on a laptop, fortresskube's suit a
 // tunnel that must come back by itself, fast, when the edge restarts:
 const (
@@ -410,15 +414,17 @@ func tunnelDefaults(common, file *v1.ClientCommonConfig) {
 	}
 }
 
-func published(objs []any, gwNS, gwName, host string, port int) []v1.ProxyConfigurer {
+// published is one http proxy per hostname of each route gw accepted.
+// The Gateway's allowedRoutes decides which namespaces may publish.
+// Wildcards and routes without hostnames are skipped: the edge only gets
+// certificates for exact names.
+// ponytail: a hostname outside the Gateway listener's hostname is still
+// published and gets a certificate, then a 404 from the Gateway; intersect
+// with the listeners if that ever matters.
+func published(rs []route, gw *gateway, host string, port int) []v1.ProxyConfigurer {
 	names := map[string]bool{}
-	for _, o := range objs {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		var r httpRoute
-		if runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &r) != nil || !r.Status.acceptedBy(u.GetNamespace(), gwNS, gwName) {
+	for _, r := range rs {
+		if !gw.accepts(&r) {
 			continue
 		}
 		for _, h := range r.Spec.Hostnames {
@@ -436,22 +442,6 @@ func published(objs []any, gwNS, gwName, host string, port int) []v1.ProxyConfig
 		})
 	}
 	return out
-}
-
-func (s *routeStatus) acceptedBy(routeNS, gwNS, gwName string) bool {
-	for _, p := range s.Parents {
-		ref := p.ParentRef
-		if deref(ref.Group, gatewayGroup) != gatewayGroup || deref(ref.Kind, "Gateway") != "Gateway" ||
-			deref(ref.Namespace, routeNS) != gwNS || ref.Name != gwName {
-			continue
-		}
-		for _, c := range p.Conditions {
-			if c.Type == "Accepted" && c.Status == "True" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func deref(s *string, def string) string {
