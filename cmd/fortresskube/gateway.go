@@ -58,9 +58,9 @@ type routeKind struct {
 }
 
 var (
-	httpKind = routeKind{"HTTPRoute", []string{"HTTP", "HTTPS"}, false, []string{refusedService}}
+	httpKind = routeKind{"HTTPRoute", []string{"HTTP", "HTTPS"}, false, []string{refusedService, refusedStatic}}
 	tlsKind  = routeKind{"TLSRoute", []string{"TLS"}, true, []string{
-		refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
+		refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute, refusedStatic,
 	}}
 )
 

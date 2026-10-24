@@ -23,6 +23,10 @@ rejecting it, removes the name, and other names keep running.
   route still has. A status another controller or a tenant wrote, or
   one older than the route's spec, does not count.
 - Wildcards and routes without `hostnames` are skipped.
+- A name a proxy of the frpc config has (its `customDomains`) stays that
+  proxy's: a route of either kind that names it is refused
+  (`static_proxy`). frps would otherwise put the tenant's proxy and the
+  operator's in one group, and split the name's requests between them.
 - The Gateway needs a plain HTTP listener on port 80; the edge terminates
   TLS. `-backend` defaults to Cilium's Service,
   `cilium-gateway-NAME.NAMESPACE.svc:80`. `fortresskube` dials a Service
@@ -255,6 +259,12 @@ config file leaves it out; leave it out. `tunnel_groups` in the edge's
 status and `fortressedge_tunnel_group_members{group="<name>"}`
 count the replicas logged in. Spread them across zones, as above, so
 that losing a node or a zone leaves the sites up.
+
+The group is the certificate's, not the Deployment's: two
+`fortresskube` Deployments with one certificate are one node to the
+edge, and a name both publish joins one group, whatever Gateway each
+watches. Give a Deployment that watches another Gateway its own
+certificate.
 
 An app then declares its names once:
 
