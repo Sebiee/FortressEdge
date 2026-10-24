@@ -496,7 +496,7 @@ func TestDomainsTCPRoute(t *testing.T) {
 	}
 	// HTTP for it goes to the wildcard, if any: the name itself is no
 	// HTTP route.
-	if r, ok := d.Route("db.example.com"); !ok || r != "*.example.com" {
+	if r, _, ok := d.Route("db.example.com"); !ok || r != "*.example.com" {
 		t.Fatalf("route %q %v", r, ok)
 	}
 	d.Domain("*.example.com", false)

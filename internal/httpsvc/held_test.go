@@ -72,7 +72,7 @@ func TestLoadHeld(t *testing.T) {
 	if len(d.held) != 1 || d.held["app.example.com"].cert == nil {
 		t.Fatalf("held %v", d.held)
 	}
-	if name, ok := d.Route("App.Example.com."); !ok || name != "app.example.com" || !d.Known("app.example.com") {
+	if name, held, ok := d.Route("App.Example.com."); !ok || !held || name != "app.example.com" || !d.Known("app.example.com") {
 		t.Fatalf("app: route %q %v", name, ok)
 	}
 	for _, name := range []string{"old.example.com", "other.example.com"} {
@@ -104,6 +104,42 @@ func TestLoadHeld(t *testing.T) {
 	d.SetTunnelGrace(0)
 	if d.Known("app.example.com") {
 		t.Fatal("known with tunnel_grace 0")
+	}
+}
+
+// While a name's tunnel is away, its held name stays its own under
+// another node's wildcard. The edge answers it 503 itself: frps would
+// hand it to the wildcard's node, and the absent node's visitors with it,
+// under the absent node's certificate.
+func TestHeldNameIsNoWildcards(t *testing.T) {
+	crt, key := certPEM(t, "app.example.com", time.Now().Add(24*time.Hour))
+	c, err := tls.X509KeyPair(crt, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDomains("tunnel.example.com")
+	d.SetTunnelGrace(10 * time.Minute)
+	d.held = map[string]heldCert{"app.example.com": {&c, time.Now()}}
+	d.Domain("*.example.com", true)
+	var reached []string
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = append(reached, r.Host) })
+	st := &httpStats{}
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, d.Route, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]int{"app.example.com": http.StatusServiceUnavailable, "other.example.com": http.StatusOK} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil))
+		if rec.Code != want {
+			t.Errorf("%s: status %d, want %d", host, rec.Code, want)
+		}
+	}
+	if len(reached) != 1 || reached[0] != "other.example.com" {
+		t.Fatalf("frps got %v", reached)
+	}
+	if s := st.site("app.example.com"); s.proxyErrors[reasonNoTunnel].Load() != 1 {
+		t.Fatalf("no_tunnel %d", s.proxyErrors[reasonNoTunnel].Load())
 	}
 }
 

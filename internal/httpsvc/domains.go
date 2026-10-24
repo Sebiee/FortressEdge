@@ -377,9 +377,9 @@ func (d *Domains) TCPRoute(name string) bool {
 	return d.tcp[name]
 }
 
-// Routed reports whether frps has an HTTP route for host.
+// Routed reports whether the edge answers HTTP for host as a site.
 func (d *Domains) Routed(host string) bool {
-	_, ok := d.Route(host)
+	_, _, ok := d.Route(host)
 	return ok
 }
 
@@ -387,20 +387,24 @@ func (d *Domains) Routed(host string) bool {
 // its router matches: the exact name, then each wildcard parent down to
 // three labels (a.b.example.com tries *.b.example.com, then
 // *.example.com), then a catch-all "*". A name with a held certificate
-// and no route is its own: frps finds no tunnel for it, and the request
-// is answered 503.
-func (d *Domains) Route(host string) (string, bool) {
+// and no route is its own, held, before any wildcard's: no tunnel carries
+// it now, and the edge answers it 503 without asking frps, whose router
+// would hand it to the wildcard's node.
+func (d *Domains) Route(host string) (name string, held, ok bool) {
 	if d == nil {
-		return "", false
+		return "", false, false
 	}
 	host = hostname(host)
 	if host == "" {
-		return "", false
+		return "", false, false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, ok := d.names[host]; ok && !d.tcp[host] {
-		return host, true
+		return host, false, true
+	}
+	if d.heldLocked(host) != nil {
+		return host, true, true
 	}
 	for rest := host; ; {
 		_, parent, _ := strings.Cut(rest, ".")
@@ -408,17 +412,14 @@ func (d *Domains) Route(host string) (string, bool) {
 			break
 		}
 		if name := "*." + parent; d.hasLocked(name) {
-			return name, true
+			return name, false, true
 		}
 		rest = parent
 	}
 	if d.hasLocked("*") {
-		return "*", true
+		return "*", false, true
 	}
-	if d.heldLocked(host) != nil {
-		return host, true
-	}
-	return "", false
+	return "", false, false
 }
 
 func (d *Domains) hasLocked(name string) bool {

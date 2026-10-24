@@ -36,10 +36,11 @@ const drainTimeout = time.Second
 // Handler sends the tunnel name to the ops API and frp control, and a host
 // that route matches to vhost, which is frps's site proxy in this process.
 // route returns the published name that routes host: host itself, or a
-// wildcard. Any other host gets no response at all. A nil route passes
-// every host to vhost as its own site. A nil st counts nothing; a nil lim
-// uses the default limits; a nil control leaves frp control out.
-func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (string, bool), lim *liveLimits) (http.Handler, error) {
+// wildcard; and whether host is held, which is answered 503 without
+// reaching vhost. Any other host gets no response at all. A nil route
+// passes every host to vhost as its own site. A nil st counts nothing; a
+// nil lim uses the default limits; a nil control leaves frp control out.
+func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (name string, held, ok bool), lim *liveLimits) (http.Handler, error) {
 	if vhost == nil {
 		return nil, errors.New("nil vhost")
 	}
@@ -58,15 +59,19 @@ func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, ro
 			onTunnel.ServeHTTP(w, r)
 			return
 		}
-		published := host
+		published, held := host, false
 		if route != nil {
 			var ok bool
-			if published, ok = route(host); !ok {
+			if published, held, ok = route(host); !ok {
 				hide()
 			}
 		}
+		next := site
+		if held {
+			next = noTunnel
+		}
 		p := lim.get()
-		st.serveSite(site, host, published, p.Site(host, published), p.Trace.TrustIncoming, w, r)
+		st.serveSite(next, host, published, p.Site(host, published), p.Trace.TrustIncoming, w, r)
 	}), nil
 }
 
@@ -232,7 +237,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	lim := newLivePolicy(cfg.Policy)
 	vis := newVisitors(cfg.Tunnel, lim, filt, domains.KnownHTTP)
 	vis.onRate = func(host string) {
-		if route, ok := domains.Route(host); ok {
+		if route, _, ok := domains.Route(host); ok {
 			st.site(route).limitHits[limitRate].Add(1)
 		}
 	}

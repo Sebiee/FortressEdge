@@ -80,7 +80,7 @@ func TestUnroutedHostGetsNoResponse(t *testing.T) {
 		hits.Add(1)
 	}))
 	t.Cleanup(vhost.Close)
-	route := func(host string) (string, bool) { return host, host == "app.example.com" }
+	route := func(host string) (string, bool, bool) { return host, false, host == "app.example.com" }
 	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, nil, route, nil)
 	if err != nil {
 		t.Fatal(err)
