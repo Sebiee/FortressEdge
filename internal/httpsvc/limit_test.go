@@ -118,49 +118,51 @@ func TestVisitorLimitHidesUnknownName(t *testing.T) {
 }
 
 // request_burst is also the most requests a source may have open at once,
-// tokens or not: each one a stalled visitor holds costs a work connection,
-// an origin connection and edge memory.
+// tokens or not, and with the rate off: each one a stalled visitor holds
+// costs a work connection, an origin connection and edge memory.
 func TestVisitorRequestsInFlight(t *testing.T) {
-	lim := testLimits
-	lim.RequestsPerSecond, lim.RequestBurst = 1000, 3
-	v := limitedVisitors(lim, nil, nil)
-	held, release := make(chan struct{}), make(chan struct{})
-	h := v.limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/hold" {
-			held <- struct{}{}
-			<-release
+	for _, rps := range []int{1000, 0} {
+		lim := testLimits
+		lim.RequestsPerSecond, lim.RequestBurst = rps, 3
+		v := limitedVisitors(lim, nil, nil)
+		held, release := make(chan struct{}), make(chan struct{})
+		h := v.limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/hold" {
+				held <- struct{}{}
+				<-release
+			}
+		}))
+		req := func(remote, path string) int {
+			r := httptest.NewRequest(http.MethodGet, "https://app.example.com"+path, nil)
+			r.RemoteAddr = remote
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+			return rec.Code
 		}
-	}))
-	req := func(remote, path string) int {
-		r := httptest.NewRequest(http.MethodGet, "https://app.example.com"+path, nil)
-		r.RemoteAddr = remote
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, r)
-		return rec.Code
-	}
-	done := make(chan struct{})
-	for range lim.RequestBurst {
-		go func() {
-			req("203.0.113.9:1", "/hold")
-			done <- struct{}{}
-		}()
-		<-held
-	}
-	time.Sleep(20 * time.Millisecond) // the tokens are back
-	if code := req("203.0.113.9:2", "/"); code != http.StatusTooManyRequests {
-		t.Fatalf("one more while %d are open: %d", lim.RequestBurst, code)
-	}
-	if code := req("198.51.100.1:1", "/"); code != http.StatusOK {
-		t.Fatalf("another source: %d", code)
-	}
-	release <- struct{}{}
-	<-done
-	if code := req("203.0.113.9:2", "/"); code != http.StatusOK {
-		t.Fatalf("once one closed: %d", code)
-	}
-	close(release)
-	for range lim.RequestBurst - 1 {
+		done := make(chan struct{})
+		for range lim.RequestBurst {
+			go func() {
+				req("203.0.113.9:1", "/hold")
+				done <- struct{}{}
+			}()
+			<-held
+		}
+		time.Sleep(20 * time.Millisecond) // the tokens are back
+		if code := req("203.0.113.9:2", "/"); code != http.StatusTooManyRequests {
+			t.Errorf("requests_per_second %d: one more while %d are open: %d", rps, lim.RequestBurst, code)
+		}
+		if code := req("198.51.100.1:1", "/"); code != http.StatusOK {
+			t.Errorf("requests_per_second %d: another source: %d", rps, code)
+		}
+		release <- struct{}{}
 		<-done
+		if code := req("203.0.113.9:2", "/"); code != http.StatusOK {
+			t.Errorf("requests_per_second %d: once one closed: %d", rps, code)
+		}
+		close(release)
+		for range lim.RequestBurst - 1 {
+			<-done
+		}
 	}
 }
 

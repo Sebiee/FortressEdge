@@ -211,9 +211,9 @@ func (v *visitors) strike(k netip.Prefix, by string) {
 }
 
 // limit rejects a request over its visitor's rate with 429, and one over
-// request_burst requests open at once: each open one holds a work
-// connection, an origin connection and edge memory, for as long as a
-// visitor who stalls it likes. Requests on the tunnel name with a
+// request_burst requests open at once, with the rate off too: each open
+// one holds a work connection, an origin connection and edge memory, for
+// as long as a visitor who stalls it likes. Requests on the tunnel name with a
 // verified client certificate (dark nodes, operators) and exempt sources
 // are never limited.
 func (v *visitors) limit(h http.Handler) http.Handler {
@@ -223,7 +223,7 @@ func (v *visitors) limit(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lim := v.lim.get()
 		a := clientIP(r)
-		if lim.RequestsPerSecond <= 0 || v.trusted(r) || lim.exempted(a) {
+		if (lim.RequestsPerSecond <= 0 && lim.RequestBurst <= 0) || v.trusted(r) || lim.exempted(a) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -231,8 +231,8 @@ func (v *visitors) limit(h http.Handler) http.Handler {
 		now := time.Now()
 		v.mu.Lock()
 		vis := v.get(k, now)
-		full := vis.inFlight >= lim.RequestBurst
-		ok := !full && vis.req.AllowN(now, 1)
+		full := lim.RequestBurst > 0 && vis.inFlight >= lim.RequestBurst
+		ok := !full && (lim.RequestsPerSecond <= 0 || vis.req.AllowN(now, 1))
 		if ok {
 			vis.inFlight++
 		}
