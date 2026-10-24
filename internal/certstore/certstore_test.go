@@ -180,6 +180,70 @@ const meta = "certificates/ca/x.example.com/x.example.com.json"
 
 var v1, v2 = []byte(`{"v":1}`), []byte(`{"v":2}`)
 
+// shortLocks makes lockTTL short enough for a test to wait it out.
+func shortLocks(t *testing.T) {
+	old := lockTTL
+	lockTTL = 500 * time.Millisecond
+	t.Cleanup(func() { lockTTL = old })
+}
+
+// forge writes the lock name as no edge would: with an expiry a century
+// ahead, as a holder whose clock ran ahead would, or anyone with the
+// AppRole.
+func forge(v *Vault, name string) error {
+	return v.do(context.Background(), func(ctx context.Context) error {
+		_, err := v.kv.Put(ctx, v.lockPath(name), map[string]any{"expires": time.Now().AddDate(100, 0, 0).Unix()})
+		return err
+	})
+}
+
+// A lock nobody writes any more is taken over once lockTTL has passed,
+// whatever expiry it carries.
+func TestVaultTakesOverALockNobodyWrites(t *testing.T) {
+	shortLocks(t)
+	ctx := context.Background()
+	srv := fakeVault(t)
+	must(t, forge(client(t, srv), "issue_cert_a.example.com"))
+	v := client(t, srv)
+	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	must(t, v.Lock(lctx, "issue_cert_a.example.com"))
+	if took := time.Since(start); took < lockTTL {
+		t.Fatalf("taken over after %s, before lockTTL", took)
+	}
+	must(t, v.Unlock(ctx, "issue_cert_a.example.com"))
+}
+
+// A lock its holder keeps writing for longer than any order takes is given
+// up on, so a stuck or forged lock cannot hold an order forever, nor the
+// boot that waits for the tunnel certificate: the edge orders under its
+// disk's lock.
+func TestSharedGivesUpOnALockHeldTooLong(t *testing.T) {
+	shortLocks(t)
+	ctx := context.Background()
+	srv := fakeVault(t)
+	forger := client(t, srv)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			_ = forge(forger, "issue_cert_a.example.com")
+			select {
+			case <-stop:
+				return
+			case <-time.After(lockTTL / 5):
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+	s, _ := shared(t, srv)
+	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	must(t, s.Lock(lctx, "issue_cert_a.example.com"))
+	must(t, s.Unlock(ctx, "issue_cert_a.example.com"))
+}
+
 func newDisk(t *testing.T) *certmagic.FileStorage {
 	return &certmagic.FileStorage{Path: t.TempDir()}
 }
