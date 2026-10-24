@@ -508,6 +508,47 @@ func TestExpiredCertificateIsRenewedBeforeUse(t *testing.T) {
 	}
 }
 
+// A tunnel certificate the edge cannot load, from disk corruption or from
+// what anyone with the AppRole wrote to Vault, is ordered again: an error
+// from manage stops the boot, and the edge would reboot at every boot.
+func TestUnreadableTunnelCertificateIsOrderedAgain(t *testing.T) {
+	const tunnel = "tunnel.example.com"
+	crt, key := certPEM(t, tunnel, time.Now().Add(time.Hour))
+	_, strayKey := certPEM(t, tunnel, time.Now().Add(time.Hour))
+	meta := []byte(`{"sans":["tunnel.example.com"],"issuer_data":null}`)
+	for _, tc := range []struct {
+		name           string
+		crt, key, meta []byte
+	}{
+		{"key of another certificate", crt, strayKey, meta},
+		{"undecodable metadata", crt, key, []byte("{")},
+		{"not a certificate", []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), key, meta},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iss := &testIssuer{lifetime: func(int) (time.Duration, time.Duration) { return 0, time.Hour }}
+			magic, cache := testMagic(t, iss, time.Hour)
+			ik := iss.IssuerKey()
+			for k, v := range map[string][]byte{
+				certmagic.StorageKeys.SiteCert(ik, tunnel):       tc.crt,
+				certmagic.StorageKeys.SitePrivateKey(ik, tunnel): tc.key,
+				certmagic.StorageKeys.SiteMeta(ik, tunnel):       tc.meta,
+			} {
+				if err := magic.Storage.Store(t.Context(), k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := manage(t.Context(), magic, cache, tunnel); err != nil {
+				t.Fatal(err)
+			}
+			d := NewDomains(tunnel)
+			d.setMagic(magic, cache)
+			if iss.count() != 1 || servedSerial(d, tunnel) == "" {
+				t.Fatalf("%d issued; served %q", iss.count(), servedSerial(d, tunnel))
+			}
+		})
+	}
+}
+
 // testMagic is acmeConfig's shape with iss instead of an ACME directory.
 func testMagic(t *testing.T, iss certmagic.Issuer, interval time.Duration) (*certmagic.Config, *certmagic.Cache) {
 	t.Helper()
