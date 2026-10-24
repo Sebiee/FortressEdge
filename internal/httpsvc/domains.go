@@ -389,7 +389,9 @@ func (d *Domains) Routed(host string) bool {
 // *.example.com), then a catch-all "*". A name with a held certificate
 // and no route is its own, held, before any wildcard's: no tunnel carries
 // it now, and the edge answers it 503 without asking frps, whose router
-// would hand it to the wildcard's node.
+// would hand it to the wildcard's node. Past its grace it is nobody's: a
+// connection still open for it, or a TLS session resumed without a new
+// certificate, would reach the wildcard's node under its certificate.
 func (d *Domains) Route(host string) (name string, held, ok bool) {
 	if d == nil {
 		return "", false, false
@@ -403,7 +405,10 @@ func (d *Domains) Route(host string) (name string, held, ok bool) {
 	if _, ok := d.names[host]; ok && !d.tcp[host] {
 		return host, false, true
 	}
-	if d.heldLocked(host) != nil {
+	if _, ok := d.held[host]; ok {
+		if d.heldLocked(host) == nil {
+			return "", false, false
+		}
 		return host, true, true
 	}
 	for rest := host; ; {

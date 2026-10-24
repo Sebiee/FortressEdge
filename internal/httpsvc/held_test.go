@@ -141,6 +141,21 @@ func TestHeldNameIsNoWildcards(t *testing.T) {
 	if s := st.site("app.example.com"); s.proxyErrors[reasonNoTunnel].Load() != 1 {
 		t.Fatalf("no_tunnel %d", s.proxyErrors[reasonNoTunnel].Load())
 	}
+
+	// Once the grace is up, or with none, the name is silent, not the
+	// wildcard's: a connection still open for it, or a TLS session
+	// resumed without a new certificate, would reach the wildcard's node.
+	for _, grace := range []time.Duration{time.Nanosecond, 0} {
+		d.SetTunnelGrace(grace)
+		if d.Known("app.example.com") || !aborts(func() {
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://app.example.com/", nil))
+		}) {
+			t.Errorf("tunnel_grace %v: the name is not silent", grace)
+		}
+	}
+	if len(reached) != 1 {
+		t.Fatalf("frps got %v", reached)
+	}
 }
 
 // A site no tunnel carries is answered 503 with Retry-After, counted as
