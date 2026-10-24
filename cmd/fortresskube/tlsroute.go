@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -35,9 +34,10 @@ type backendRef struct {
 	Port      *int32  `json:"port"`
 }
 
-// refusal is a TLSRoute, or one of its hostnames, that fortresskube does
+// refusal is a route, or one of its hostnames, that fortresskube does
 // not publish, and why.
 type refusal struct {
+	kind     string // HTTPRoute or TLSRoute
 	route    string // namespace/name
 	hostname string // "" for the whole route
 	reason   string
@@ -50,7 +50,7 @@ func (r refusal) String() string {
 	return r.route + " " + r.hostname + ": " + r.reason
 }
 
-// Why a TLSRoute or a hostname of it is not published.
+// Why a route or a hostname of it is not published.
 const (
 	refusedNoHostnames   = "no_hostnames"          // the edge gets a certificate per exact name
 	refusedHostname      = "invalid_hostname"      // a wildcard, or not a DNS name
@@ -61,10 +61,6 @@ const (
 	refusedHTTPRoute     = "hostname_of_httproute" // a name is an HTTP name or a TCP route
 	refusedOlderTLSRoute = "hostname_of_tlsroute"  // an older TLSRoute has it
 )
-
-var refusalReasons = []string{
-	refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
-}
 
 // publishedTLS is one tcp-tls proxy per hostname of each TLSRoute gw
 // accepted that a listener which accepted it takes, dialing the cluster
@@ -100,7 +96,7 @@ func publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyCon
 			reason = refusedNoHostnames
 		}
 		if reason != "" {
-			refused = append(refused, refusal{route: key, reason: reason})
+			refused = append(refused, refusal{kind: tlsKind.name, route: key, reason: reason})
 			continue
 		}
 		alpn := splitALPN(annotation)
@@ -108,15 +104,15 @@ func publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyCon
 			h = strings.ToLower(h)
 			switch {
 			case strings.Contains(h, "*") || len(k8svalidation.IsDNS1123Subdomain(h)) > 0:
-				refused = append(refused, refusal{key, h, refusedHostname})
+				refused = append(refused, refusal{tlsKind.name, key, h, refusedHostname})
 				continue
 			case !covers(ls, h):
 				continue
 			case httpNames[h]:
-				refused = append(refused, refusal{key, h, refusedHTTPRoute})
+				refused = append(refused, refusal{tlsKind.name, key, h, refusedHTTPRoute})
 				continue
 			case taken[h]:
-				refused = append(refused, refusal{key, h, refusedOlderTLSRoute})
+				refused = append(refused, refusal{tlsKind.name, key, h, refusedOlderTLSRoute})
 				continue
 			}
 			taken[h] = true
@@ -197,9 +193,11 @@ func checkALPN(s string) string {
 type routeStats struct {
 	mu        sync.Mutex
 	http, tls int
-	refused   map[refusal]bool // now
-	refusals  map[string]int64 // each time a refusal appeared, by reason
+	refused   map[refusal]bool     // now
+	refusals  map[kindReason]int64 // each time a refusal appeared
 }
+
+type kindReason struct{ kind, reason string }
 
 // update records a publication, and returns the refusals that are new
 // since the last.
@@ -207,7 +205,7 @@ func (s *routeStats) update(http, tls int, refused []refusal) []refusal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.refusals == nil {
-		s.refusals = map[string]int64{}
+		s.refusals = map[kindReason]int64{}
 	}
 	now := map[refusal]bool{}
 	var fresh []refusal
@@ -215,7 +213,7 @@ func (s *routeStats) update(http, tls int, refused []refusal) []refusal {
 		now[r] = true
 		if !s.refused[r] {
 			fresh = append(fresh, r)
-			s.refusals[r.reason]++
+			s.refusals[kindReason{r.kind, r.reason}]++
 		}
 	}
 	s.http, s.tls, s.refused = http, tls, now
@@ -230,18 +228,21 @@ func (s *routeStats) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE fortresskube_published_names gauge")
 	fmt.Fprintf(w, "fortresskube_published_names{kind=\"http\"} %d\n", s.http)
 	fmt.Fprintf(w, "fortresskube_published_names{kind=\"tls\"} %d\n", s.tls)
-	now := map[string]int{}
+	now := map[kindReason]int{}
 	for r := range s.refused {
-		now[r.reason]++
+		now[kindReason{r.kind, r.reason}]++
 	}
-	fmt.Fprintln(w, "# HELP fortresskube_refused_tlsroutes TLSRoutes and TLSRoute hostnames not published now, by reason.")
-	fmt.Fprintln(w, "# TYPE fortresskube_refused_tlsroutes gauge")
-	for _, reason := range refusalReasons {
-		fmt.Fprintf(w, "fortresskube_refused_tlsroutes{reason=%q} %d\n", reason, now[reason])
-	}
-	fmt.Fprintln(w, "# HELP fortresskube_tlsroute_refusals_total Times a TLSRoute or hostname came to be refused, by reason.")
-	fmt.Fprintln(w, "# TYPE fortresskube_tlsroute_refusals_total counter")
-	for _, reason := range slices.Sorted(maps.Keys(s.refusals)) {
-		fmt.Fprintf(w, "fortresskube_tlsroute_refusals_total{reason=%q} %d\n", reason, s.refusals[reason])
+	for _, k := range []*routeKind{&httpKind, &tlsKind} {
+		m := strings.ToLower(k.name)
+		fmt.Fprintf(w, "# HELP fortresskube_refused_%ss %ss and %s hostnames not published now, by reason.\n", m, k.name, k.name)
+		fmt.Fprintf(w, "# TYPE fortresskube_refused_%ss gauge\n", m)
+		for _, reason := range k.refusals {
+			fmt.Fprintf(w, "fortresskube_refused_%ss{reason=%q} %d\n", m, reason, now[kindReason{k.name, reason}])
+		}
+		fmt.Fprintf(w, "# HELP fortresskube_%s_refusals_total Times a %s or hostname came to be refused, by reason.\n", m, k.name)
+		fmt.Fprintf(w, "# TYPE fortresskube_%s_refusals_total counter\n", m)
+		for _, reason := range k.refusals {
+			fmt.Fprintf(w, "fortresskube_%s_refusals_total{reason=%q} %d\n", m, reason, s.refusals[kindReason{k.name, reason}])
+		}
 	}
 }

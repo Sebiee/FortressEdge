@@ -13,6 +13,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -54,7 +55,8 @@ func main() {
 func run() error {
 	cfgPath := flag.String("c", "frpc.toml", "frpc config: server, TLS, and any static proxies")
 	gateway := flag.String("gateway", "", "Gateway whose accepted HTTPRoutes are published, as namespace/name")
-	backend := flag.String("backend", "", "host:port the published proxies forward to (default cilium-gateway-NAME.NAMESPACE.svc:80)")
+	backendFlag := flag.String("backend", "", "where the published proxies forward to: NAME.NAMESPACE.svc:PORT, a Service, dialed at its cluster IP, "+
+		"or an IP or a name ending with a dot, and a port (default cilium-gateway-NAME.NAMESPACE.svc:80)")
 	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path; empty means in-cluster")
 	metricsAddr := flag.String("metrics", "", "host:port to serve Prometheus metrics on, such as :9100; empty serves none")
 	healthAddr := flag.String("health", "", "host:port to serve /healthz on, such as :8081, for a liveness probe: "+
@@ -67,21 +69,12 @@ func run() error {
 	if !ok || gwNS == "" || gwName == "" {
 		return fmt.Errorf("-gateway must be namespace/name, got %q", *gateway)
 	}
-	if *backend == "" {
-		*backend = fmt.Sprintf("cilium-gateway-%s.%s.svc:80", gwName, gwNS)
-	}
-	host, portStr, err := net.SplitHostPort(*backend)
-	if err != nil {
-		return fmt.Errorf("-backend: %w", err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return fmt.Errorf("-backend port: %w", err)
-	}
-	// Up from the start, so a liveness probe never finds it missing while
-	// the routes are still being listed.
-	if *healthAddr != "" {
-		go serveHealth(*healthAddr, newBackendHealth(host, port))
+	be := backend{svcNS: gwNS, svc: "cilium-gateway-" + gwName, port: 80}
+	if *backendFlag != "" {
+		var err error
+		if be, err = parseBackend(*backendFlag); err != nil {
+			return fmt.Errorf("-backend: %w", err)
+		}
 	}
 
 	res, err := config.LoadClientConfigResult(*cfgPath, true)
@@ -152,6 +145,11 @@ func run() error {
 		go inf.Run(ctx.Done())
 		infs[r] = inf
 	}
+	// Up before the first lists, so a liveness probe never finds it
+	// missing while the routes are listed.
+	if *healthAddr != "" {
+		go serveHealth(*healthAddr, newBackendHealth(be, infs[services].GetStore(), infs[services].HasSynced))
+	}
 	// TLSRoutes, when the cluster serves them. They never hold up the
 	// HTTPRoutes: until their first full list, none is published.
 	var tlsInf atomic.Pointer[cache.SharedIndexInformer]
@@ -164,7 +162,7 @@ func run() error {
 	if !waitSynced(ctx, infs) {
 		return <-errc
 	}
-	log.Infof("watching httproutes accepted by gateway %s/%s, forwarding to %s", gwNS, gwName, *backend)
+	log.Infof("watching httproutes accepted by gateway %s/%s, forwarding to %s", gwNS, gwName, be)
 
 	stats := &routeStats{}
 	if *metricsAddr != "" {
@@ -181,7 +179,7 @@ func run() error {
 		}()
 	}
 	edge := &edgeSupport{status: ts}
-	pub := &publisher{gwNS: gwNS, gwName: gwName, host: host, port: port}
+	pub := &publisher{gwNS: gwNS, gwName: gwName, backend: be}
 	v := view{
 		gateways: infs[gateways].GetStore(), classes: infs[gatewayClasses].GetStore(),
 		namespaces: infs[namespaces].GetStore(), services: infs[services].GetStore(),
@@ -202,7 +200,7 @@ func run() error {
 			}
 			httpProxies, tlsProxies, refused := pub.publication(v)
 			for _, r := range stats.update(len(httpProxies), len(tlsProxies), refused) {
-				log.Warnf("tlsroute not published: %s", r)
+				log.Warnf("%s not published: %s", strings.ToLower(r.kind), r)
 			}
 			// Static proxies come last so they win a name clash.
 			all := append(append(httpProxies, tlsProxies...), res.Proxies...)
@@ -219,8 +217,54 @@ func run() error {
 // publisher publishes the routes its Gateway accepted.
 type publisher struct {
 	gwNS, gwName string
-	host         string // where the http proxies forward to
-	port         int
+	backend      backend // where the http proxies forward to
+}
+
+// backend is where the http proxies forward to: a Service, at its
+// cluster IP, or an address. Never a relative name, which the pod's DNS
+// search list can resolve to a pod of another namespace.
+type backend struct {
+	svcNS, svc string // the Service; "" for host
+	host       string // an IP, or a fully qualified name ending with a dot
+	port       int
+}
+
+// parseBackend reads -backend: NAME.NAMESPACE.svc:PORT for a Service, or
+// an IP or a fully qualified name ending with a dot, and a port.
+func parseBackend(s string) (backend, error) {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return backend{}, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return backend{}, fmt.Errorf("port %q", portStr)
+	}
+	if _, err := netip.ParseAddr(host); err == nil || strings.HasSuffix(host, ".") {
+		return backend{host: host, port: port}, nil
+	}
+	if l := strings.Split(host, "."); len(l) == 3 && l[2] == "svc" &&
+		len(k8svalidation.IsDNS1035Label(l[0])) == 0 && len(k8svalidation.IsDNS1123Label(l[1])) == 0 {
+		return backend{svcNS: l[1], svc: l[0], port: port}, nil
+	}
+	return backend{}, fmt.Errorf("%s is a relative name, which the pod's DNS search list can resolve to a pod of another namespace: "+
+		"give NAME.NAMESPACE.svc for a Service, an IP, or a name ending with a dot", host)
+}
+
+// addr is what b dials now: its Service's cluster IP, which a missing,
+// headless, or ExternalName Service has none of, or its host.
+func (b backend) addr(services cache.Store) (string, bool) {
+	if b.svc == "" {
+		return b.host, true
+	}
+	return clusterIP(services, b.svcNS, b.svc)
+}
+
+func (b backend) String() string {
+	if b.svc == "" {
+		return net.JoinHostPort(b.host, strconv.Itoa(b.port))
+	}
+	return fmt.Sprintf("Service %s/%s port %d, at its cluster IP", b.svcNS, b.svc, b.port)
 }
 
 // view is what a publication reads: the informers' stores. tlsRoutes is
@@ -239,16 +283,12 @@ func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfi
 	if gw == nil {
 		return nil, nil, nil
 	}
-	httpProxies = published(v, gw, p.host, p.port)
+	names, httpProxies, refused := p.published(v, gw)
 	if v.tlsRoutes == nil {
-		return httpProxies, nil, nil
+		return httpProxies, nil, refused
 	}
-	names := map[string]bool{}
-	for _, p := range httpProxies {
-		names[p.GetBaseConfig().Name] = true
-	}
-	tlsProxies, refused = publishedTLS(v, gw, names)
-	return httpProxies, tlsProxies, refused
+	tlsProxies, tlsRefused := publishedTLS(v, gw, names)
+	return httpProxies, tlsProxies, append(refused, tlsRefused...)
 }
 
 // waitSynced waits for the informers' first full lists, and warns once
@@ -419,30 +459,38 @@ func tunnelDefaults(common, file *v1.ClientCommonConfig) {
 	}
 }
 
-// published is one http proxy per hostname of each HTTPRoute gw
-// accepted that a listener which accepted it takes: the listeners'
-// hostnames and allowedRoutes decide which namespace may publish which
-// name. Wildcards and routes without hostnames are skipped: the edge
-// only gets certificates for exact names.
-func published(v view, gw *gateway, host string, port int) []v1.ProxyConfigurer {
-	names := map[string]bool{}
+// published is the hostnames (names) of the HTTPRoutes gw accepted that
+// a listener which accepted them takes: the listeners' hostnames and
+// allowedRoutes decide which namespace may publish which name. Wildcards
+// and routes without hostnames are skipped: the edge only gets
+// certificates for exact names. Each name is an http proxy to p's
+// backend; while the backend has no address, each is refused instead.
+func (p *publisher) published(v view, gw *gateway) (names map[string]bool, proxies []v1.ProxyConfigurer, refused []refusal) {
+	names = map[string]bool{}
+	ip, ok := p.backend.addr(v.services)
 	for _, r := range routes(v.httpRoutes) {
 		ls := gw.accepted(&r, &httpKind, labelsOf(v, r.Metadata.Namespace))
 		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
-			if len(k8svalidation.IsDNS1123Subdomain(h)) == 0 && covers(ls, h) {
-				names[h] = true
+			if len(k8svalidation.IsDNS1123Subdomain(h)) > 0 || !covers(ls, h) {
+				continue
+			}
+			names[h] = true
+			if !ok {
+				refused = append(refused, refusal{httpKind.name, r.key(), h, refusedService})
 			}
 		}
 	}
-	out := make([]v1.ProxyConfigurer, 0, len(names))
+	if !ok {
+		return names, nil, refused
+	}
 	for _, h := range slices.Sorted(maps.Keys(names)) {
-		out = append(out, &v1.HTTPProxyConfig{
-			ProxyBaseConfig: v1.ProxyBaseConfig{Name: h, Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: host, LocalPort: port}},
+		proxies = append(proxies, &v1.HTTPProxyConfig{
+			ProxyBaseConfig: v1.ProxyBaseConfig{Name: h, Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: ip, LocalPort: p.backend.port}},
 			DomainConfig:    v1.DomainConfig{CustomDomains: []string{h}},
 		})
 	}
-	return out
+	return names, proxies, nil
 }
 
 func deref(s *string, def string) string {
