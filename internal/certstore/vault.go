@@ -331,7 +331,7 @@ func (v *Vault) list(ctx context.Context, dir string) ([]string, error) {
 
 // lockTTL is how long a lock outlives an edge that died holding it. The
 // holder refreshes it every third of that.
-const lockTTL = time.Minute
+var lockTTL = time.Minute
 
 type heldLock struct {
 	path    string
