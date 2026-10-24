@@ -718,6 +718,30 @@ func TestDomainsRouted(t *testing.T) {
 	}
 }
 
+// A host no DNS name can be (over 253 bytes, or with an empty label) is
+// nobody's, even under a catch-all route, and costs nothing to refuse: a
+// stranger's 60 KB server name once held Domains' lock for seconds.
+func TestDomainsRefuseWhatCannotBeADNSName(t *testing.T) {
+	d := NewDomains("tunnel.example.com")
+	d.Domain("*.example.com", true)
+	d.Domain("*", true)
+	longest := strings.Repeat("a.", 121) + "example.com"
+	if len(longest) != 253 || !d.Known(longest) || !d.Known(longest+".") {
+		t.Fatalf("a %d-byte name is not routed", len(longest))
+	}
+	for _, host := range []string{
+		"b" + longest,
+		strings.Repeat("a.", 30000) + "example.com",
+		"app..example.com", ".app.example.com", "app.example.com..",
+	} {
+		start := time.Now()
+		known := d.Known(host)
+		if took := time.Since(start); known || took > 100*time.Millisecond {
+			t.Errorf("%d-byte host %.20q: known %v, in %v", len(host), host, known, took)
+		}
+	}
+}
+
 // TestUnknownServerNameGetsNoBytes: a handshake for a name the edge does
 // not serve, or with no name, reads nothing back: no certificate, no alert.
 func TestUnknownServerNameGetsNoBytes(t *testing.T) {
