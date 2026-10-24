@@ -185,7 +185,9 @@ in TLS and the tunnel in `Host` gets `421`.
 
 Port 80 sends nothing to a request it cannot read either (no `Host`, a
 bad one, an unknown HTTP version, headers over `max_header_size`): Go's
-HTTP server would answer those with its own `400`, `431` or `505`.
+HTTP server would answer those with its own `400`, `431` or `505`. It
+closes each connection after its one redirect, so the request after it
+gets nothing either.
 
 Some bytes remain: the QUIC listener closes a handshake for another name
 with a QUIC error rather than silence; and ICMPv6 passes XDP, so the
