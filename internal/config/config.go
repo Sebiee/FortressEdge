@@ -530,10 +530,17 @@ func parsePolicy(b []byte, strict bool) (Policy, []error) {
 		TunnelDeadTimeout: DefaultTunnelDeadTimeout,
 	}
 	var y policyConfig
-	if err := yaml.Unmarshal(b, &y); err != nil {
-		return p, []error{fmt.Errorf("%s: %w", PolicyName, err)}
-	}
 	var problems []error
+	if err := yaml.Unmarshal(b, &y); err != nil {
+		var te *yaml.TypeError
+		ok := false
+		if !strict && errors.As(err, &te) {
+			y, problems, ok = decodeKeys(b)
+		}
+		if !ok {
+			return p, []error{fmt.Errorf("%s: %w", PolicyName, err)}
+		}
+	}
 	// bad records a problem, and reports whether to stop.
 	bad := func(err error) bool {
 		problems = append(problems, err)
@@ -595,6 +602,31 @@ func parsePolicy(b []byte, strict bool) (Policy, []error) {
 		return p, problems
 	}
 	return p, problems
+}
+
+// decodeKeys decodes the top-level keys of policy.yml one by one, and
+// leaves out a key whose value is of another type, whole: yaml.v3 would
+// keep the rest of a list and drop only the item. ok is false when the
+// file is not a mapping of keys.
+func decodeKeys(b []byte) (y policyConfig, problems []error, ok bool) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return y, nil, false
+	}
+	pairs := doc.Content[0].Content
+	keep := &yaml.Node{Kind: yaml.MappingNode}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		var one policyConfig
+		if err := (&yaml.Node{Kind: yaml.MappingNode, Content: pairs[i : i+2]}).Decode(&one); err != nil {
+			problems = append(problems, fmt.Errorf("%s: %s: %w", PolicyName, pairs[i].Value, err))
+			continue
+		}
+		keep.Content = append(keep.Content, pairs[i:i+2]...)
+	}
+	if err := keep.Decode(&y); err != nil {
+		return y, nil, false
+	}
+	return y, problems, true
 }
 
 // checkBlockCount refuses a block list XDP could not swap in for another:
