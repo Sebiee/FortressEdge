@@ -508,7 +508,9 @@ func (c *tlsOnlyConn) Read(b []byte) (int, error) {
 func unreadBodyDeadline(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if r.ProtoMajor != 1 {
+			// An HTTP/2 stream is not an HTTP/1 connection; the HTTP/1
+			// server takes "PRI * HTTP/2.0" as a request too.
+			if r.ProtoMajor != 1 && r.Method != "PRI" {
 				return
 			}
 			// Write fails once a handler has hijacked the connection (a
