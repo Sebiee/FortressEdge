@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -415,6 +416,9 @@ func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visit
 			// A TCP route's connection leaves here, after its ClientHello.
 			ln = splitTLS(ln, tcp.take)
 		}
+		if s.TLSConfig == nil {
+			ln = quietOnly(s, ln)
+		}
 		s.Handler = socks.handler(s.Handler)
 		go func(s *http.Server, ln net.Listener) {
 			if s.TLSConfig != nil {
@@ -484,6 +488,51 @@ func (c *tlsOnlyConn) Read(b []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// quietOnly makes s's connections on ln send nothing until a handler runs
+// for one of their requests; port 80's handlers hide every name the edge
+// does not serve. net/http answers a request it cannot read (no Host or a
+// bad one, an unknown version or transfer encoding, headers too large)
+// with its own 400, 417, 431, 501 or 505 before any handler runs, and
+// their words would tell a stranger that the edge is there, and runs Go.
+func quietOnly(s *http.Server, ln net.Listener) net.Listener {
+	h := s.Handler
+	s.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		return context.WithValue(ctx, quietConnKey{}, c)
+	}
+	s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, ok := r.Context().Value(quietConnKey{}).(*quietConn); ok {
+			c.answered.Store(true)
+		}
+		h.ServeHTTP(w, r)
+	})
+	return quietListener{ln}
+}
+
+type quietConnKey struct{}
+
+type quietListener struct{ net.Listener }
+
+func (l quietListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &quietConn{Conn: c}, nil
+}
+
+type quietConn struct {
+	net.Conn
+	answered atomic.Bool // a handler took one of its requests
+}
+
+func (c *quietConn) Write(b []byte) (int, error) {
+	if !c.answered.Load() {
+		_ = c.Conn.Close()
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
 }
 
 // conns is every open connection on the listeners, hijacked or not.

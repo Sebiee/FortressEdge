@@ -177,10 +177,8 @@ certificate check that tolerates a clock off by days.
 
 ## Silence gaps
 
-The edge answers unknown names with nothing, except in these cases:
+The edge answers unknown names with nothing, except in this case:
 
-- Go's HTTP server answers a malformed request on port 80 (HTTP/1.1
-  with no `Host`) with its own 400.
 - QUIC closes a handshake for a name other than the tunnel with a QUIC
   error, not silence.
 

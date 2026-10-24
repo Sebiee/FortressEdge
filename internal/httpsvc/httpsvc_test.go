@@ -666,6 +666,59 @@ func TestOptionsStarForTheAddressGetsNoBytes(t *testing.T) {
 	}
 }
 
+// Port 80 sends nothing but its redirects, not even net/http's own 400,
+// 417, 431, 501 or 505: their words tell a stranger that the edge is
+// there, and that it runs Go.
+func TestPort80SendsOnlyRedirects(t *testing.T) {
+	d := NewDomains("tunnel.example.com")
+	d.Domain("app.example.com", true)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	s := newServer(addr, redirectHTTPS(d.KnownHTTP), nil)
+	s.MaxHeaderBytes = 4096
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, []*http.Server{s}, newConns(), nil, &sockets{}, nil, time.Second) }()
+	t.Cleanup(func() { cancel(); <-done })
+	send := func(req string) []byte {
+		t.Helper()
+		c, err := net.Dial("tcp", addr)
+		for start := time.Now(); err != nil && time.Since(start) < 5*time.Second; {
+			time.Sleep(10 * time.Millisecond)
+			c, err = net.Dial("tcp", addr)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.WriteString(c, req)
+		b, _ := io.ReadAll(c)
+		return b
+	}
+	if b := send("GET /x HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n"); !strings.HasPrefix(string(b), "HTTP/1.1 308 ") {
+		t.Fatalf("a served name got %q", b)
+	}
+	for _, req := range []string{
+		"GET / HTTP/1.1\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: a b\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: app.example.com\r\nHost: app.example.com\r\n\r\n",
+		"GET / HTTP/3.0\r\nHost: app.example.com\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: app.example.com\r\nExpect: nothing\r\n\r\n",
+		"POST / HTTP/1.1\r\nHost: app.example.com\r\nTransfer-Encoding: gzip\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: app.example.com\r\nX: " + strings.Repeat("a", 70000) + "\r\n\r\n",
+		"BAD\r\n\r\n",
+	} {
+		if b := send(req); len(b) != 0 {
+			t.Errorf("%.40q got %q", req, b)
+		}
+	}
+}
+
 func TestWantsACMEALPN(t *testing.T) {
 	if wantsACMEALPN(&tls.ClientHelloInfo{}) {
 		t.Fatal("empty hello")
