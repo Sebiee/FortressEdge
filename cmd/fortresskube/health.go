@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fatedier/frp/pkg/util/log"
+	"k8s.io/client-go/tools/cache"
 )
 
 // backendHealth answers a liveness probe for the backend the published
@@ -21,12 +22,16 @@ import (
 // Envoy, never another node's. It has no fail-open: with the backend down
 // for every replica, every replica restarts (docs/kubernetes.md).
 //
-// The name is resolved on each check, so a new Service address is followed.
-// A failed lookup reuses the last address: the cluster's DNS being away is
-// not this replica's backend being away, and restarting every replica would
-// not bring it back.
+// A Service backend is dialed at its cluster IP, as the proxies dial it,
+// read from the Services watch on each check, so a new Service address is
+// followed; until the first list of Services it passes. A name ending with
+// a dot is resolved on each check. A failed lookup reuses the last address:
+// the cluster's DNS or API server being away is not this replica's backend
+// being away, and restarting every replica would not bring it back.
 type backendHealth struct {
-	host, port string
+	name       string // the backend, for logs
+	host, port string // host is "" for a Service
+	listed     func() bool
 	// timeout bounds a check, lookup and dial together, below a kubelet
 	// probe's one-second timeout.
 	timeout time.Duration
@@ -38,12 +43,24 @@ type backendHealth struct {
 	down string // why the last check failed; empty while up
 }
 
-func newBackendHealth(host string, port int) *backendHealth {
+// newBackendHealth checks be; a Service backend reads services, which
+// listed reports has had its first full list.
+func newBackendHealth(be backend, services cache.Store, listed func() bool) *backendHealth {
 	d := &net.Dialer{}
-	return &backendHealth{
-		host: host, port: strconv.Itoa(port), timeout: 800 * time.Millisecond,
-		lookup: net.DefaultResolver.LookupHost, dial: d.DialContext,
+	b := &backendHealth{
+		name: be.String(), host: be.host, port: strconv.Itoa(be.port), timeout: 800 * time.Millisecond,
+		listed: func() bool { return true }, lookup: net.DefaultResolver.LookupHost, dial: d.DialContext,
 	}
+	if be.svc != "" {
+		b.listed = listed
+		b.lookup = func(context.Context, string) ([]string, error) {
+			if ip, ok := be.addr(services); ok {
+				return []string{ip}, nil
+			}
+			return nil, fmt.Errorf("Service %s/%s has no cluster IP", be.svcNS, be.svc)
+		}
+	}
+	return b
 }
 
 func (b *backendHealth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +75,9 @@ func (b *backendHealth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // check opens and closes one TCP connection to the backend.
 func (b *backendHealth) check(ctx context.Context) error {
+	if !b.listed() {
+		return nil
+	}
 	addr, err := b.address(ctx)
 	if err == nil {
 		var c net.Conn
@@ -89,7 +109,7 @@ func (b *backendHealth) address(ctx context.Context) (string, error) {
 		return b.last, nil
 	}
 	if err == nil {
-		err = fmt.Errorf("%s has no address", b.host)
+		err = fmt.Errorf("%s has no address", b.name)
 	}
 	return "", err
 }
@@ -98,14 +118,13 @@ func (b *backendHealth) address(ctx context.Context) (string, error) {
 func (b *backendHealth) record(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	backend := net.JoinHostPort(b.host, b.port)
 	switch {
 	case err != nil && b.down == "":
 		b.down = err.Error()
-		log.Warnf("backend %s down: %v", backend, err)
+		log.Warnf("backend %s down: %v", b.name, err)
 	case err == nil && b.down != "":
 		b.down = ""
-		log.Infof("backend %s up again", backend)
+		log.Infof("backend %s up again", b.name)
 	}
 }
 

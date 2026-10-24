@@ -24,8 +24,17 @@ rejecting it, removes the name, and other names keep running.
   one older than the route's spec, does not count.
 - Wildcards and routes without `hostnames` are skipped.
 - The Gateway needs a plain HTTP listener on port 80; the edge terminates
-  TLS. `-backend` defaults to Cilium's Service name,
-  `cilium-gateway-NAME.NAMESPACE.svc:80`.
+  TLS. `-backend` defaults to Cilium's Service,
+  `cilium-gateway-NAME.NAMESPACE.svc:80`. `fortresskube` dials a Service
+  at its cluster IP, read from the API, never by name: a pod's DNS
+  search list tries a relative name such as `gw.infra.svc` as
+  `gw.infra.svc.svc.cluster.local` first, a pod's name for whoever owns
+  a namespace called `svc`. `-backend` takes `NAME.NAMESPACE.svc:PORT`
+  for a Service, or an IP or a name ending with a dot
+  (`gw.example.internal.:80`), and a port; another name is refused at
+  start. While the Service has no cluster IP (missing, headless, or
+  `ExternalName`) the HTTP names are not published, and each is logged
+  and counted (`backend_service`).
 - Nothing is published until the first full list of each resource it
   reads arrives, and an API server outage keeps the last lists. A list
   still missing after 30 s is warned about: usually a permission the
@@ -35,10 +44,11 @@ rejecting it, removes the name, and other names keep running.
 - Outside a cluster, `-kubeconfig` (or `KUBECONFIG`) points it at one.
 - TLSRoutes it has accepted become [TCP routes](#tcp-routes).
 - `-metrics :9100` serves its own Prometheus metrics on `/metrics`:
-  `fortresskube_published_names{kind}`, the TLSRoutes it refuses
-  (`fortresskube_refused_tlsroutes{reason}`,
-  `fortresskube_tlsroute_refusals_total{reason}`), and its tunnel (see
-  **An edge service with several edges** below). Off by default.
+  `fortresskube_published_names{kind}`, the HTTPRoutes and TLSRoutes it
+  refuses (`fortresskube_refused_httproutes{reason}`,
+  `fortresskube_httproute_refusals_total{reason}`, and the same for
+  `tlsroute`), and its tunnel (see **An edge service with several edges**
+  below). Off by default.
 - `-renew 5m` opens a new tunnel at about that age and retires the old
   one, for an edge service that spreads tunnels over several edges. Off
   by default. See **An edge service with several edges** below.
@@ -153,8 +163,10 @@ gets to `-backend`. If it cannot reach the backend while the others can,
 its tunnel stays up and the edge keeps sending it its share, which fails.
 `-health :8081` lets the kubelet take such a replica out: `/healthz`
 answers `200` while a TCP connection to `-backend` opens and `503` while
-not, with the reason. A liveness probe on it restarts the replica, its
-tunnel closes, and the edge sends its share to the others.
+not, with the reason. A Service is checked at its cluster IP, as the
+proxies dial it, and passes until the replica has listed the Services.
+A liveness probe on it restarts the replica, its tunnel closes, and the
+edge sends its share to the others.
 
 ```yaml
 livenessProbe:

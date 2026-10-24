@@ -54,11 +54,14 @@ type routeKind struct {
 	name         string   // as a listener's allowedRoutes kinds name it
 	protocols    []string // of the listeners that take it
 	resolvedRefs bool     // ResolvedRefs=True needed too: fortresskube dials the route's backend itself
+	refusals     []string // why one, or a hostname of it, may be refused
 }
 
 var (
-	httpKind = routeKind{"HTTPRoute", []string{"HTTP", "HTTPS"}, false}
-	tlsKind  = routeKind{"TLSRoute", []string{"TLS"}, true}
+	httpKind = routeKind{"HTTPRoute", []string{"HTTP", "HTTPS"}, false, []string{refusedService}}
+	tlsKind  = routeKind{"TLSRoute", []string{"TLS"}, true, []string{
+		refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute,
+	}}
 )
 
 // gatewayOf is the Gateway ns/name in v, with its GatewayClass's
