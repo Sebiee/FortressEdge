@@ -506,31 +506,109 @@ func CheckEdge(edge []byte) error {
 	return applyEdge(&c, edge)
 }
 
-// ParsePolicy reads policy.yml. Empty is the defaults.
+// ParsePolicy reads policy.yml as an operator sends it, and refuses all of
+// it for any problem. Empty is the defaults.
 func ParsePolicy(b []byte) (Policy, error) {
+	p, problems := parsePolicy(b, true)
+	if len(problems) > 0 {
+		return Policy{}, problems[0]
+	}
+	return p, nil
+}
+
+// ParseStoredPolicy reads policy.yml as the data disk holds it, at boot,
+// and keeps what it can: a key it does not know is skipped, a part that
+// does not parse keeps its default, and the block list may be longer than
+// ParsePolicy takes, since XDP's maps are empty at boot and decide then.
+// problems says what was not taken. An edge rolled back past a key, or
+// upgraded past a check that tightened, so boots with the rest of its
+// policy, the block list among it.
+func ParseStoredPolicy(b []byte) (p Policy, problems []error) {
+	return parsePolicy(b, false)
+}
+
+// parsePolicy reads each part of policy.yml on its own: a part sets its
+// field only when all of it parses. strict stops at the first problem.
+func parsePolicy(b []byte, strict bool) (Policy, []error) {
 	p := Policy{
 		Limits:            DefaultLimits(),
 		AccessLog:         AccessLog{MaxSize: DefaultAccessLogMaxSize, MaxFiles: DefaultAccessLogMaxFiles},
 		TunnelGrace:       DefaultTunnelGrace,
 		TunnelDeadTimeout: DefaultTunnelDeadTimeout,
 	}
-	if err := checkKeys(b, PolicyName, policyKeys, edgeKeys,
-		"belongs in "+EdgeFile+", which is baked into the ISO: bake a new one to change it"); err != nil {
-		return Policy{}, err
-	}
 	var y policyConfig
 	if err := yaml.Unmarshal(b, &y); err != nil {
-		return Policy{}, fmt.Errorf("%s: %w", PolicyName, err)
+		return p, []error{fmt.Errorf("%s: %w", PolicyName, err)}
 	}
-	if err := checkNested(b, "trace", "sites"); err != nil {
-		return Policy{}, err
+	var problems []error
+	// bad records a problem, and reports whether to stop.
+	bad := func(err error) bool {
+		problems = append(problems, err)
+		return strict
+	}
+	if err := checkKeys(b, PolicyName, policyKeys, edgeKeys,
+		"belongs in "+EdgeFile+", which is baked into the ISO: bake a new one to change it"); err != nil && bad(err) {
+		return p, problems
+	}
+	if err := checkNested(b, "trace", "sites"); err != nil && bad(err) {
+		return p, problems
 	}
 	var err error
-	if p.Block, err = parsePrefixes(y.Block, PolicyName+": block"); err != nil {
-		return Policy{}, err
+	if p.Block, err = parsePrefixes(y.Block, PolicyName+": block"); err != nil && bad(err) {
+		return p, problems
 	}
+	if strict {
+		if err := checkBlockCount(p.Block); err != nil {
+			return p, append(problems, err)
+		}
+	}
+	if p.Exempt, err = parsePrefixes(y.Exempt, PolicyName+": exempt"); err != nil && bad(err) {
+		return p, problems
+	}
+	if err := applyLimits(&p.Limits, y.Limits); err != nil && bad(err) {
+		return p, problems
+	}
+	if err := applyAccessLog(&p.AccessLog, y); err != nil && bad(err) {
+		return p, problems
+	}
+	if y.Trace != nil {
+		p.Trace.TrustIncoming = y.Trace.TrustIncoming
+	}
+	if s := strings.TrimSpace(y.TunnelGrace); s != "" {
+		d, err := time.ParseDuration(s)
+		if err == nil && d >= 0 && d <= maxTunnelGrace {
+			p.TunnelGrace = d
+		} else if bad(fmt.Errorf("%s: tunnel_grace: want a duration from 0 (never) to 720h, such as 10m", PolicyName)) {
+			return p, problems
+		}
+	}
+	if s := strings.TrimSpace(y.TunnelDeadTimeout); s != "" {
+		d, err := time.ParseDuration(s)
+		if err == nil && d >= 0 && d <= maxTunnelDeadTimeout && d%time.Second == 0 {
+			p.TunnelDeadTimeout = d
+		} else if bad(fmt.Errorf("%s: tunnel_dead_timeout: want whole seconds from 0 (off) to 10m, such as 3s", PolicyName)) {
+			return p, problems
+		}
+	}
+	if s := strings.TrimSpace(y.Collector); s != "" {
+		host, port, err := net.SplitHostPort(s)
+		if n, perr := strconv.Atoi(port); err == nil && perr == nil && host != "" && n >= 1 && n <= 65535 {
+			p.Collector = s
+		} else if bad(fmt.Errorf("%s: collector: want host:port, or gateway:port for the edge's gateway, such as gateway:9464", PolicyName)) {
+			return p, problems
+		}
+	}
+	if p.Sites, err = parseSites(y.Sites); err != nil && bad(err) {
+		return p, problems
+	}
+	return p, problems
+}
+
+// checkBlockCount refuses a block list XDP could not swap in for another:
+// its maps hold twice MaxBlockPrefixes of each family.
+func checkBlockCount(block []netip.Prefix) error {
 	var v4, v6 int
-	for _, b := range p.Block {
+	for _, b := range block {
 		if b.Addr().Unmap().Is4() {
 			v4++
 		} else {
@@ -538,46 +616,10 @@ func ParsePolicy(b []byte) (Policy, error) {
 		}
 	}
 	if v4 > MaxBlockPrefixes || v6 > MaxBlockPrefixes {
-		return Policy{}, fmt.Errorf("%s: block: %d IPv4 and %d IPv6 prefixes; XDP holds at most %d of each, so merge some into wider ones",
+		return fmt.Errorf("%s: block: %d IPv4 and %d IPv6 prefixes; XDP holds at most %d of each, so merge some into wider ones",
 			PolicyName, v4, v6, MaxBlockPrefixes)
 	}
-	if p.Exempt, err = parsePrefixes(y.Exempt, PolicyName+": exempt"); err != nil {
-		return Policy{}, err
-	}
-	if err := applyLimits(&p.Limits, y.Limits); err != nil {
-		return Policy{}, err
-	}
-	if err := applyAccessLog(&p.AccessLog, y); err != nil {
-		return Policy{}, err
-	}
-	if y.Trace != nil {
-		p.Trace.TrustIncoming = y.Trace.TrustIncoming
-	}
-	if s := strings.TrimSpace(y.TunnelGrace); s != "" {
-		d, err := time.ParseDuration(s)
-		if err != nil || d < 0 || d > maxTunnelGrace {
-			return Policy{}, fmt.Errorf("%s: tunnel_grace: want a duration from 0 (never) to 720h, such as 10m", PolicyName)
-		}
-		p.TunnelGrace = d
-	}
-	if s := strings.TrimSpace(y.TunnelDeadTimeout); s != "" {
-		d, err := time.ParseDuration(s)
-		if err != nil || d < 0 || d > maxTunnelDeadTimeout || d%time.Second != 0 {
-			return Policy{}, fmt.Errorf("%s: tunnel_dead_timeout: want whole seconds from 0 (off) to 10m, such as 3s", PolicyName)
-		}
-		p.TunnelDeadTimeout = d
-	}
-	if s := strings.TrimSpace(y.Collector); s != "" {
-		host, port, err := net.SplitHostPort(s)
-		if n, perr := strconv.Atoi(port); err != nil || perr != nil || host == "" || n < 1 || n > 65535 {
-			return Policy{}, fmt.Errorf("%s: collector: want host:port, or gateway:port for the edge's gateway, such as gateway:9464", PolicyName)
-		}
-		p.Collector = s
-	}
-	if p.Sites, err = parseSites(y.Sites); err != nil {
-		return Policy{}, err
-	}
-	return p, nil
+	return nil
 }
 
 // parseSites reads policy.yml's sites. A key is a DNS name or a wildcard
@@ -894,7 +936,9 @@ func applyACME(c *Config, e edgeConfig) error {
 	return nil
 }
 
-func applyAccessLog(a *AccessLog, y policyConfig) error {
+// applyAccessLog sets *dst from y, or, when part of y is wrong, leaves it.
+func applyAccessLog(dst *AccessLog, y policyConfig) error {
+	a := *dst
 	a.On = y.AccessLog
 	if s := strings.TrimSpace(y.AccessLogMaxSize); s != "" {
 		n, err := parseSize(s)
@@ -909,13 +953,16 @@ func applyAccessLog(a *AccessLog, y policyConfig) error {
 		}
 		a.MaxFiles = n
 	}
+	*dst = a
 	return nil
 }
 
-func applyLimits(l *Limits, y *limitsYAML) error {
+// applyLimits sets *dst from y, or, when part of y is wrong, leaves it.
+func applyLimits(dst *Limits, y *limitsYAML) error {
 	if y == nil {
 		return nil
 	}
+	l := *dst
 	count := func(dst *int, v *int, key string) error {
 		if v == nil {
 			return nil
@@ -1012,6 +1059,7 @@ func applyLimits(l *Limits, y *limitsYAML) error {
 		}
 		l.TCPIdleTimeout = d
 	}
+	*dst = l
 	return nil
 }
 

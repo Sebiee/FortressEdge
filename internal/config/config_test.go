@@ -554,6 +554,63 @@ func TestPolicyBlockFitsXDP(t *testing.T) {
 	}
 }
 
+// A stored policy is read at boot by whatever edge boots: one rolled back
+// past a key, or upgraded past a check that tightened. It keeps every part
+// it can, the block list above all, where a PUT of the same file is refused.
+func TestParseStoredPolicyKeepsWhatItCan(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("exempt: [192.0.2.7]\nlimits:\n  requests_per_second: 2\n  request_burst: 2\n")
+	b.WriteString("sites:\n  app.example.com:\n    access_log: true\n    from_a_newer_edge: 1\n")
+	b.WriteString("tunnel_grace: forever\nwaf: on\nblock:\n")
+	for i := range MaxBlockPrefixes + 1 {
+		fmt.Fprintf(&b, "  - 10.%d.%d.0/24\n", i>>8, i&255)
+	}
+	stored := []byte(b.String())
+
+	if _, err := ParsePolicy(stored); err == nil {
+		t.Fatal("ParsePolicy took it")
+	}
+	p, problems := ParseStoredPolicy(stored)
+	if len(p.Block) != MaxBlockPrefixes+1 {
+		t.Errorf("block: %d prefixes, want all %d: XDP decides at boot", len(p.Block), MaxBlockPrefixes+1)
+	}
+	if len(p.Exempt) != 1 || p.Limits.RequestsPerSecond != 2 || p.Limits.RequestBurst != 2 {
+		t.Errorf("exempt %v, limits %+v: not the stored ones", p.Exempt, p.Limits)
+	}
+	if s := p.Site("app.example.com", "app.example.com"); !s.AccessLog {
+		t.Errorf("sites: app.example.com lost its access_log")
+	}
+	if p.TunnelGrace != DefaultTunnelGrace {
+		t.Errorf("tunnel_grace %s, want the default for a value it cannot read", p.TunnelGrace)
+	}
+	var all strings.Builder
+	for _, err := range problems {
+		fmt.Fprintln(&all, err)
+	}
+	for _, want := range []string{`unknown key "waf"`, "from_a_newer_edge", "tunnel_grace"} {
+		if !strings.Contains(all.String(), want) {
+			t.Errorf("problems lack %q:\n%s", want, all.String())
+		}
+	}
+	if strings.Contains(all.String(), "block") {
+		t.Errorf("a block list over the PUT limit is a problem at boot:\n%s", all.String())
+	}
+
+	// A part that does not parse keeps its default, whole: never half the
+	// stored limits with half the defaults.
+	p, problems = ParseStoredPolicy([]byte("block: [192.0.2.9]\nlimits:\n  requests_per_second: 5\n  request_burst: 0\n"))
+	if len(problems) != 1 || p.Limits != DefaultLimits() || len(p.Block) != 1 {
+		t.Errorf("bad limits: %+v %v %v", p.Limits, p.Block, problems)
+	}
+	p, problems = ParseStoredPolicy([]byte("block: [\n"))
+	if len(problems) != 1 || p.Limits != DefaultLimits() || len(p.Block) != 0 {
+		t.Errorf("not YAML: %+v %v", p, problems)
+	}
+	if p, problems := ParseStoredPolicy(nil); len(problems) != 0 || p.Limits != DefaultLimits() {
+		t.Errorf("none stored: %+v %v", p, problems)
+	}
+}
+
 func TestPolicyRebootFrom(t *testing.T) {
 	cur := Policy{Limits: DefaultLimits()}
 	next := cur
