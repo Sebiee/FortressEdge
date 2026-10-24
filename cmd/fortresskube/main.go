@@ -489,7 +489,7 @@ func (p *publisher) published(v view, gw *gateway) (names map[string]bool, proxi
 		ls := gw.accepted(&r, &httpKind, labelsOf(v, r.Metadata.Namespace))
 		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
-			if len(k8svalidation.IsDNS1123Subdomain(h)) > 0 || !covers(ls, h) {
+			if len(k8svalidation.IsDNS1123Subdomain(h)) > 0 || !gw.covers(ls, &httpKind, h) {
 				continue
 			}
 			if p.static[h] {

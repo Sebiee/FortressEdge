@@ -51,10 +51,13 @@ type routeGroupKind struct {
 // routeKind is what fortresskube's reading of a route takes from its
 // kind.
 type routeKind struct {
-	name         string   // as a listener's allowedRoutes kinds name it
-	protocols    []string // of the listeners that take it
-	resolvedRefs bool     // ResolvedRefs=True needed too: fortresskube dials the route's backend itself
-	refusals     []string // why one, or a hostname of it, may be refused
+	name      string   // as a listener's allowedRoutes kinds name it
+	protocols []string // of the listeners that take it
+	// dialed: fortresskube dials the route's backend itself, in the place
+	// of the Gateway's proxy, so it needs ResolvedRefs=True too, and routes
+	// a name as the Gateway would, by its most specific listener alone.
+	dialed   bool
+	refusals []string // why one, or a hostname of it, may be refused
 }
 
 var (
@@ -145,7 +148,7 @@ func (g *gateway) accepted(r *route, k *routeKind, nsLabels labels.Set) []listen
 	for _, p := range r.Spec.ParentRefs {
 		ref := p.key(r.Metadata.Namespace)
 		if ref.group != gatewayGroup || ref.kind != "Gateway" || ref.namespace != g.ns || ref.name != g.name ||
-			!g.says(r, ref, "Accepted") || k.resolvedRefs && !g.says(r, ref, "ResolvedRefs") {
+			!g.says(r, ref, "Accepted") || k.dialed && !g.says(r, ref, "ResolvedRefs") {
 			continue
 		}
 		for _, l := range g.listeners {
@@ -182,15 +185,40 @@ func (l *listener) takes(k *routeKind, ns, gwNS string, nsLabels labels.Set) boo
 	return false
 }
 
-// covers reports whether a listener of ls takes the exact hostname h:
-// one without a hostname, one with h, or one whose wildcard h is under,
-// by one label or more.
-func covers(ls []listener, h string) bool {
-	return slices.ContainsFunc(ls, func(l listener) bool {
-		lh := strings.ToLower(l.Hostname)
-		suffix, wildcard := strings.CutPrefix(lh, "*")
-		return lh == "" || lh == h || wildcard && strings.HasSuffix(h, suffix)
-	})
+// covers reports whether a listener of ls, accepted listeners of g for
+// a route of kind k, takes the exact hostname h. For a kind fortresskube
+// dials itself, the listener must also be one of g's most specific for
+// h among those of k's protocols, whatever their port: the Gateway sends
+// h to that listener alone, and the edge has one port for all of them.
+func (g *gateway) covers(ls []listener, k *routeKind, h string) bool {
+	best := -1
+	for _, l := range g.listeners {
+		if k.dialed && slices.Contains(k.protocols, l.Protocol) && l.matches(h) {
+			best = max(best, l.rank())
+		}
+	}
+	return slices.ContainsFunc(ls, func(l listener) bool { return l.matches(h) && l.rank() >= best })
+}
+
+// matches reports whether l takes the exact hostname h: l has no
+// hostname, has h, or has a wildcard h is under, by one label or more.
+func (l *listener) matches(h string) bool {
+	lh := strings.ToLower(l.Hostname)
+	suffix, wildcard := strings.CutPrefix(lh, "*")
+	return lh == "" || lh == h || wildcard && strings.HasSuffix(h, suffix)
+}
+
+// rank orders the listeners that match one name, most specific last, as
+// Gateway API does: none, then the shorter wildcard, then the longer,
+// then the exact name.
+func (l *listener) rank() int {
+	switch {
+	case l.Hostname == "":
+		return 0
+	case strings.HasPrefix(l.Hostname, "*"):
+		return 2 * len(l.Hostname)
+	}
+	return 2*len(l.Hostname) + 1
 }
 
 // says reports whether g's controller set the condition typ True for

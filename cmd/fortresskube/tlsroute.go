@@ -107,7 +107,7 @@ func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool)
 			switch {
 			case strings.Contains(h, "*") || len(k8svalidation.IsDNS1123Subdomain(h)) > 0:
 				why = refusedHostname
-			case !covers(ls, h):
+			case !gw.covers(ls, &tlsKind, h):
 				continue
 			case p.static[h]:
 				why = refusedStatic
