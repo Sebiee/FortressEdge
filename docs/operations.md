@@ -573,7 +573,9 @@ request's body must bring a byte, and each write of its response (up to
 32 KiB) must be taken, within that minute. A long upload on a slow link,
 a stream quiet between its events, and a WebSocket go on. A body that
 stops is answered `408` and counted as the site's `body_timeout`; a
-response the visitor stops reading is cut. An HTTP/2 connection that
+response the visitor stops reading is cut. A body nothing read, because
+the edge answered first (a `429`, a redirect), has the same minute to
+arrive before the connection closes. An HTTP/2 connection that
 sends nothing for 30 seconds gets a ping, and is closed when 15 more
 pass without its answer.
 

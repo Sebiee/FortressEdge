@@ -428,7 +428,7 @@ func serve(ctx context.Context, servers []*http.Server, track *conns, vis *visit
 		if s.TLSConfig == nil {
 			ln = quietOnly(s, ln)
 		}
-		s.Handler = socks.handler(s.Handler)
+		s.Handler = socks.handler(unreadBodyDeadline(s.Handler))
 		go func(s *http.Server, ln net.Listener) {
 			if s.TLSConfig != nil {
 				errc <- s.ServeTLS(tlsOnly{ln}, "", "")
@@ -497,6 +497,25 @@ func (c *tlsOnlyConn) Read(b []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// unreadBodyDeadline gives net/http stallTimeout to read what h left unread
+// of a request body: it reads up to 256 KiB more after the handler, to
+// keep an HTTP/1 connection, with no deadline, so a body that never comes
+// would hold the connection for good. net/http sets its own deadline for
+// the connection's next request.
+func unreadBodyDeadline(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		if r.ProtoMajor != 1 {
+			return
+		}
+		// Write fails once a handler has hijacked the connection (a
+		// WebSocket, frp control): its deadlines are not net/http's.
+		if _, err := w.Write(nil); err == nil {
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(stallTimeout))
+		}
+	})
 }
 
 // quietOnly makes s's connections on ln send nothing until a handler runs

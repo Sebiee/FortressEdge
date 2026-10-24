@@ -672,32 +672,10 @@ func TestOptionsStarForTheAddressGetsNoBytes(t *testing.T) {
 func TestPort80SendsOnlyRedirects(t *testing.T) {
 	d := NewDomains("tunnel.example.com")
 	d.Domain("app.example.com", true)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
-	s := newServer(addr, redirectHTTPS(d.KnownHTTP), nil)
-	s.MaxHeaderBytes = 4096
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, []*http.Server{s}, newConns(), nil, &sockets{}, nil, time.Second) }()
-	t.Cleanup(func() { cancel(); <-done })
+	addr := servePort80(t, redirectHTTPS(d.KnownHTTP))
 	send := func(req string) []byte {
 		t.Helper()
-		c, err := net.Dial("tcp", addr)
-		for start := time.Now(); err != nil && time.Since(start) < 5*time.Second; {
-			time.Sleep(10 * time.Millisecond)
-			c, err = net.Dial("tcp", addr)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-		_, _ = io.WriteString(c, req)
-		b, _ := io.ReadAll(c)
+		b, _ := exchangeRaw(t, addr, req)
 		return b
 	}
 	// A served name is public (certificate transparency), so the request
@@ -720,6 +698,86 @@ func TestPort80SendsOnlyRedirects(t *testing.T) {
 			t.Errorf("%.40q got %q", req, b)
 		}
 	}
+}
+
+// A body its handler left unread does not hold the connection: net/http
+// reads up to 256 KiB more of it once the handler returns, to keep the
+// connection, and a body that never came held it for good.
+func TestUnreadBodyHoldsNoConnection(t *testing.T) {
+	shortStall(t, 200*time.Millisecond)
+	d := NewDomains("tunnel.example.com")
+	d.Domain("app.example.com", true)
+	addr := servePort80(t, redirectHTTPS(d.KnownHTTP))
+	b, err := exchangeRaw(t, addr, "POST /x HTTP/1.1\r\nHost: app.example.com\r\nContent-Length: 10\r\n\r\n")
+	if !strings.HasPrefix(string(b), "HTTP/1.1 308 ") || err != nil {
+		t.Fatalf("got %q, then %v", b, err)
+	}
+
+	// A connection a handler hijacked is its own, even once that handler
+	// has returned.
+	addr = servePort80(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		go func() {
+			defer c.Close()
+			line, _ := rw.ReadString('\n')
+			io.WriteString(c, "echo "+line)
+		}()
+	}))
+	c := dialServe(t, addr)
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
+	time.Sleep(time.Second)
+	io.WriteString(c, "hi\n")
+	if line, err := bufio.NewReader(c).ReadString('\n'); line != "echo hi\n" {
+		t.Fatalf("hijacked, after five times stallTimeout: %q, %v", line, err)
+	}
+}
+
+// servePort80 serves h through serve, as Serve does port 80, and returns
+// its address.
+func servePort80(t *testing.T, h http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	s := newServer(addr, h, nil)
+	s.MaxHeaderBytes = 4096
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, []*http.Server{s}, newConns(), nil, &sockets{}, nil, time.Second) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return addr
+}
+
+// exchangeRaw writes req on a new connection to addr and reads until the
+// server closes it, or for 5 s.
+func exchangeRaw(t *testing.T, addr, req string) ([]byte, error) {
+	t.Helper()
+	c := dialServe(t, addr)
+	_, _ = io.WriteString(c, req)
+	return io.ReadAll(c)
+}
+
+// dialServe connects to addr once serve listens there, for 5 s.
+func dialServe(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	for start := time.Now(); err != nil && time.Since(start) < 5*time.Second; {
+		time.Sleep(10 * time.Millisecond)
+		c, err = net.Dial("tcp", addr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	return c
 }
 
 func TestWantsACMEALPN(t *testing.T) {
