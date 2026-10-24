@@ -224,14 +224,13 @@ func run() error {
 			func(p config.Policy) error {
 				return filt.SetSYNRate(flod.SYNRate{PerSecond: p.Limits.NewConnsPerSecond, Burst: p.Limits.NewConnBurst})
 			},
-			func(p config.Policy) error {
-				next := cfg
-				next.Policy = p
-				consoleStatus(true, true, next)
-				return nil
-			},
 		},
 		Store: func(b []byte) error { return initos.StorePolicy(config.PolicyFile, b) },
+		Commit: []func(config.Policy){func(p config.Policy) {
+			next := cfg
+			next.Policy = p
+			consoleStatus(true, true, next)
+		}},
 		Reboot: func() {
 			wantReboot.Store(true)
 			stop()
