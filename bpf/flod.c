@@ -63,7 +63,8 @@ struct {
 #define ETHERTYPE_LLC 0
 
 // The policy's block list. Each map holds twice the prefixes of its family
-// a policy may list, so a new list goes in before the old one leaves.
+// a policy may list (config.MaxBlockPrefixes), so a new list goes in
+// before the old one leaves.
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, 16384);

@@ -173,7 +173,7 @@ certificate check that tolerates a clock off by days.
 - **TLS fingerprint.** Only the edge sees the ClientHello. It can compute
   JA4 and forward it as a header, so gateway rules can use it.
 - **IP reputation.** Lists such as Spamhaus DROP loaded into the XDP
-  block list on a timer. Needs `max_entries` above 1024 in `bpf/flod.c`.
+  block list on a timer, within its 8192 prefixes of each family.
 
 ## Silence gaps
 
