@@ -412,12 +412,12 @@ var h1Vectors = []h1Vector{
 		want: []int{}},
 	{name: "plain HTTP: OPTIONS * for the address", plain: true, raw: "OPTIONS * HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n",
 		want: []int{}},
-	// net/http answers a request it cannot parse before any edge code
-	// runs, so these get its 400 though no name was given.
+	// net/http refuses these before any edge code runs; its 400 never
+	// leaves the edge.
 	{name: "plain HTTP: no Host", plain: true, raw: "GET / HTTP/1.1\r\n\r\n",
-		want: []int{400}},
+		want: []int{}},
 	{name: "plain HTTP: garbage", plain: true, raw: "\x16\x03\x01\x00\x05hello\r\n\r\n",
-		want: []int{400}},
+		want: []int{}},
 }
 
 // h2Vector is one HTTP/2 stream: header fields exactly as given (HPACK
