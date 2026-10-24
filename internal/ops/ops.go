@@ -82,12 +82,15 @@ type Handler struct {
 	mu     sync.RWMutex
 	cfg    config.Config // its policy is the one in force
 	policy []byte        // policy.yml as stored; nil before the first apply
-	// boot is the policy the edge started with, whose boot limits the
-	// servers keep until they restart.
-	boot   config.Policy
 	bootID string
 	dir    string
 	extra  func() map[string]any
+	// boot is the policy the edge started with, whose boot limits the
+	// servers keep until they restart.
+	boot config.Policy
+	// degraded says why part of the stored policy is not in force; empty
+	// when all of it is.
+	degraded []string
 	// metrics writes the edge's metrics; the ops API adds its own.
 	metrics func(*metrics.Writer)
 	apply   Apply
@@ -109,6 +112,22 @@ func (h *Handler) SetMetrics(fn func(*metrics.Writer)) { h.metrics = fn }
 
 // SetApply registers the policy PUT.
 func (h *Handler) SetApply(a Apply) { h.apply = a }
+
+// SetDegraded records what boot could not put in force of the stored
+// policy, and why. A policy put through the API is in force whole, and
+// clears it.
+func (h *Handler) SetDegraded(reasons []string) {
+	h.mu.Lock()
+	h.degraded = slices.Clone(reasons)
+	h.mu.Unlock()
+}
+
+// degradedNow is SetDegraded's reasons, and those a failed put added.
+func (h *Handler) degradedNow() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return append([]string{}, h.degraded...)
+}
 
 func (h *Handler) config() config.Config {
 	h.mu.RLock()
@@ -272,7 +291,8 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 	h.applyMu.Lock()
 	defer h.applyMu.Unlock()
 	h.mu.RLock()
-	same := bytes.Equal(b, h.policy) && (b != nil) == (h.policy != nil)
+	// A degraded edge runs less than it stored: the same body is applied.
+	same := len(h.degraded) == 0 && bytes.Equal(b, h.policy) && (b != nil) == (h.policy != nil)
 	prev := h.cfg.Policy
 	h.mu.RUnlock()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -296,6 +316,7 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.cfg.Policy = p
 	h.policy = b
+	h.degraded = nil
 	h.mu.Unlock()
 	w.Header().Set("ETag", config.PolicyETag(b))
 	if reboot {
@@ -313,7 +334,8 @@ func (h *Handler) putPolicy(w http.ResponseWriter, r *http.Request) {
 
 // put runs the steps that put p in force, in order, then stores body.
 // When one fails, or the store does, it runs the steps that ran again with
-// prev, newest first.
+// prev, newest first. A step that cannot be undone leaves the edge
+// degraded.
 func (h *Handler) put(p, prev config.Policy, body []byte) error {
 	steps := h.apply.Steps
 	ran := 0
@@ -331,6 +353,9 @@ func (h *Handler) put(p, prev config.Policy, body []byte) error {
 	for _, step := range slices.Backward(steps[:ran]) {
 		if uerr := step(prev); uerr != nil {
 			err = fmt.Errorf("%w; restoring the previous policy: %w", err, uerr)
+			h.mu.Lock()
+			h.degraded = append(h.degraded, "restoring the policy in force after a refused one: "+uerr.Error())
+			h.mu.Unlock()
 		}
 	}
 	return err
@@ -538,6 +563,8 @@ func (h *Handler) status(w http.ResponseWriter, _ *http.Request) {
 		"quic":           cfg.QUIC,
 		"blocked":        len(cfg.Block),
 		"log_cursor":     cursor{h.bootID, pathSize(h.path("current.log"))}.String(),
+		// Why part of the stored policy is not in force; empty when all is.
+		"policy_degraded": h.degradedNow(),
 	}
 	if h.extra != nil {
 		for k, v := range h.extra() {
@@ -566,6 +593,12 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 		mw.Family("fortressedge_ready_time_seconds", "gauge", "When the edge first accepted connections on 80 and 443, dark nodes' among them, in Unix seconds.")
 		mw.Sample("fortressedge_ready_time_seconds", at)
 	}
+	mw.Family("fortressedge_policy_degraded", "gauge", "1 while part of the stored policy is not in force, as policy_degraded in the status says why; 0 otherwise.")
+	degraded := int64(0)
+	if len(h.degradedNow()) > 0 {
+		degraded = 1
+	}
+	mw.Int("fortressedge_policy_degraded", degraded)
 	if h.metrics != nil {
 		h.metrics(mw)
 	}

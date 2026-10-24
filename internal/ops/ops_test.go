@@ -670,6 +670,78 @@ func TestPolicyRefusedChangesNothing(t *testing.T) {
 	}
 }
 
+// A boot that could not load all of its stored policy says so in the
+// status and the metrics until a policy is put. The same file again is
+// applied rather than answered "unchanged": the edge runs less of it.
+func TestPolicyDegraded(t *testing.T) {
+	const stored = "block: [192.0.2.9]\nexempt: [198.51.100.7]\n"
+	cfg := testConfig()
+	p, err := config.ParsePolicy([]byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Block = nil
+	cfg.Policy = p
+	e := &fakeEdge{limits: p.Limits, file: filepath.Join(t.TempDir(), "policy.yml")}
+	h := New(cfg, []byte(stored), testBoot, t.TempDir())
+	h.SetApply(e.apply())
+	const why = "xdp block list: no space; running with no block list until the next apply"
+	h.SetDegraded([]string{why})
+	degraded := func() (status []any, metric string) {
+		t.Helper()
+		st := statusOf(t, h)
+		status, _ = st["policy_degraded"].([]any)
+		body := serve(t, h, config.OpsMetricsPath, logsID).Body.String()
+		_, rest, _ := strings.Cut(body, "\nfortressedge_policy_degraded ")
+		metric, _, _ = strings.Cut(rest, "\n")
+		return status, metric
+	}
+
+	if st, m := degraded(); len(st) != 1 || st[0] != why || m != "1" || getPolicy(t, h) != stored {
+		t.Fatalf("after boot: policy_degraded %v, metric %q, get %q", st, m, getPolicy(t, h))
+	}
+	e.full = true
+	if rec := putPolicy(h, opsID, stored); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("refused: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if st, m := degraded(); len(st) != 1 || m != "1" {
+		t.Fatalf("after a refused put: policy_degraded %v, metric %q", st, m)
+	}
+	e.full = false
+	if rec := putPolicy(h, opsID, stored); rec.Code != 200 || !strings.Contains(rec.Body.String(), "applied") || len(e.block) != 1 {
+		t.Fatalf("same file: status=%d body=%q block=%v", rec.Code, rec.Body.String(), e.block)
+	}
+	if st, m := degraded(); st == nil || len(st) != 0 || m != "0" || statusOf(t, h)["blocked"] != float64(1) {
+		t.Fatalf("after a put: policy_degraded %v, metric %q", st, m)
+	}
+	if rec := putPolicy(h, opsID, stored); !strings.Contains(rec.Body.String(), "unchanged") {
+		t.Fatalf("then again: %q", rec.Body.String())
+	}
+}
+
+// A step that cannot be undone leaves the edge running neither policy
+// whole, and the status says so.
+func TestPolicyUndoFailureIsDegraded(t *testing.T) {
+	h := New(testConfig(), nil, testBoot, t.TempDir())
+	runs := 0
+	h.SetApply(Apply{
+		Steps: []Step{func(config.Policy) error {
+			if runs++; runs > 1 {
+				return errors.New("xdp block list: restore failed")
+			}
+			return nil
+		}},
+		Store: func([]byte) error { return errors.New("no space left on device") },
+	})
+	rec := putPolicy(h, opsID, "block: [192.0.2.9]\n")
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "no space") || !strings.Contains(rec.Body.String(), "restore failed") {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if st, _ := statusOf(t, h)["policy_degraded"].([]any); len(st) != 1 || !strings.Contains(st[0].(string), "restore failed") {
+		t.Fatalf("policy_degraded %v", st)
+	}
+}
+
 // An edge nobody applied a policy to has an empty one.
 func TestPolicyGetNone(t *testing.T) {
 	h := New(testConfig(), nil, testBoot, t.TempDir())

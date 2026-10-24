@@ -203,6 +203,9 @@ type Extras struct {
 	// Ready is whether the edge can serve: the status's ready and the
 	// fortressedge_ready metric. Nil is never ready.
 	Ready func() bool
+	// Degraded says what boot could not put in force of the stored
+	// policy, and why (ops.Handler.SetDegraded).
+	Degraded []string
 }
 
 func (e Extras) ready() bool { return e.Ready != nil && e.Ready() }
@@ -217,8 +220,11 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	socks := &sockets{}
 	socks.setDeadTimeout(cfg.TunnelDeadTimeout)
 	acc := &accessLogs{st: st}
+	degraded := slices.Clone(more.Degraded)
+	// Not a reason to stop: the policy is on the disk, so every boot would.
 	if err := acc.apply(cfg.Policy); err != nil {
-		return err
+		slog.Error("stored policy: access log not in force until the next apply", "err", err)
+		degraded = append(degraded, err.Error()+"; running without it until the next apply")
 	}
 	track := newConns()
 	logx.SetConnections(track.Len)
@@ -233,6 +239,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	tcp := newStreams(ctx, notTunnel(cfg.Tunnel, routes), nil, lim, vis, socks, st)
 	// The ops API rides the tunnel SNI's mTLS.
 	oh := ops.New(cfg, policy, logx.BootID(), config.LogDir)
+	oh.SetDegraded(degraded)
 	oh.SetStatus(func() map[string]any {
 		m := statusExtra(st, filt, track, vis)
 		m["tcp_routes"] = tcp.snapshot()
@@ -260,12 +267,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			f(w)
 		}
 	})
-	apply.Steps = append(apply.Steps, func(p config.Policy) error {
-		// The access log is the part that can fail: first, so nothing has
-		// changed when it does.
-		if err := acc.apply(p); err != nil {
-			return err
-		}
+	apply.Steps = append(apply.Steps, acc.apply, func(p config.Policy) error {
 		vis.update(p)
 		domains.SetTunnelGrace(p.TunnelGrace)
 		socks.setDeadTimeout(p.TunnelDeadTimeout)

@@ -124,17 +124,22 @@ func run() error {
 			slog.Warn("persistent log unavailable", "err", err)
 		}
 	}
+	// Nothing in the stored policy stops the boot: it would still be on the
+	// disk at the next one, and the edge would never come up to take a
+	// fix. What does not load is left out until the next apply, and the
+	// status and metrics say so.
+	var degraded []string
 	policy, err := initos.LoadPolicy(config.PolicyFile)
 	if err != nil {
-		return err
-	}
-	if p, err := config.ParsePolicy(policy); err != nil {
-		// Not a reason to stay down: the next apply replaces it, and until
-		// then diff shows the edge has none.
-		slog.Error("stored policy invalid; running the defaults until the next apply", "err", err)
+		slog.Error("stored policy unreadable; running the defaults until the next apply", "err", err)
+		degraded = append(degraded, err.Error()+"; running the defaults until the next apply")
 		policy = nil
-	} else {
-		cfg.Policy = p
+	}
+	var problems []error
+	cfg.Policy, problems = config.ParseStoredPolicy(policy)
+	for _, err := range problems {
+		slog.Error("stored policy: part left out until the next apply", "err", err)
+		degraded = append(degraded, err.Error()+"; left out until the next apply")
 	}
 	slog.Info("config loaded", "tunnel", cfg.Tunnel, "acme", acmeName(cfg), "cert_store", certStoreName(cfg), "quic", cfg.QUIC,
 		"disk", cfg.Disk, "ntp", cfg.NTP, "policy", policy != nil, "blocked", len(cfg.Block))
@@ -166,11 +171,18 @@ func run() error {
 	}
 	go clk.Run(ctx)
 	syn := flod.SYNRate{PerSecond: cfg.Limits.NewConnsPerSecond, Burst: cfg.Limits.NewConnBurst}
-	filt, err := flod.Attach(cfg.Iface, cfg.Block, cfg.QUIC, syn)
+	// The block list goes in once XDP is up, before anything listens: a
+	// list XDP cannot hold must not stop the boot.
+	filt, err := flod.Attach(cfg.Iface, nil, cfg.QUIC, syn)
 	if err != nil {
 		return err
 	}
 	defer filt.Close()
+	if err := filt.SetBlock(cfg.Block); err != nil {
+		slog.Error("stored policy: block list not in force until the next apply", "err", err, "prefixes", len(cfg.Block))
+		degraded = append(degraded, err.Error()+"; running with no block list until the next apply")
+		cfg.Block = nil
+	}
 	slog.Info("xdp filter up", "iface", cfg.Iface, "mode", filt.Mode(), "blocked", len(cfg.Block), "quic", cfg.QUIC,
 		"new_connections_per_second", syn.PerSecond, "new_connection_burst", syn.Burst)
 
@@ -230,7 +242,8 @@ func run() error {
 			"clock":         func() any { return clk.Status() },
 			"tunnel_groups": func() any { return frps.Groups() },
 		},
-		Ready: func() bool { return domains.TunnelCertValid(time.Now()) && len(frps.Groups()) > 0 },
+		Ready:    func() bool { return domains.TunnelCertValid(time.Now()) && len(frps.Groups()) > 0 },
+		Degraded: degraded,
 	})
 	if pid1 && wantReboot.Load() {
 		say("fortressedge: rebooting into the new policy")

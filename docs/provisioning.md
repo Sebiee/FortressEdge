@@ -254,6 +254,23 @@ one whole, is kept on the data disk, and survives reboots and new ISOs.
 `GET /~!ops/policy` returns it as applied, with its SHA-256 as the ETag;
 a new data disk starts from the defaults until the next apply.
 
+### When the stored policy does not load
+
+Nothing in the stored policy stops a boot: it would still be on the disk
+at the next one, and the edge could never come up to take a fix. A boot
+reads it leniently, as an edge rolled back past a new key or upgraded
+past a stricter check needs: a key it does not know is skipped, a part
+that does not parse keeps its default and the rest stays, and a block
+list longer than a `PUT` may send loads if XDP has room for it (XDP then
+may not hold it and a new list at once: if an apply is refused for that,
+apply a shorter block list first). A block list XDP cannot hold, or an
+access log the edge cannot open, is left out.
+Each is logged, listed under `policy_degraded` in `/~!ops/status`, and
+counted in `fortressedge_policy_degraded`. `GET /~!ops/policy` still
+returns the stored file. The next apply that succeeds, the same file
+included, clears it; a `PUT` is checked strictly, so a file the edge only
+partly read is refused with the reason.
+
 ## When an edge cannot start
 
 A missing or invalid part stops the boot. The console says what is wrong

@@ -7,7 +7,7 @@ The client certificate's role decides what it may call (see
 
 | Endpoint | Who | What it does |
 | --- | --- | --- |
-| `GET /~!ops/status` | `ops`, `logs` | JSON: boot id, uptime, network, tunnel, QUIC, open connections, limit and XDP counters, per-site counters, log cursor; `ready` and `tunnel_groups`, see [Readiness](#readiness) |
+| `GET /~!ops/status` | `ops`, `logs` | JSON: boot id, uptime, network, tunnel, QUIC, open connections, limit and XDP counters, per-site counters, log cursor; `ready` and `tunnel_groups`, see [Readiness](#readiness); `policy_degraded`, see [provisioning.md](provisioning.md#when-the-stored-policy-does-not-load) |
 | `GET /~!ops/metrics` | `ops`, `logs` | the same counters and more in Prometheus's text format, for a scraper; see [Metrics](#metrics) |
 | `GET /~!ops/logs` | `ops`, `logs` | this boot's log as text; `?follow` streams new lines |
 | `GET /~!ops/logs?format=ndjson` | `ops`, `logs` | one `{"line": ...}` object per line, for shippers |
@@ -460,6 +460,7 @@ names visitors make up.
 | `fortressedge_connections`, `fortressedge_visitors` | | open connections; sources tracked |
 | `fortressedge_bans_total`, `fortressedge_banned_sources` | | bans since boot; banned now |
 | `fortressedge_ready` | | 1 while the edge can serve sites, see [Readiness](#readiness) |
+| `fortressedge_policy_degraded` | | 1 while part of the stored policy is not in force, see [provisioning.md](provisioning.md#when-the-stored-policy-does-not-load) |
 | `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
 | `fortressedge_tunnel_group_members` | `group` | logged-in frpc by dark node (`node/<name>`): its group, which shares its names |
 | `fortressedge_tunnel_logins_total`, `fortressedge_tunnel_proxies` | | frpc logins; proxies registered |
