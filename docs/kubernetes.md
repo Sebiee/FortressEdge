@@ -313,8 +313,9 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
   the API, not the Gateway: the Gateway's proxy routes a TLS stream by
   its server name, and the edge has already ended that TLS. The Gateway
   needs a TLS listener that accepts the route and covers its hostnames
-  (as above), the route's status needs `ResolvedRefs=True` too, and a
-  network policy must let `fortresskube` reach the Service.
+  (as above), the route's status needs `ResolvedRefs=True` too (else
+  it is refused, `unresolved_backend`), and a network policy must let
+  `fortresskube` reach the Service.
 - The backend must be a `Service` in the route's own namespace, with a
   `port`; a route that names another namespace is refused, as
   `fortresskube` does not check ReferenceGrants. A missing Service, a

@@ -54,8 +54,8 @@ type routeKind struct {
 	name      string   // as a listener's allowedRoutes kinds name it
 	protocols []string // of the listeners that take it
 	// dialed: fortresskube dials the route's backend itself, in the place
-	// of the Gateway's proxy, so it needs ResolvedRefs=True too, and routes
-	// a name as the Gateway would, by its most specific listener alone.
+	// of the Gateway's proxy, so it routes a name as the Gateway would, by
+	// its most specific listener alone.
 	dialed   bool
 	refusals []string // why one, or a hostname of it, may be refused
 }
@@ -63,7 +63,8 @@ type routeKind struct {
 var (
 	httpKind = routeKind{"HTTPRoute", []string{"HTTP", "HTTPS"}, false, []string{refusedService, refusedStatic}}
 	tlsKind  = routeKind{"TLSRoute", []string{"TLS"}, true, []string{
-		refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedALPN, refusedHTTPRoute, refusedOlderTLSRoute, refusedStatic,
+		refusedNoHostnames, refusedHostname, refusedBackend, refusedNamespace, refusedService, refusedUnresolved, refusedALPN,
+		refusedHTTPRoute, refusedOlderTLSRoute, refusedStatic,
 	}}
 )
 
@@ -143,21 +144,23 @@ func (p parentRef) key(routeNS string) parentKey {
 // from r's namespace. A status entry another controller wrote, one older
 // than r's spec, or one for a parentRef r no longer has does not count;
 // nor does a listener that the status names but that does not take r.
-func (g *gateway) accepted(r *route, k *routeKind, nsLabels labels.Set) []listener {
-	var out []listener
+// resolved is whether the controller also says, at one of those
+// parentRefs, that it resolved r's references.
+func (g *gateway) accepted(r *route, k *routeKind, nsLabels labels.Set) (ls []listener, resolved bool) {
 	for _, p := range r.Spec.ParentRefs {
 		ref := p.key(r.Metadata.Namespace)
-		if ref.group != gatewayGroup || ref.kind != "Gateway" || ref.namespace != g.ns || ref.name != g.name ||
-			!g.says(r, ref, "Accepted") || k.dialed && !g.says(r, ref, "ResolvedRefs") {
+		if ref.group != gatewayGroup || ref.kind != "Gateway" || ref.namespace != g.ns || ref.name != g.name || !g.says(r, ref, "Accepted") {
 			continue
 		}
+		n := len(ls)
 		for _, l := range g.listeners {
 			if (ref.sectionName == "" || ref.sectionName == l.Name) && (ref.port == 0 || ref.port == l.Port) && l.takes(k, r.Metadata.Namespace, g.ns, nsLabels) {
-				out = append(out, l)
+				ls = append(ls, l)
 			}
 		}
+		resolved = resolved || len(ls) > n && g.says(r, ref, "ResolvedRefs")
 	}
-	return out
+	return ls, resolved
 }
 
 // takes reports whether l, of a Gateway in gwNS, takes routes of kind k

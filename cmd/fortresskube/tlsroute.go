@@ -57,6 +57,7 @@ const (
 	refusedBackend       = "invalid_backend"       // no backendRefs, not a Service, no Service name, or no port
 	refusedNamespace     = "backend_namespace"     // a Service in another namespace: no ReferenceGrant check
 	refusedService       = "backend_service"       // the Service is missing, ExternalName, or headless
+	refusedUnresolved    = "unresolved_backend"    // the Gateway's ResolvedRefs is not True
 	refusedALPN          = "invalid_alpn"          // fortressedge.io/alpn
 	refusedHTTPRoute     = "hostname_of_httproute" // a name is an HTTP name or a TCP route
 	refusedOlderTLSRoute = "hostname_of_tlsroute"  // an older TLSRoute has it
@@ -65,11 +66,12 @@ const (
 
 // publishedTLS is one tcp-tls proxy per hostname of each TLSRoute gw
 // accepted that a listener which accepted it takes, dialing the cluster
-// IP of the route's first backend Service directly: the edge ends TLS,
-// so the Gateway's proxy, which routes a TLS stream by its server name,
-// cannot take the stream. A hostname a static proxy has is refused, and
-// so are one an HTTPRoute publishes (httpNames) and one an older
-// TLSRoute holds, published or not.
+// IP of the route's first backend Service directly, once the Gateway has
+// resolved the route's references too. The edge ends TLS, so the
+// Gateway's proxy, which routes a TLS stream by its server name, cannot
+// take the stream. A hostname a static proxy has is refused, and so are
+// one an HTTPRoute publishes (httpNames) and one an older TLSRoute
+// holds, published or not.
 func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
 	rs := routes(v.tlsRoutes)
 	// The oldest route keeps a hostname two routes name.
@@ -85,12 +87,15 @@ func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool)
 		taken   = map[string]bool{}
 	)
 	for _, r := range rs {
-		ls := gw.accepted(&r, &tlsKind, labelsOf(v, r.Metadata.Namespace))
+		ls, resolved := gw.accepted(&r, &tlsKind, labelsOf(v, r.Metadata.Namespace))
 		if len(ls) == 0 {
 			continue
 		}
 		key, annotation := r.key(), r.Metadata.Annotations[alpnAnnotation]
 		ip, port, reason := backendOf(&r, v.services)
+		if reason == "" && !resolved {
+			reason = refusedUnresolved
+		}
 		if reason == "" {
 			reason = checkALPN(annotation)
 		}
