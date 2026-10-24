@@ -3,8 +3,14 @@ package certstore
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io/fs"
+	"math/big"
 	"net"
 	"slices"
 	"strings"
@@ -169,6 +175,11 @@ func TestVaultLocks(t *testing.T) {
 	}
 }
 
+// meta is a certificate's metadata, whose value only has to be JSON.
+const meta = "certificates/ca/x.example.com/x.example.com.json"
+
+var v1, v2 = []byte(`{"v":1}`), []byte(`{"v":2}`)
+
 func newDisk(t *testing.T) *certmagic.FileStorage {
 	return &certmagic.FileStorage{Path: t.TempDir()}
 }
@@ -187,25 +198,25 @@ func TestSharedReadsTheStoreFirst(t *testing.T) {
 	a, diskA := shared(t, srv)
 	b, diskB := shared(t, srv)
 
-	must(t, a.Store(ctx, "certificates/ca/x/x.crt", []byte("v1")))
-	if v, err := diskA.Load(ctx, "certificates/ca/x/x.crt"); err != nil || string(v) != "v1" {
+	must(t, a.Store(ctx, meta, v1))
+	if v, err := diskA.Load(ctx, meta); err != nil || !bytes.Equal(v, v1) {
 		t.Fatalf("a's disk: %q %v", v, err)
 	}
 	// b gets a's certificate, and keeps a copy.
-	if v, err := b.Load(ctx, "certificates/ca/x/x.crt"); err != nil || string(v) != "v1" {
+	if v, err := b.Load(ctx, meta); err != nil || !bytes.Equal(v, v1) {
 		t.Fatalf("b: %q %v", v, err)
 	}
-	if v, err := diskB.Load(ctx, "certificates/ca/x/x.crt"); err != nil || string(v) != "v1" {
+	if v, err := diskB.Load(ctx, meta); err != nil || !bytes.Equal(v, v1) {
 		t.Fatalf("b's disk: %q %v", v, err)
 	}
 	// a renews it: b reads the new one, not its copy.
-	must(t, a.Store(ctx, "certificates/ca/x/x.crt", []byte("v2")))
-	if v, _ := b.Load(ctx, "certificates/ca/x/x.crt"); string(v) != "v2" {
+	must(t, a.Store(ctx, meta, v2))
+	if v, _ := b.Load(ctx, meta); !bytes.Equal(v, v2) {
 		t.Fatalf("b after a's renewal: %q", v)
 	}
 	// a deletes it: b's copy does not bring it back.
-	must(t, a.Delete(ctx, "certificates/ca/x/x.crt"))
-	if _, err := b.Load(ctx, "certificates/ca/x/x.crt"); !errors.Is(err, fs.ErrNotExist) {
+	must(t, a.Delete(ctx, meta))
+	if _, err := b.Load(ctx, meta); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("b after a's delete: %v", err)
 	}
 	if keys, _ := b.List(ctx, "certificates", true); len(keys) != 0 {
@@ -221,19 +232,19 @@ func TestSharedServesFromDiskWhileTheStoreIsDown(t *testing.T) {
 	srv := fakeVault(t)
 	a, _ := shared(t, srv)
 	b, _ := shared(t, srv)
-	must(t, a.Store(ctx, "certificates/ca/x/x.crt", []byte("v1")))
-	if _, err := b.Load(ctx, "certificates/ca/x/x.crt"); err != nil {
+	must(t, a.Store(ctx, meta, v1))
+	if _, err := b.Load(ctx, meta); err != nil {
 		t.Fatal(err)
 	}
 
 	srv.SetDown(true)
 	start := time.Now()
-	if v, err := b.Load(ctx, "certificates/ca/x/x.crt"); err != nil || string(v) != "v1" {
+	if v, err := b.Load(ctx, meta); err != nil || !bytes.Equal(v, v1) {
 		t.Fatalf("down: %q %v", v, err)
 	}
 	calls := srv.Calls.Load()
 	for range 5 {
-		if _, err := b.Load(ctx, "certificates/ca/x/x.crt"); err != nil {
+		if _, err := b.Load(ctx, meta); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,9 +253,9 @@ func TestSharedServesFromDiskWhileTheStoreIsDown(t *testing.T) {
 	}
 	// b renews by itself, under the disk's lock.
 	must(t, b.Lock(ctx, "issue_cert_x"))
-	must(t, b.Store(ctx, "certificates/ca/x/x.crt", []byte("v2")))
+	must(t, b.Store(ctx, meta, v2))
 	must(t, b.Unlock(ctx, "issue_cert_x"))
-	if v, _ := b.Load(ctx, "certificates/ca/x/x.crt"); string(v) != "v2" {
+	if v, _ := b.Load(ctx, meta); !bytes.Equal(v, v2) {
 		t.Fatalf("its own renewal: %q", v)
 	}
 	st := b.Status()
@@ -255,7 +266,7 @@ func TestSharedServesFromDiskWhileTheStoreIsDown(t *testing.T) {
 	srv.SetDown(false)
 	time.Sleep(downFor)
 	b.flush(ctx)
-	if v, err := a.Load(ctx, "certificates/ca/x/x.crt"); err != nil || string(v) != "v2" {
+	if v, err := a.Load(ctx, meta); err != nil || !bytes.Equal(v, v2) {
 		t.Fatalf("a after b's renewal was written: %q %v", v, err)
 	}
 	if b.Status()["pending"] != 0 {
@@ -270,6 +281,93 @@ func TestSharedServesFromDiskWhileTheStoreIsDown(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("metrics lack %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+// pair is a certificate for name, valid from from to until, and its key,
+// as certmagic stores them.
+func pair(t *testing.T, name string, from, until time.Time) (crt, key []byte) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	must(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{name}, NotBefore: from, NotAfter: until}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	must(t, err)
+	kd, err := x509.MarshalECPrivateKey(k)
+	must(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kd})
+}
+
+// What Vault holds is checked before an edge copies it to its disk or
+// uses it, since every edge on the path trusts it: a value too large to
+// be a certificate, a key that is not the certificate's, a certificate for
+// another name or outside its dates, or metadata that is not JSON. The
+// edge keeps its disk's copy instead, and without one, the load fails.
+func TestSharedRefusesWhatItCannotUse(t *testing.T) {
+	ctx := context.Background()
+	srv := fakeVault(t)
+	other := client(t, srv) // anyone with the AppRole
+	s, disk := shared(t, srv)
+	const site = "certificates/ca/app.example.com/app.example.com"
+	now := time.Now()
+	crt, key := pair(t, "app.example.com", now.Add(-time.Hour), now.Add(time.Hour))
+	good := map[string][]byte{".crt": crt, ".key": key, ".json": []byte(`{"sans":["app.example.com"]}`)}
+	for ext, v := range good {
+		must(t, s.Store(ctx, site+ext, v))
+	}
+
+	_, strayKey := pair(t, "app.example.com", now.Add(-time.Hour), now.Add(time.Hour))
+	otherCrt, otherKey := pair(t, "other.example.com", now.Add(-time.Hour), now.Add(time.Hour))
+	oldCrt, oldKey := pair(t, "app.example.com", now.Add(-2*time.Hour), now.Add(-time.Hour))
+	newCrt, newKey := pair(t, "app.example.com", now.Add(time.Hour), now.Add(2*time.Hour))
+	for _, tc := range []struct {
+		name string
+		bad  map[string][]byte
+	}{
+		{"too large", map[string][]byte{".json": []byte(`"` + strings.Repeat("A", 1<<20) + `"`)}},
+		{"another key", map[string][]byte{".key": strayKey}},
+		{"another name", map[string][]byte{".crt": otherCrt, ".key": otherKey}},
+		{"expired", map[string][]byte{".crt": oldCrt, ".key": oldKey}},
+		{"not yet valid", map[string][]byte{".crt": newCrt, ".key": newKey}},
+		{"not a certificate", map[string][]byte{".crt": []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")}},
+		{"metadata", map[string][]byte{".json": []byte("{")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for ext, v := range good {
+				must(t, other.Store(ctx, site+ext, v))
+			}
+			for ext, v := range tc.bad {
+				must(t, other.Store(ctx, site+ext, v))
+			}
+			for ext, want := range good {
+				if got, err := s.Load(ctx, site+ext); err != nil || !bytes.Equal(got, want) {
+					t.Errorf("load %s: %v", ext, err)
+				}
+				if got, err := disk.Load(ctx, site+ext); err != nil || !bytes.Equal(got, want) {
+					t.Errorf("disk %s: %v", ext, err)
+				}
+			}
+			fresh, freshDisk := shared(t, srv)
+			for ext := range tc.bad {
+				if v, err := fresh.Load(ctx, site+ext); err == nil {
+					t.Errorf("an edge without a copy loads %s: %.40q", ext, v)
+				}
+				if freshDisk.Exists(ctx, site+ext) {
+					t.Errorf("%s written to the disk", ext)
+				}
+			}
+		})
+	}
+
+	// A certificate another edge renewed is taken, with its key.
+	crt2, key2 := pair(t, "app.example.com", now.Add(-time.Minute), now.Add(time.Hour))
+	must(t, other.Store(ctx, site+".key", key2))
+	must(t, other.Store(ctx, site+".crt", crt2))
+	if got, err := s.Load(ctx, site+".crt"); err != nil || !bytes.Equal(got, crt2) {
+		t.Fatalf("renewed: %v", err)
+	}
+	if got, _ := disk.Load(ctx, site+".key"); !bytes.Equal(got, key2) {
+		t.Fatal("the renewed certificate's key is not on the disk with it")
 	}
 }
 
