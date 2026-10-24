@@ -398,13 +398,15 @@ func (d *Domains) Route(host string) (string, bool) {
 	if _, ok := d.names[host]; ok && !d.tcp[host] {
 		return host, true
 	}
-	labels := strings.Split(host, ".")
-	for len(labels) >= 3 {
-		labels[0] = "*"
-		if name := strings.Join(labels, "."); d.hasLocked(name) {
+	for rest := host; ; {
+		_, parent, _ := strings.Cut(rest, ".")
+		if !strings.Contains(parent, ".") {
+			break
+		}
+		if name := "*." + parent; d.hasLocked(name) {
 			return name, true
 		}
-		labels = labels[1:]
+		rest = parent
 	}
 	if d.hasLocked("*") {
 		return "*", true
@@ -496,9 +498,10 @@ func (d *Domains) certificate(hello *tls.ClientHelloInfo) (*tls.Certificate, err
 }
 
 func (d *Domains) heldCert(name string) *tls.Certificate {
+	name = hostname(name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.heldLocked(hostname(name))
+	return d.heldLocked(name)
 }
 
 func issueable(name string) bool {

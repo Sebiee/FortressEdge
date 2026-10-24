@@ -631,11 +631,19 @@ func wantsACMEALPN(hello *tls.ClientHelloInfo) bool {
 	return len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == "acme-tls/1"
 }
 
+// hostname is host as the edge keys names: lower case, without a port or
+// one trailing dot. A host no DNS name can be, over 253 bytes or with an
+// empty label, is "": a server name or Host can be 64 KB, and every name
+// lookup would cost that, some under Domains' lock.
 func hostname(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	return strings.TrimSuffix(strings.ToLower(host), ".")
+	host = strings.TrimSuffix(host, ".")
+	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") || strings.Contains(host, "..") {
+		return ""
+	}
+	return strings.ToLower(host)
 }
 
 // acmeConfig is certmagic with its own cache and storage. The cache's
