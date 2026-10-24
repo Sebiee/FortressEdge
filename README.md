@@ -254,7 +254,7 @@ in `user-data` is read.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `block` | none | Addresses or CIDRs dropped in XDP |
+| `block` | none | Addresses or CIDRs dropped in XDP, up to 8192 of each address family |
 | `exempt` | none | Addresses or CIDRs the visitor limits and bans skip, such as a monitoring probe |
 | `limits` | see [operations](docs/operations.md#limits) | Per-source connection, request, and SYN rates, the ban length, header, URI, and body sizes, and how long an origin may take to answer; `0` turns one off |
 | `access_log` | `false` | One JSON line per site request, served at `/~!ops/access` |

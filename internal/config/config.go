@@ -77,6 +77,10 @@ const (
 	// data disk.
 	DefaultAccessLogMaxSize  = 8 << 20
 	DefaultAccessLogMaxFiles = 3
+	// MaxBlockPrefixes is how many prefixes of each address family policy.yml
+	// may block. XDP's block maps (bpf/flod.c) hold twice as many, so a new
+	// list goes in before the old one leaves.
+	MaxBlockPrefixes = 8192
 
 	// EdgeFile is the baked config, at BakedFile in the initramfs.
 	EdgeFile  = "fortress.yml"
@@ -524,6 +528,18 @@ func ParsePolicy(b []byte) (Policy, error) {
 	var err error
 	if p.Block, err = parsePrefixes(y.Block, PolicyName+": block"); err != nil {
 		return Policy{}, err
+	}
+	var v4, v6 int
+	for _, b := range p.Block {
+		if b.Addr().Unmap().Is4() {
+			v4++
+		} else {
+			v6++
+		}
+	}
+	if v4 > MaxBlockPrefixes || v6 > MaxBlockPrefixes {
+		return Policy{}, fmt.Errorf("%s: block: %d IPv4 and %d IPv6 prefixes; XDP holds at most %d of each, so merge some into wider ones",
+			PolicyName, v4, v6, MaxBlockPrefixes)
 	}
 	if p.Exempt, err = parsePrefixes(y.Exempt, PolicyName+": exempt"); err != nil {
 		return Policy{}, err

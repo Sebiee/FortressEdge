@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/Sebiee/fortressedge/internal/config"
 )
 
 func TestAttachLoopback(t *testing.T) {
@@ -285,12 +287,12 @@ func TestSetBlockFailureKeepsTheList(t *testing.T) {
 	}
 }
 
-// The edge can move from one full block list to another: 8192 prefixes of
-// each family, none shared.
+// The edge can move from one full block list to another, none of their
+// prefixes shared.
 func TestSetBlockSwapsFullLists(t *testing.T) {
 	list := func(n byte) []netip.Prefix {
 		var out []netip.Prefix
-		for i := range 8192 {
+		for i := range config.MaxBlockPrefixes {
 			out = append(out,
 				netip.PrefixFrom(netip.AddrFrom4([4]byte{10, n, byte(i >> 8), byte(i)}), 32),
 				netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, n, 14: byte(i >> 8), 15: byte(i)}), 128))
@@ -318,7 +320,7 @@ func TestBansLeaveTheBlockList(t *testing.T) {
 		}
 	}
 	var block []netip.Prefix
-	for i := range 8192 {
+	for i := range config.MaxBlockPrefixes {
 		block = append(block, netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 3, byte(i >> 8), byte(i)}), 32))
 	}
 	if err := f.SetBlock(block); err != nil {
@@ -390,5 +392,19 @@ func TestSweepDropsEndedBans(t *testing.T) {
 	}
 	if got := reason(t, f, syn(live)); got != "drop_block" {
 		t.Errorf("live ban after a sweep: %s", got)
+	}
+}
+
+// The block maps hold two full lists, the old and the new, while SetBlock
+// moves from one to the other.
+func TestBlockMapsHoldTwoLists(t *testing.T) {
+	spec, err := loadFlod()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"block4", "block6"} {
+		if got := spec.Maps[name].MaxEntries; got < 2*config.MaxBlockPrefixes {
+			t.Errorf("%s holds %d prefixes, want at least %d", name, got, 2*config.MaxBlockPrefixes)
+		}
 	}
 }
