@@ -157,7 +157,8 @@ func TestAgainstRealVault(t *testing.T) {
 		t.Fatal("wrote outside its path")
 	}
 
-	// Locks: check-and-set as Vault does it.
+	// Locks: check-and-set, and versions, as Vault does them.
+	shortLocks(t)
 	a, b := rv.client(t), rv.client(t)
 	must(t, a.Lock(ctx, "issue_cert_x"))
 	short, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
@@ -172,11 +173,6 @@ func TestAgainstRealVault(t *testing.T) {
 	b.locksMu.Unlock()
 	held.cancel()
 	<-held.done
-	p := b.lockPath("issue_cert_x")
-	cur, err := b.kv.Get(ctx, p)
-	must(t, err)
-	_, err = b.kv.Put(ctx, p, map[string]any{"expires": time.Now().Add(-time.Second).Unix()}, vault.WithCheckAndSet(cur.VersionMetadata.Version))
-	must(t, err)
 	must(t, a.Lock(ctx, "issue_cert_x"))
 	must(t, b.Unlock(ctx, "issue_cert_x"))
 	if !slices.Contains(rv.keys(t, rv.path+"/"), rv.path+"/_locks/issue_cert_x") {
@@ -199,12 +195,12 @@ func TestAgainstRealVault(t *testing.T) {
 	eb := NewShared(newDisk(t), rv.client(t))
 	ea.Seed(ctx)
 	eb.Seed(ctx)
-	must(t, ea.Store(ctx, "certificates/ca/s/s.crt", []byte("v1")))
-	if got, err := eb.Load(ctx, "certificates/ca/s/s.crt"); err != nil || string(got) != "v1" {
+	must(t, ea.Store(ctx, meta, v1))
+	if got, err := eb.Load(ctx, meta); err != nil || !bytes.Equal(got, v1) {
 		t.Fatalf("b: %q %v", got, err)
 	}
-	must(t, ea.Delete(ctx, "certificates/ca/s/s.crt"))
-	if _, err := eb.Load(ctx, "certificates/ca/s/s.crt"); !os.IsNotExist(err) {
+	must(t, ea.Delete(ctx, meta))
+	if _, err := eb.Load(ctx, meta); !os.IsNotExist(err) {
 		t.Fatalf("b after a's delete: %v", err)
 	}
 }

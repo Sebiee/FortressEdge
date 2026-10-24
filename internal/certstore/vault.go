@@ -330,7 +330,10 @@ func (v *Vault) list(ctx context.Context, dir string) ([]string, error) {
 }
 
 // lockTTL is how long a lock outlives an edge that died holding it. The
-// holder refreshes it every third of that.
+// holder writes it again every third of that, and another edge takes it
+// over once it has seen no new write for lockTTL. That is measured on the
+// waiting edge's own monotonic clock, from the version Vault reports, so
+// no edge's wall clock, nor what anyone writes in the lock, decides it.
 var lockTTL = time.Minute
 
 type heldLock struct {
@@ -346,17 +349,25 @@ func (v *Vault) lockPath(name string) string {
 }
 
 // Lock takes the lock name, waiting while another edge holds it and has
-// refreshed it within lockTTL.
+// written it within lockTTL. It gives up once another edge has held it
+// for two lockTTLs, longer than an order takes: Shared then orders under
+// the disk's lock rather than wait forever on a holder that never
+// finishes, or on a forged lock, the boot's tunnel order included.
 func (v *Vault) Lock(ctx context.Context, name string) error {
 	p := v.lockPath(name)
+	deadline := time.Now().Add(2 * lockTTL)
+	var seen lockSeen
 	for {
-		ver, err := v.tryLock(ctx, p)
+		ver, err := v.tryLock(ctx, p, &seen)
 		if err == nil {
 			v.hold(name, p, ver)
 			return nil
 		}
 		if !errors.Is(err, errLocked) {
 			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("vault: lock %s: another edge has held it for %s", name, 2*lockTTL)
 		}
 		select {
 		case <-time.After(time.Second):
@@ -368,13 +379,25 @@ func (v *Vault) Lock(ctx context.Context, name string) error {
 
 var errLocked = errors.New("vault: locked")
 
+// lockData is what a lock holds. This edge reads none of it; edges
+// before it take a lock over once expires has passed.
 func lockData() map[string]any {
 	return map[string]any{"expires": time.Now().Add(lockTTL).Unix()}
 }
 
+// lockSeen is a version of a lock another edge holds, and when this edge
+// first saw it. Vault's time of the version tells a lock deleted and
+// created again, which starts at version 1 again, from the one before.
+type lockSeen struct {
+	version int
+	written time.Time
+	at      time.Time
+}
+
 // tryLock creates the lock, or takes over one whose holder stopped
-// refreshing it. Both are check-and-set writes: of two edges, one wins.
-func (v *Vault) tryLock(ctx context.Context, p string) (int, error) {
+// writing it: one seen at the same version for lockTTL. Both are
+// check-and-set writes: of two edges, one wins.
+func (v *Vault) tryLock(ctx context.Context, p string, seen *lockSeen) (int, error) {
 	var ver int
 	err := v.do(ctx, func(ctx context.Context) error {
 		s, err := v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(0))
@@ -392,10 +415,15 @@ func (v *Vault) tryLock(ctx context.Context, p string) (int, error) {
 		if err != nil {
 			return err
 		}
-		if exp, ok := expiry(cur.Data); ok && time.Now().Before(exp) {
+		m := cur.VersionMetadata
+		if m.Version != seen.version || !m.CreatedTime.Equal(seen.written) {
+			*seen = lockSeen{version: m.Version, written: m.CreatedTime, at: time.Now()}
 			return errLocked
 		}
-		s, err = v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(cur.VersionMetadata.Version))
+		if time.Since(seen.at) < lockTTL {
+			return errLocked
+		}
+		s, err = v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(m.Version))
 		if casMismatch(err) {
 			return errLocked
 		}
@@ -406,17 +434,6 @@ func (v *Vault) tryLock(ctx context.Context, p string) (int, error) {
 		return nil
 	})
 	return ver, err
-}
-
-func expiry(data map[string]any) (time.Time, bool) {
-	switch e := data["expires"].(type) {
-	case float64:
-		return time.Unix(int64(e), 0), true
-	case interface{ Int64() (int64, error) }:
-		n, err := e.Int64()
-		return time.Unix(n, 0), err == nil
-	}
-	return time.Time{}, false
 }
 
 func (v *Vault) hold(name, p string, ver int) {
