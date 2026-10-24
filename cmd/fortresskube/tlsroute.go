@@ -54,7 +54,7 @@ func (r refusal) String() string {
 const (
 	refusedNoHostnames   = "no_hostnames"          // the edge gets a certificate per exact name
 	refusedHostname      = "invalid_hostname"      // a wildcard, or not a DNS name
-	refusedBackend       = "invalid_backend"       // no backendRefs, not a Service, or no port
+	refusedBackend       = "invalid_backend"       // no backendRefs, not a Service, no Service name, or no port
 	refusedNamespace     = "backend_namespace"     // a Service in another namespace: no ReferenceGrant check
 	refusedService       = "backend_service"       // the Service is missing, ExternalName, or headless
 	refusedALPN          = "invalid_alpn"          // fortressedge.io/alpn
@@ -69,7 +69,7 @@ const (
 // so the Gateway's proxy, which routes a TLS stream by its server name,
 // cannot take the stream. A hostname a static proxy has is refused, and
 // so are one an HTTPRoute publishes (httpNames) and one an older
-// TLSRoute has.
+// TLSRoute holds, published or not.
 func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
 	rs := routes(v.tlsRoutes)
 	// The oldest route keeps a hostname two routes name.
@@ -99,31 +99,35 @@ func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool)
 		}
 		if reason != "" {
 			refused = append(refused, refusal{kind: tlsKind.name, route: key, reason: reason})
-			continue
 		}
 		alpn := splitALPN(annotation)
 		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
+			var why string
 			switch {
 			case strings.Contains(h, "*") || len(k8svalidation.IsDNS1123Subdomain(h)) > 0:
-				refused = append(refused, refusal{tlsKind.name, key, h, refusedHostname})
-				continue
+				why = refusedHostname
 			case !covers(ls, h):
 				continue
 			case p.static[h]:
-				refused = append(refused, refusal{tlsKind.name, key, h, refusedStatic})
-				continue
+				why = refusedStatic
 			case httpNames[h]:
-				refused = append(refused, refusal{tlsKind.name, key, h, refusedHTTPRoute})
-				continue
+				why = refusedHTTPRoute
 			case taken[h]:
-				refused = append(refused, refusal{tlsKind.name, key, h, refusedOlderTLSRoute})
-				continue
+				why = refusedOlderTLSRoute
 			}
-			taken[h] = true
-			p := &v1.TCPTLSProxyConfig{CustomDomains: []string{h}, ALPN: alpn}
-			p.Name, p.Type, p.LocalIP, p.LocalPort = tlsProxyPrefix+h, string(v1.ProxyTypeTCPTLS), ip, port
-			out = append(out, p)
+			switch {
+			case why == "":
+				// A route that cannot publish still holds its names.
+				taken[h] = true
+				if reason == "" {
+					px := &v1.TCPTLSProxyConfig{CustomDomains: []string{h}, ALPN: alpn}
+					px.Name, px.Type, px.LocalIP, px.LocalPort = tlsProxyPrefix+h, string(v1.ProxyTypeTCPTLS), ip, port
+					out = append(out, px)
+				}
+			case reason == "":
+				refused = append(refused, refusal{tlsKind.name, key, h, why})
+			}
 		}
 	}
 	slices.SortFunc(out, func(a, b v1.ProxyConfigurer) int {

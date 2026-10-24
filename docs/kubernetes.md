@@ -319,8 +319,10 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
   metadata service and the API server included.
 - Wildcard hostnames are refused. A hostname an HTTPRoute publishes
   stays an HTTP name, and the TLSRoute's is refused; of two TLSRoutes
-  with one hostname, the older keeps it, so give each team its own
-  listener hostname: then no other namespace can hold its names. A
+  with one hostname, the older keeps it, even while it cannot publish
+  it (its Service gone for a while, say). A route deleted and created
+  again is the younger, so give each team its own listener hostname:
+  then no other namespace can wait for its names. A
   refused route or hostname is logged once, and counted in its metrics;
   the others go on.
 - `fortresskube` needs `list` and `watch` on `tlsroutes` (above). A
