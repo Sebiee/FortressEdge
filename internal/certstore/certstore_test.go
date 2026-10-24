@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	vault "github.com/hashicorp/vault/api"
 
 	"github.com/Sebiee/fortressedge/internal/certstore/vaulttest"
 	"github.com/Sebiee/fortressedge/internal/metrics"
@@ -135,32 +134,28 @@ func TestVaultRefusesAnotherCA(t *testing.T) {
 }
 
 func TestVaultLocks(t *testing.T) {
+	shortLocks(t)
 	ctx := context.Background()
 	srv := fakeVault(t)
 	a, b := client(t, srv), client(t, srv)
 	must(t, a.Lock(ctx, "issue_cert_a.example.com"))
 
-	short, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	if err := b.Lock(short, "issue_cert_a.example.com"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("b took a's lock: %v", err)
+	// b waits while a holds it and writes it, then gives up rather than
+	// take it.
+	if err := b.Lock(ctx, "issue_cert_a.example.com"); err == nil {
+		t.Fatal("b took a's lock")
 	}
 	must(t, b.Lock(ctx, "other"))
 	must(t, a.Unlock(ctx, "issue_cert_a.example.com"))
 	must(t, b.Lock(ctx, "issue_cert_a.example.com"))
 
-	// b dies holding it: once it expires, a takes it over, and b's
-	// unlock does not release a's.
+	// b dies holding it: once nobody has written it for lockTTL, a takes it
+	// over, and b's unlock does not release a's.
 	b.locksMu.Lock()
 	held := b.locks["issue_cert_a.example.com"]
 	b.locksMu.Unlock()
 	held.cancel()
 	<-held.done
-	p := b.lockPath("issue_cert_a.example.com")
-	cur, err := b.kv.Get(ctx, p)
-	must(t, err)
-	_, err = b.kv.Put(ctx, p, map[string]any{"expires": time.Now().Add(-time.Second).Unix()}, vault.WithCheckAndSet(cur.VersionMetadata.Version))
-	must(t, err)
 	must(t, a.Lock(ctx, "issue_cert_a.example.com"))
 	must(t, b.Unlock(ctx, "issue_cert_a.example.com"))
 	if !slices.Contains(srv.Keys(), "test/private/_locks/issue_cert_a.example.com") {

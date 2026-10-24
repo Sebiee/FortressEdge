@@ -119,6 +119,12 @@ vault_secret_id: ...      # this edge's own
   lock in Vault meanwhile (a check-and-set write, so two cannot both take
   it); the others wait, then use what it stored. An edge that boots with
   an empty disk starts with the certificates already there.
+- **A lock does not hold forever.** Its holder writes it again every 20
+  seconds. An edge that sees no new write for a minute, by its own clock
+  (no other clock, and nothing written in the lock, counts), takes it
+  over: its holder died. One that has waited two minutes on a lock still
+  being written gives up and orders by itself, as when Vault is down, so
+  a stuck holder or a forged lock costs a boot two minutes at most.
 - **A validation can reach any of them.** With two addresses in DNS, the
   CA's TLS-ALPN-01 connection may reach the edge that did not order. It
   answers from the challenge the other stored in Vault, as long as it
