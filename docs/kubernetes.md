@@ -32,8 +32,8 @@ rejecting it, removes the name, and other names keep running.
   `cilium-gateway-NAME.NAMESPACE.svc:80`. `fortresskube` dials a Service
   at its cluster IP, read from the API, never by name: a pod's DNS
   search list tries a relative name such as `gw.infra.svc` as
-  `gw.infra.svc.svc.cluster.local` first, a pod's name for whoever owns
-  a namespace called `svc`. `-backend` takes `NAME.NAMESPACE.svc:PORT`
+  `gw.infra.svc.svc.cluster.local` first, which can name a pod in a
+  namespace called `svc`. `-backend` takes `NAME.NAMESPACE.svc:PORT`
   for a Service, or an IP or a name ending with a dot
   (`gw.example.internal.:80`), and a port; another name is refused at
   start. While the Service has no cluster IP (missing, headless, or
@@ -322,9 +322,9 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
   with one hostname, the older keeps it, even while it cannot publish
   it (its Service gone for a while, say). A route deleted and created
   again is the younger, so give each team its own listener hostname:
-  then no other namespace can wait for its names. A
-  refused route or hostname is logged once, and counted in its metrics;
-  the others go on.
+  then no other namespace can wait for its names. A refused route or
+  hostname is logged once, and counted in its metrics; the others go
+  on.
 - `fortresskube` needs `list` and `watch` on `tlsroutes` (above). A
   cluster without TLSRoutes is logged at start and left out. A discovery
   that fails otherwise is tried again, and a missing permission is
@@ -347,7 +347,7 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
       - to: [{ namespaceSelector: {} }] # pods, not nodes: the Gateway, the TLSRoutes' backends, DNS
       - to: [{ ipBlock: { cidr: 203.0.113.10/32 } }] # the edge
         ports: [{ protocol: TCP, port: 443 }]
-      - to: [{ ipBlock: { cidr: 192.0.2.20/32 } }] # the API server's endpoint: kubectl get endpointslices -l kubernetes.io/service-name=kubernetes
+      - to: [{ ipBlock: { cidr: 192.0.2.20/32 } }] # the API server's endpoint: kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes
         ports: [{ protocol: TCP, port: 6443 }]
   ```
 
