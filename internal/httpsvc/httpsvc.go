@@ -299,7 +299,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	servers := []*http.Server{newServer(":80", httpH, nil), newServer(":443", h, tlsCfg)}
 	for _, s := range servers {
 		s.MaxHeaderBytes = cfg.Limits.MaxHeaderBytes
-		s.HTTP2 = &http.HTTP2Config{MaxConcurrentStreams: cfg.Limits.MaxHTTP2Streams}
+		s.HTTP2.MaxConcurrentStreams = cfg.Limits.MaxHTTP2Streams
 	}
 	return serve(ctx, servers, track, vis, socks, tcp, drainTimeout)
 }
@@ -378,8 +378,17 @@ func newServer(addr string, h http.Handler, tlsCfg *tls.Config) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    config.DefaultLimits().MaxHeaderBytes,
-		HTTP2:             &http.HTTP2Config{MaxConcurrentStreams: config.DefaultLimits().MaxHTTP2Streams},
-		ErrorLog:          log.New(serverLog{}, "", 0),
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: config.DefaultLimits().MaxHTTP2Streams,
+			// An HTTP/2 connection that takes none of what the edge has to
+			// write for stallTimeout is closed; so is one that sends nothing
+			// for 30 s and then answers no ping within 15 s. A stream's own
+			// stall is serveSite's.
+			WriteByteTimeout: stallTimeout,
+			SendPingTimeout:  30 * time.Second,
+			PingTimeout:      15 * time.Second,
+		},
+		ErrorLog: log.New(serverLog{}, "", 0),
 		// net/http would answer "OPTIONS *" itself, for any Host, so a
 		// scan of the address would get a 200. Routing decides instead.
 		DisableGeneralOptionsHandler: true,

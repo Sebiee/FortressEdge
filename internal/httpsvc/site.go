@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,10 +51,18 @@ const (
 	limitURI
 	limitBody
 	limitMalformed
+	limitBodyTimeout
 	nLimits
 )
 
-var limitNames = [nLimits]string{"rate", "uri", "body", "malformed"}
+var limitNames = [nLimits]string{"rate", "uri", "body", "malformed", "body_timeout"}
+
+// stallTimeout ends a site request whose body or response stops moving:
+// a read of its body that gets no byte, or a write of its response the
+// visitor does not take, in this long. Each read and write gets all of
+// it, so a long upload on a slow link and a stream quiet between events
+// go on. A WebSocket, once switched, is not under it.
+var stallTimeout = time.Minute
 
 // siteStats counts one site's requests: one published name, which a
 // wildcard route shares between every name it covers.
@@ -160,8 +169,9 @@ func (st *httpStats) serveSite(h http.Handler, host, route string, pol config.Si
 	w.Header().Set(requestIDHeader, rs.id)
 	rs.trace = startTrace(r.Header, trustTrace)
 	w.Header().Set(traceIDHeader, rs.trace.traceID)
-	rs.rec = &recorder{ResponseWriter: w, start: rs.start}
-	body := &countingBody{ReadCloser: r.Body}
+	rc := http.NewResponseController(w)
+	rs.rec = &recorder{ResponseWriter: w, rc: rc, start: rs.start}
+	body := &countingBody{ReadCloser: r.Body, rc: rc}
 	if r.Body != nil && r.Body != http.NoBody {
 		if n := pol.MaxBodyBytes; n > 0 {
 			// w, not the recorder: net/http closes the connection after a
@@ -189,6 +199,12 @@ func (st *httpStats) serveSite(h http.Handler, host, route string, pol config.Si
 		return
 	}
 	h.ServeHTTP(rs.rec, r)
+	if r.ProtoMajor == 2 {
+		// HTTP/2 would send what is still buffered after the handler
+		// returns, with no deadline: a visitor that grants the stream no
+		// window would hold it, and its goroutine, for good.
+		_ = rs.rec.FlushError()
+	}
 }
 
 // finish counts rs once it ended, aborted when the handler panicked (a
@@ -283,11 +299,16 @@ func ProxyError(r *http.Request, err error) {
 		slog.Warn("proxy error", "site", hostname(r.Host), "err", err)
 		return
 	}
-	if rs.body.tooLarge.Load() {
+	switch {
+	case rs.body.tooLarge.Load():
 		// The body passed max_body_size on the way: the visitor's, and
 		// the answer is 413, not a failed origin.
 		rs.site.limitHits[limitBody].Add(1)
 		rs.rec.override = http.StatusRequestEntityTooLarge
+		return
+	case rs.body.stalled.Load():
+		rs.site.limitHits[limitBodyTimeout].Add(1)
+		rs.rec.override = http.StatusRequestTimeout
 		return
 	}
 	attrs := []any{
@@ -354,28 +375,38 @@ const statusClientClosed = 499
 
 type countingBody struct {
 	io.ReadCloser
-	n atomic.Int64 // the transport may still read after the handler returns
+	rc *http.ResponseController
+	n  atomic.Int64 // the transport may still read after the handler returns
 	// tooLarge is a body that went over max_body_size. The error frps
 	// reports for it does not unwrap to the *http.MaxBytesError (net/http
 	// wraps a body read error in a type of its own), so it is kept here.
 	tooLarge atomic.Bool
+	stalled  atomic.Bool // a read got no byte in stallTimeout
 }
 
 func (b *countingBody) Read(p []byte) (int, error) {
+	// The deadline is off between reads, while the origin is slow to take
+	// what came.
+	_ = b.rc.SetReadDeadline(time.Now().Add(stallTimeout))
 	n, err := b.ReadCloser.Read(p)
+	_ = b.rc.SetReadDeadline(time.Time{})
 	b.n.Add(int64(n))
 	var over *http.MaxBytesError
-	if err != nil && errors.As(err, &over) {
+	switch {
+	case errors.As(err, &over):
 		b.tooLarge.Store(true)
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		b.stalled.Store(true)
 	}
 	return n, err
 }
 
 // recorder keeps the status, the time to the headers, and the body size
-// of a response. Flush and the rest reach the connection through Unwrap
+// of a response. Hijack and the rest reach the connection through Unwrap
 // (http.ResponseController).
 type recorder struct {
 	http.ResponseWriter
+	rc      *http.ResponseController
 	start   time.Time
 	status  int
 	headers time.Duration // since start, when they were written
@@ -406,9 +437,20 @@ func (w *recorder) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.wrote(http.StatusOK)
 	}
+	_ = w.rc.SetWriteDeadline(time.Now().Add(stallTimeout))
 	n, err := w.ResponseWriter.Write(b)
+	_ = w.rc.SetWriteDeadline(time.Time{})
 	w.n += int64(n)
 	return n, err
+}
+
+// FlushError is under stallTimeout as Write is: a stream flushes after
+// each event, and a visitor who reads nothing holds it there.
+func (w *recorder) FlushError() error {
+	_ = w.rc.SetWriteDeadline(time.Now().Add(stallTimeout))
+	err := w.rc.Flush()
+	_ = w.rc.SetWriteDeadline(time.Time{})
+	return err
 }
 
 // Hijack is a protocol upgrade (WebSocket): the proxy writes the 101 to

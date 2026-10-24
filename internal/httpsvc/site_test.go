@@ -1,11 +1,14 @@
 package httpsvc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,5 +271,226 @@ func TestSiteBodyLimit(t *testing.T) {
 	}
 	if n := st.site("small.example.com").proxyErrors[reasonSend].Load(); n != 0 {
 		t.Fatalf("a body over the limit counted as a proxy error")
+	}
+}
+
+// shortStall sets stallTimeout to d for the test.
+func shortStall(t *testing.T, d time.Duration) {
+	old := stallTimeout
+	stallTimeout = d
+	t.Cleanup(func() { stallTimeout = old })
+}
+
+// overHTTP1And2 serves h as the HTTPS server does, over HTTP/1.1 and
+// then over HTTP/2, and runs f against each.
+func overHTTP1And2(t *testing.T, h http.Handler, f func(t *testing.T, url string, c *http.Client)) {
+	for _, h2 := range []bool{false, true} {
+		s := httptest.NewUnstartedServer(h)
+		s.Config = newServer("", h, nil)
+		s.EnableHTTP2 = h2
+		s.StartTLS()
+		name := "HTTP/1.1"
+		if h2 {
+			name = "HTTP/2"
+		}
+		t.Run(name, func(t *testing.T) {
+			defer s.Close()
+			c := s.Client()
+			c.Timeout = 20 * time.Second
+			f(t, s.URL, c)
+		})
+	}
+}
+
+// frpsTakesBody reads a request's body to its end before it answers, as
+// frps sends it to the origin first, and reports a failed read as frps
+// does. A ?slow request has the origin take a second after the first
+// byte.
+var frpsTakesBody = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var first [1]byte
+	_, err := io.ReadFull(r.Body, first[:])
+	if r.URL.Query().Has("slow") {
+		time.Sleep(time.Second)
+	}
+	if err == nil {
+		_, err = io.Copy(io.Discard, r.Body)
+	}
+	if err != nil {
+		ProxyError(r, &vhost.ProxyError{Stage: vhost.StageSend, Err: err})
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	io.WriteString(w, "ok")
+})
+
+// A body that stops coming ends its request after stallTimeout, answered
+// 408 and counted: it held a work connection, an origin connection and
+// edge memory for as long as the visitor liked. A body that comes a byte
+// at a time, or that the origin is slow to take, goes through.
+func TestSiteBodyStall(t *testing.T) {
+	shortStall(t, 300*time.Millisecond)
+	st := &httpStats{}
+	h, err := Handler("tunnel.example.com", frpsTakesBody, nil, nil, st, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overHTTP1And2(t, h, func(t *testing.T, url string, c *http.Client) {
+		post := func(path string, body func(*io.PipeWriter)) int {
+			t.Helper()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			go body(pw)
+			// net/http's client waits for the body however it ends.
+			giveUp := time.AfterFunc(5*time.Second, func() { pw.CloseWithError(errors.New("gave up")) })
+			defer giveUp.Stop()
+			res, err := c.Post(url+path, "text/plain", pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res.Body.Close()
+			return res.StatusCode
+		}
+		stalls := func(pw *io.PipeWriter) { pw.Write([]byte("x")) }
+		trickles := func(pw *io.PipeWriter) {
+			for range 10 {
+				pw.Write([]byte("x"))
+				time.Sleep(100 * time.Millisecond)
+			}
+			pw.Close()
+		}
+		start := time.Now()
+		if code := post("/", stalls); code != http.StatusRequestTimeout || time.Since(start) > 5*time.Second {
+			t.Errorf("stalled body: %d after %v", code, time.Since(start))
+		}
+		if code := post("/", trickles); code != http.StatusOK {
+			t.Errorf("a body a byte every 100ms: %d", code)
+		}
+		if code := post("/?slow", trickles); code != http.StatusOK {
+			t.Errorf("a body the origin is slow to take: %d", code)
+		}
+	})
+	if s := st.site("127.0.0.1"); s.limitHits[limitBodyTimeout].Load() != 2 || s.proxyErrors[reasonSend].Load() != 0 {
+		t.Fatalf("body_timeout %d, send errors %d", s.limitHits[limitBodyTimeout].Load(), s.proxyErrors[reasonSend].Load())
+	}
+}
+
+// A response the visitor stops reading ends after stallTimeout: the write
+// that waits on it fails, and frps lets go of the origin. One that comes
+// in events with long quiet between them goes on.
+func TestSiteResponseStall(t *testing.T) {
+	shortStall(t, 300*time.Millisecond)
+	ended := map[int]chan error{1: make(chan error, 1), 2: make(chan error, 1)} // by HTTP version
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events" {
+			for _, ev := range []string{"a", "b", "c"} {
+				io.WriteString(w, ev)
+				http.NewResponseController(w).Flush()
+				time.Sleep(700 * time.Millisecond)
+			}
+			return
+		}
+		chunk := make([]byte, 32<<10)
+		var err error
+		for i := 0; i < 4096 && err == nil; i++ { // 128 MiB, past every buffer on the way
+			_, err = w.Write(chunk)
+		}
+		ended[r.ProtoMajor] <- err
+	})
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overHTTP1And2(t, h, func(t *testing.T, url string, c *http.Client) {
+		res, err := c.Get(url + "/events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if string(b) != "abc" || err != nil {
+			t.Errorf("events: %q, %v", b, err)
+		}
+		res, err = c.Get(url + "/big")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		select {
+		case err := <-ended[res.ProtoMajor]:
+			if err == nil {
+				t.Fatal("the whole response went to a visitor who read none of it")
+			}
+		case <-time.After(10 * time.Second): // crypto/tls gives its close_notify 5 s
+			t.Fatal("the write to a visitor who reads nothing never failed")
+		}
+	})
+}
+
+// An HTTP/2 visitor that grants a stream no window holds it no longer
+// than stallTimeout, even once frps is done with it: net/http sends the
+// response's last bytes after the handler returns.
+func TestSiteHTTP2StreamWithoutWindowEnds(t *testing.T) {
+	shortStall(t, 200*time.Millisecond)
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "a short answer") })
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := httptest.NewUnstartedServer(h)
+	s.Config = newServer("", h, nil)
+	s.EnableHTTP2 = true
+	s.StartTLS()
+	defer s.Close()
+	c := s.Client()
+	c.Transport.(*http.Transport).HTTP2 = &http.HTTP2Config{MaxReceiveBufferPerStream: 1}
+	res, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	time.Sleep(time.Second)
+	if b, err := io.ReadAll(res.Body); err == nil || res.ProtoMajor != 2 {
+		t.Fatalf("HTTP/%d: read %q after the stream should have ended", res.ProtoMajor, b)
+	}
+}
+
+// A WebSocket is not under stallTimeout: once switched, it is quiet for
+// as long as its ends like.
+func TestSiteWebSocketOutlivesStallTimeout(t *testing.T) {
+	shortStall(t, 100*time.Millisecond)
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+		rw.Flush()
+		line, _ := rw.ReadString('\n')
+		rw.WriteString("echo " + line)
+		rw.Flush()
+	})
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, addr := serving(t, h)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: app.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	br := bufio.NewReader(c)
+	res, err := http.ReadResponse(br, nil)
+	if err != nil || res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %v %v", res, err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	io.WriteString(c, "hi\n")
+	if line, err := br.ReadString('\n'); line != "echo hi\n" {
+		t.Fatalf("after five times stallTimeout quiet: %q, %v", line, err)
 	}
 }
