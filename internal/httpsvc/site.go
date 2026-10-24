@@ -324,6 +324,13 @@ func ProxyError(r *http.Request, err error) {
 		"elapsed_ms", time.Since(rs.start).Milliseconds(), "sent", rs.rec.n, "err", pe.Err)...)
 }
 
+// noTunnel answers a held name's request as frps answers a name it has no
+// route for: frps's router would give a held name to a wildcard's node.
+var noTunnel = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ProxyError(r, &vhost.ProxyError{Stage: vhost.StageRoute, Err: vhost.ErrNoRouteFound})
+	w.WriteHeader(http.StatusServiceUnavailable)
+})
+
 func proxyReason(pe *vhost.ProxyError) int {
 	switch pe.Stage {
 	case vhost.StageRoute:

@@ -128,7 +128,7 @@ func TestSiteCountsBadGateway(t *testing.T) {
 func TestMalformedUnknownNameStaysSilent(t *testing.T) {
 	st := &httpStats{}
 	h, err := Handler("tunnel.example.com", http.NotFoundHandler(), nil, nil, st,
-		func(host string) (string, bool) { return host, host == "app.example.com" }, nil)
+		func(host string) (string, bool, bool) { return host, false, host == "app.example.com" }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestProxyErrorLine(t *testing.T) {
 	st := &httpStats{}
 	st.access.Store(newAccessLog(chanWriter(logc)))
 	lim := newLivePolicy(config.Policy{Limits: config.DefaultLimits(), AccessLog: config.AccessLog{On: true}})
-	route := func(host string) (string, bool) { return "*.example.com", true }
+	route := func(host string) (string, bool, bool) { return "*.example.com", false, true }
 	h, err := Handler("tunnel.example.com", frps, nil, nil, st, route, lim)
 	if err != nil {
 		t.Fatal(err)

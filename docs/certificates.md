@@ -169,10 +169,11 @@ Until then, and for that long after a boot for the names whose
 certificates are on the data disk, the edge answers such a name with its
 last certificate and `503 Service Unavailable`, `Retry-After: 1`, and an
 empty body, so browsers and HTTP clients retry while a dark node or the
-edge restarts. Only names a dark node published, whose certificates are
-still valid, are answered: they are public in Certificate Transparency
-logs already, and a name nobody published stays silent. `tunnel_grace:
-0` turns this off.
+edge restarts. Another dark node's wildcard route that covers the name
+gets none of its requests meanwhile. Only names a dark node published,
+whose certificates are still valid, are answered: they are public in
+Certificate Transparency logs already, and a name nobody published stays
+silent. `tunnel_grace: 0` turns this off.
 
 A published name whose origin does not answer gets `502`, or `504` after
 a minute without response headers (`response_header_timeout` in the
