@@ -58,10 +58,8 @@ const (
 	flodMapBlock4     = "block4"
 	flodMapBlock6     = "block6"
 	flodMapCounts     = "counts"
-	flodMapDnsRate    = "dns_rate"
 	flodMapEthertypes = "ethertypes"
-	flodMapNtpRate    = "ntp_rate"
-	flodMapQuicRate   = "quic_rate"
+	flodMapSynAll     = "syn_all"
 	flodMapSynCfg     = "syn_cfg"
 	flodMapSynRate    = "syn_rate"
 	flodProgFlod      = "flod"
@@ -120,10 +118,8 @@ type flodMapSpecs struct {
 	Block4     *ebpf.MapSpec `ebpf:"block4"`
 	Block6     *ebpf.MapSpec `ebpf:"block6"`
 	Counts     *ebpf.MapSpec `ebpf:"counts"`
-	DnsRate    *ebpf.MapSpec `ebpf:"dns_rate"`
 	Ethertypes *ebpf.MapSpec `ebpf:"ethertypes"`
-	NtpRate    *ebpf.MapSpec `ebpf:"ntp_rate"`
-	QuicRate   *ebpf.MapSpec `ebpf:"quic_rate"`
+	SynAll     *ebpf.MapSpec `ebpf:"syn_all"`
 	SynCfg     *ebpf.MapSpec `ebpf:"syn_cfg"`
 	SynRate    *ebpf.MapSpec `ebpf:"syn_rate"`
 }
@@ -158,10 +154,8 @@ type flodMaps struct {
 	Block4     *ebpf.Map `ebpf:"block4"`
 	Block6     *ebpf.Map `ebpf:"block6"`
 	Counts     *ebpf.Map `ebpf:"counts"`
-	DnsRate    *ebpf.Map `ebpf:"dns_rate"`
 	Ethertypes *ebpf.Map `ebpf:"ethertypes"`
-	NtpRate    *ebpf.Map `ebpf:"ntp_rate"`
-	QuicRate   *ebpf.Map `ebpf:"quic_rate"`
+	SynAll     *ebpf.Map `ebpf:"syn_all"`
 	SynCfg     *ebpf.Map `ebpf:"syn_cfg"`
 	SynRate    *ebpf.Map `ebpf:"syn_rate"`
 }
@@ -172,10 +166,8 @@ func (m *flodMaps) Close() error {
 		m.Block4,
 		m.Block6,
 		m.Counts,
-		m.DnsRate,
 		m.Ethertypes,
-		m.NtpRate,
-		m.QuicRate,
+		m.SynAll,
 		m.SynCfg,
 		m.SynRate,
 	)

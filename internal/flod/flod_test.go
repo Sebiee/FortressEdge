@@ -392,3 +392,25 @@ func TestBanEnds(t *testing.T) {
 		t.Fatalf("after the ban: %s", got)
 	}
 }
+
+// With QUIC on, every datagram to UDP 443 passes: a stranger forging a dark
+// node's address has no allowance of the node's to spend.
+func TestQUICPasses(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	node := netip.MustParseAddrPort("203.0.113.1:50000")
+	initial := datagram(node, netip.AddrPortFrom(edge4, 443))
+	initial[14+20+8] = 0xc0
+	for _, quic := range []bool{true, false} {
+		f, err := Attach("lo", nil, quic, SYNRate{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[bool]string{true: "pass", false: "drop_port"}[quic]
+		if got := run(t, f, initial, 5000); got[want] < 5000 || len(got) != 1 {
+			t.Errorf("quic=%v: 5000 long-header packets from one node: %v, want all %s", quic, got, want)
+		}
+		f.Close()
+	}
+}

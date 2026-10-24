@@ -4,11 +4,15 @@
 
 char __license[] SEC("license") = "Dual MIT/GPL";
 
-// Token buckets per source: TCP SYNs (new connections), QUIC long-header
-// packets (connection setup), NTP and DNS replies. Established TCP and
-// QUIC traffic is never counted.
+// TCP SYNs (new connections) are limited per source, but only while all
+// sources together send more than FLOOD_BURST at once or FLOOD_NS apart. A
+// source address can be forged, and a stranger who spends a source's
+// allowance cuts it off: a few forged SYNs a second would do. Below the
+// flood rate, syncookies and the visitor limits in userspace protect the
+// edge; in a flood, each source is held to its own rate. Established TCP
+// and QUIC traffic is never counted.
 //
-// The SYN rate comes from fortress.yml (limits) through syn_cfg, which
+// The per-source rate comes from fortress.yml (limits) through syn_cfg, which
 // userspace updates while the program runs. ns 0 means no limit.
 struct syn_rate_cfg {
 	__u64 ns; // per token
@@ -22,14 +26,16 @@ struct {
 	__type(value, struct syn_rate_cfg);
 } syn_cfg SEC(".maps");
 
-// Only dark nodes speak QUIC to the edge. A handshake is a few long-header
-// packets; after it, data rides short-header packets, which pass freely.
-#define QUIC_BURST 1024
-#define QUIC_NS 1953125ULL // 512/s
-#define NTP_BURST 8
-#define NTP_NS 250000000ULL // 4/s
-#define DNS_BURST 64
-#define DNS_NS 15625000ULL // 64/s
+#define FLOOD_BURST 4096
+#define FLOOD_NS 244140ULL // 4096/s
+
+// The bucket all sources' SYNs share.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct bucket);
+} syn_all SEC(".maps");
 
 // The kernel's default net.ipv4.ip_local_port_range: replies to the edge's
 // own connections (ACME, OCSP, DNS) arrive on these ports.
@@ -40,20 +46,18 @@ struct {
 #define REASON_DROP_BLOCK 1
 #define REASON_DROP_PORT 2
 #define REASON_DROP_SYNRATE 3
-#define REASON_DROP_NTPRATE 4
-#define REASON_DROP_TRUNCATED 5 // a header cut short, or an IPv4 header length under 20
-#define REASON_PASS_ARP 6
-#define REASON_PASS_ICMP6 7
-#define REASON_PASS_ICMP3 8
-#define REASON_PASS_NTP 9
-#define REASON_PASS_REPLY 10
-#define REASON_PASS_DNS 11
-#define REASON_DROP_DNSRATE 12
-#define REASON_DROP_ETHERTYPE 13 // neither IPv4, IPv6, nor ARP: LLDP, STP, ...
-#define REASON_DROP_FRAGMENT 14  // an IPv4 fragment after the first
-#define REASON_DROP_PROTO 15     // an IP protocol other than TCP, UDP, ICMP
-#define REASON_DROP_ICMP 16      // an ICMPv4 type other than destination unreachable
-#define REASON_MAX 17
+#define REASON_DROP_TRUNCATED 4 // a header cut short, or an IPv4 header length under 20
+#define REASON_PASS_ARP 5
+#define REASON_PASS_ICMP6 6
+#define REASON_PASS_ICMP3 7
+#define REASON_PASS_NTP 8
+#define REASON_PASS_REPLY 9
+#define REASON_PASS_DNS 10
+#define REASON_DROP_ETHERTYPE 11 // neither IPv4, IPv6, nor ARP: LLDP, STP, ...
+#define REASON_DROP_FRAGMENT 12  // an IPv4 fragment after the first
+#define REASON_DROP_PROTO 13     // an IP protocol other than TCP, UDP, ICMP
+#define REASON_DROP_ICMP 14      // an ICMPv4 type other than destination unreachable
+#define REASON_MAX 15
 
 // LLC marks an IEEE 802.3 frame, whose type field is a length (STP, for one).
 #define ETHERTYPE_LLC 0
@@ -87,27 +91,6 @@ struct {
 	__type(key, struct src_key);
 	__type(value, struct bucket);
 } syn_rate SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 4096);
-	__type(key, struct src_key);
-	__type(value, struct bucket);
-} quic_rate SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 4096);
-	__type(key, struct src_key);
-	__type(value, struct bucket);
-} ntp_rate SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 4096);
-	__type(key, struct src_key);
-	__type(value, struct bucket);
-} dns_rate SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -149,37 +132,55 @@ static __always_inline int drop_ethertype(__u16 proto_be) {
 	return count(REASON_DROP_ETHERTYPE, XDP_DROP);
 }
 
-// ponytail: racy per-IP bucket (nCPU can overshoot burst); atomic add if it shows in drops.
-static __always_inline int take_token(void *map, struct src_key *key, __u32 burst, __u64 ns_per) {
-	if (ns_per == 0) {
-		return 1;
-	}
+// take spends one of b's tokens, after adding one for every ns_per since
+// last_ns, up to burst. The part of an interval not yet worth a token
+// carries over, so a steady sender gets the rate, not nothing. Racy across
+// CPUs, which can overshoot burst a little; a per-CPU bucket would multiply
+// the rate instead.
+static __always_inline int take(struct bucket *b, __u32 burst, __u64 ns_per) {
 	__u64 now = bpf_ktime_get_ns();
-	struct bucket *b = bpf_map_lookup_elem(map, key);
-	if (!b) {
-		struct bucket init = {};
-		init.last_ns = now;
-		init.tokens = burst - 1;
-		bpf_map_update_elem(map, key, &init, BPF_ANY);
-		return 1;
-	}
 	if (now > b->last_ns) {
 		__u64 add = (now - b->last_ns) / ns_per;
 		if (add > burst) {
 			add = burst;
 		}
-		__u32 t = b->tokens + (__u32)add;
-		if (t > burst) {
+		__u64 t = b->tokens + add;
+		// Full only after adding: a bucket idle for long must not keep an old
+		// last_ns, or it would refill on every packet.
+		if (t >= burst) {
 			t = burst;
+			b->last_ns = now;
+		} else {
+			b->last_ns += add * ns_per;
 		}
 		b->tokens = t;
-		b->last_ns = now;
 	}
 	if (b->tokens == 0) {
 		return 0;
 	}
 	b->tokens--;
 	return 1;
+}
+
+static __always_inline int syn_ok(struct src_key *src) {
+	__u32 z = 0;
+	struct syn_rate_cfg *cfg = bpf_map_lookup_elem(&syn_cfg, &z);
+	if (!cfg || cfg->ns == 0) {
+		return 1;
+	}
+	struct bucket *all = bpf_map_lookup_elem(&syn_all, &z);
+	if (all && take(all, FLOOD_BURST, FLOOD_NS)) {
+		return 1;
+	}
+	struct bucket *b = bpf_map_lookup_elem(&syn_rate, src);
+	if (!b) {
+		struct bucket init = {};
+		init.last_ns = bpf_ktime_get_ns();
+		init.tokens = cfg->burst - 1;
+		bpf_map_update_elem(&syn_rate, src, &init, BPF_ANY);
+		return 1;
+	}
+	return take(b, cfg->burst, cfg->ns);
 }
 
 static __always_inline int blocked4(__u32 saddr) {
@@ -221,6 +222,34 @@ static __always_inline int ephemeral(__u16 port_be) {
 	return p >= EPHEMERAL_LO && p <= EPHEMERAL_HI;
 }
 
+// awaited says whether a socket of the edge's takes this datagram: the
+// reply to a query it sent from a random port. A stranger must guess the
+// port, as it must to forge the reply at all.
+static __always_inline int awaited(struct xdp_md *ctx, void *iph, struct udphdr *udp, __u32 family) {
+	struct bpf_sock_tuple t = {};
+	struct bpf_sock *sk;
+	if (family == 4) {
+		struct iphdr *ip = iph;
+		t.ipv4.saddr = ip->saddr;
+		t.ipv4.daddr = ip->daddr;
+		t.ipv4.sport = udp->source;
+		t.ipv4.dport = udp->dest;
+		sk = bpf_sk_lookup_udp(ctx, &t, sizeof(t.ipv4), BPF_F_CURRENT_NETNS, 0);
+	} else {
+		struct ipv6hdr *ip6 = iph;
+		__builtin_memcpy(t.ipv6.saddr, ip6->saddr, 16);
+		__builtin_memcpy(t.ipv6.daddr, ip6->daddr, 16);
+		t.ipv6.sport = udp->source;
+		t.ipv6.dport = udp->dest;
+		sk = bpf_sk_lookup_udp(ctx, &t, sizeof(t.ipv6), BPF_F_CURRENT_NETNS, 0);
+	}
+	if (!sk) {
+		return 0;
+	}
+	bpf_sk_release(sk);
+	return 1;
+}
+
 static __always_inline int filter_tcp(struct tcphdr *tcp, void *data_end, struct src_key *src) {
 	if ((void *)(tcp + 1) > data_end) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
@@ -234,17 +263,13 @@ static __always_inline int filter_tcp(struct tcphdr *tcp, void *data_end, struct
 	if (tcp->dest != bpf_htons(PORT_HTTP) && tcp->dest != bpf_htons(PORT_HTTPS)) {
 		return count(REASON_DROP_PORT, XDP_DROP);
 	}
-	if ((tcp->flags & (TCP_SYN | TCP_ACK)) == TCP_SYN) {
-		__u32 z = 0;
-		struct syn_rate_cfg *cfg = bpf_map_lookup_elem(&syn_cfg, &z);
-		if (cfg && !take_token(&syn_rate, src, cfg->burst, cfg->ns)) {
-			return count(REASON_DROP_SYNRATE, XDP_DROP);
-		}
+	if ((tcp->flags & (TCP_SYN | TCP_ACK)) == TCP_SYN && !syn_ok(src)) {
+		return count(REASON_DROP_SYNRATE, XDP_DROP);
 	}
 	return count(REASON_PASS, XDP_PASS);
 }
 
-static __always_inline int filter_udp(struct udphdr *udp, void *data_end, struct src_key *src) {
+static __always_inline int filter_udp(struct xdp_md *ctx, void *iph, struct udphdr *udp, void *data_end, __u32 family) {
 	if ((void *)(udp + 1) > data_end) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
 	}
@@ -252,43 +277,29 @@ static __always_inline int filter_udp(struct udphdr *udp, void *data_end, struct
 		__u32 z = 0;
 		__u8 *on = bpf_map_lookup_elem(&allow_quic, &z);
 		if (on && *on) {
-			__u8 *first = (void *)(udp + 1);
-			if ((void *)(first + 1) > data_end) {
-				return count(REASON_DROP_TRUNCATED, XDP_DROP);
-			}
-			// Long header (first bit set): Initial, 0-RTT, Handshake, Retry.
-			if ((*first & 0x80) && !take_token(&quic_rate, src, QUIC_BURST, QUIC_NS)) {
-				return count(REASON_DROP_SYNRATE, XDP_DROP);
-			}
 			return count(REASON_PASS, XDP_PASS);
 		}
 	}
-	if (udp->source == bpf_htons(PORT_NTP)) {
-		if (!take_token(&ntp_rate, src, NTP_BURST, NTP_NS)) {
-			return count(REASON_DROP_NTPRATE, XDP_DROP);
+	if (udp->source == bpf_htons(PORT_NTP) || udp->source == bpf_htons(PORT_DNS)) {
+		if (!awaited(ctx, iph, udp, family)) {
+			return count(REASON_DROP_PORT, XDP_DROP);
 		}
-		return count(REASON_PASS_NTP, XDP_PASS);
-	}
-	if (udp->source == bpf_htons(PORT_DNS) && ephemeral(udp->dest)) {
-		if (!take_token(&dns_rate, src, DNS_BURST, DNS_NS)) {
-			return count(REASON_DROP_DNSRATE, XDP_DROP);
-		}
-		return count(REASON_PASS_DNS, XDP_PASS);
+		return count(udp->source == bpf_htons(PORT_NTP) ? REASON_PASS_NTP : REASON_PASS_DNS, XDP_PASS);
 	}
 	return count(REASON_DROP_PORT, XDP_DROP);
 }
 
-static __always_inline int filter_l4(void *l4, void *data_end, __u8 proto, struct src_key *src) {
+static __always_inline int filter_l4(struct xdp_md *ctx, void *iph, void *l4, void *data_end, __u8 proto, struct src_key *src) {
 	if (proto == IPPROTO_TCP) {
 		return filter_tcp(l4, data_end, src);
 	}
 	if (proto == IPPROTO_UDP) {
-		return filter_udp(l4, data_end, src);
+		return filter_udp(ctx, iph, l4, data_end, src->family);
 	}
 	return count(REASON_DROP_PROTO, XDP_DROP);
 }
 
-static __always_inline int handle_v6(void *nh, void *data_end) {
+static __always_inline int handle_v6(struct xdp_md *ctx, void *nh, void *data_end) {
 	struct ipv6hdr *ip6 = nh;
 	if ((void *)(ip6 + 1) > data_end) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
@@ -303,10 +314,10 @@ static __always_inline int handle_v6(void *nh, void *data_end) {
 	struct src_key src = {};
 	src.family = 6;
 	__builtin_memcpy(&src.ip, &ip6->saddr, 8);
-	return filter_l4(ip6 + 1, data_end, ip6->nexthdr, &src);
+	return filter_l4(ctx, ip6, ip6 + 1, data_end, ip6->nexthdr, &src);
 }
 
-static __always_inline int handle_v4(void *nh, void *data_end) {
+static __always_inline int handle_v4(struct xdp_md *ctx, void *nh, void *data_end) {
 	struct iphdr *ip = nh;
 	if ((void *)(ip + 1) > data_end) {
 		return count(REASON_DROP_TRUNCATED, XDP_DROP);
@@ -337,7 +348,7 @@ static __always_inline int handle_v4(void *nh, void *data_end) {
 	struct src_key src = {};
 	src.family = 4;
 	__builtin_memcpy(&src.ip, &ip->saddr, 4);
-	return filter_l4(l4, data_end, ip->protocol, &src);
+	return filter_l4(ctx, ip, l4, data_end, ip->protocol, &src);
 }
 
 SEC("xdp")
@@ -365,10 +376,10 @@ int flod(struct xdp_md *ctx) {
 		return count(REASON_PASS_ARP, XDP_PASS);
 	}
 	if (eth_proto == bpf_htons(ETH_P_IPV6)) {
-		return handle_v6(nh, data_end);
+		return handle_v6(ctx, nh, data_end);
 	}
 	if (eth_proto == bpf_htons(ETH_P_IP)) {
-		return handle_v4(nh, data_end);
+		return handle_v4(ctx, nh, data_end);
 	}
 	return drop_ethertype(eth_proto);
 }
