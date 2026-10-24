@@ -365,6 +365,10 @@ psql "host=db.dev.example.com port=443 sslmode=verify-full sslnegotiation=direct
   pods behind them are what the policy sees; 169.254.0.0/16 and the
   nodes stay out. With Cilium, a CiliumNetworkPolicy with
   `toEntities: [kube-apiserver]` replaces the API server's `ipBlock`.
+  `fortresskube` trusts a Service's endpoints as the Gateway does:
+  whoever may write Endpoints or EndpointSlices in a namespace (not
+  Kubernetes' `edit` or `admin` role since 1.22) can point its Services
+  at any address this policy allows.
 - An edge older than 0.7.0 refuses the `tcp-tls` proxies:
   `fortresskube` logs that the edge needs an upgrade, and its HTTP
   names are unaffected.
