@@ -6,9 +6,13 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -296,6 +300,67 @@ func TestProvisionedEdge(t *testing.T) {
 		assert.EqualValues(t, 50, statusLimits(t, ops)["max_http2_streams"])
 	})
 
+	// A stored block list longer than a PUT may send: one an older edge
+	// stored, or a damaged disk holds. These write it to the data disk
+	// while the edge is off.
+	blockList := func(second, n int) string {
+		var b strings.Builder
+		b.WriteString("exempt: [192.0.2.7]\nblock:\n")
+		for i := range n {
+			fmt.Fprintf(&b, "  - 100.%d.%d.%d\n", second, i>>8, i&255)
+		}
+		return b.String()
+	}
+	bootWith := func(t *testing.T, stored string) {
+		t.Helper()
+		vm.PowerDown(t)
+		if stored != "" {
+			storePolicy(t, filepath.Join(e.Dir, "data.img"), stored)
+		}
+		vm.Restart(t)
+		e.WaitUp(t)
+		boot = lab.BootID(t, ops)
+	}
+
+	step(t, "a policy XDP cannot swap in is refused and stays off the disk, one that reboots too", func(t *testing.T) {
+		must := require.New(t)
+		stored := limits + blockList(64, 12000)
+		bootWith(t, stored)
+		must.EqualValues(12000, opsStatus(t, ops)["blocked"])
+		// 12000 in force and 8000 new are more than the 16384 XDP holds
+		// while it swaps one list for the other.
+		next := blockList(96, 8000)
+		for _, body := range []string{limits + next, limits + "  max_http2_streams: 60\n" + next} {
+			resp, msg, err := put(ops, body)
+			must.NoError(err)
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, msg)
+			assert.Contains(t, msg, "xdp block list", msg)
+		}
+		assert.Equal(t, boot, lab.BootID(t, ops), "same boot")
+		assert.EqualValues(t, 12000, opsStatus(t, ops)["blocked"])
+		bootWith(t, "")
+		_, got, err := lab.Get(ops, lab.OpsURL+"policy")
+		must.NoError(err)
+		assert.Equal(t, stored, got, "the disk kept the policy in force")
+		assert.EqualValues(t, 12000, opsStatus(t, ops)["blocked"])
+	})
+
+	step(t, "a stored block list XDP cannot hold boots the edge without it, keeping the rest, until the next apply", func(t *testing.T) {
+		must := require.New(t)
+		bootWith(t, limits+blockList(64, 20000))
+		st := opsStatus(t, ops)
+		must.EqualValues(0, st["blocked"])
+		must.Len(st["policy_degraded"], 1, st["policy_degraded"])
+		assert.Contains(t, st["policy_degraded"].([]any)[0], "running with no block list")
+		assert.EqualValues(t, 2, st["limits"].(map[string]any)["requests_per_second"], "the stored limits")
+		assert.EqualValues(t, 1, st["limits"].(map[string]any)["exempt"], "the stored exempt")
+		assert.Contains(t, opsMetrics(t, ops), "\nfortressedge_policy_degraded 1\n")
+		must.Contains(e.Apply(t, limits), "policy applied")
+		assert.Empty(t, opsStatus(t, ops)["policy_degraded"])
+		assert.Contains(t, opsMetrics(t, ops), "\nfortressedge_policy_degraded 0\n")
+		assert.Equal(t, boot, lab.BootID(t, ops), "same boot")
+	})
+
 	step(t, "after the host address is blocked, the host can no longer connect", func(t *testing.T) {
 		must := require.New(t)
 		// XDP drops the host's ACKs from here on, so the response may not arrive.
@@ -364,4 +429,36 @@ func statusLimits(t *testing.T, ops *http.Client) map[string]any {
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &st), body)
 	return st.Limits
+}
+
+// opsStatus is /status, decoded.
+func opsStatus(t *testing.T, ops *http.Client) map[string]any {
+	t.Helper()
+	_, body, err := lab.Get(ops, lab.OpsURL+"status")
+	require.NoError(t, err)
+	var st map[string]any
+	require.NoError(t, json.Unmarshal([]byte(body), &st), body)
+	return st
+}
+
+func opsMetrics(t *testing.T, ops *http.Client) string {
+	t.Helper()
+	_, body, err := lab.Get(ops, lab.OpsURL+"metrics")
+	require.NoError(t, err)
+	return body
+}
+
+// storePolicy writes body as the stored policy on the data disk of an
+// edge that is off, with e2fsprogs' debugfs: no root, no mount.
+func storePolicy(t *testing.T, disk, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	src, script := filepath.Join(dir, "policy.yml"), filepath.Join(dir, "debugfs")
+	require.NoError(t, os.WriteFile(src, []byte(body), 0o600))
+	require.NoError(t, os.WriteFile(script, []byte("rm fortressedge/policy.yml\nwrite "+src+" fortressedge/policy.yml\n"), 0o600))
+	out, err := exec.Command("debugfs", "-w", "-f", script, disk).CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	got, err := exec.Command("debugfs", "-R", "cat fortressedge/policy.yml", disk).Output()
+	require.NoError(t, err)
+	require.Equal(t, body, string(got), "debugfs: %s", out)
 }
