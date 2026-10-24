@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -525,6 +526,31 @@ func TestParsePolicy(t *testing.T) {
 	}
 	if _, err := Parse([]byte(testUserData), []byte(testNetv1), withCA(""), []byte("block: [x]\n")); err == nil {
 		t.Fatal("Parse accepted a bad policy")
+	}
+}
+
+// XDP holds 8192 block prefixes of each address family. A policy with more
+// is refused when it is put, not when the edge next boots.
+func TestPolicyBlockFitsXDP(t *testing.T) {
+	list := func(v4, v6 int) []byte {
+		var b strings.Builder
+		b.WriteString("block:\n")
+		for i := range v4 {
+			fmt.Fprintf(&b, "  - 10.%d.%d.0/24\n", i>>8, i&255)
+		}
+		for i := range v6 {
+			fmt.Fprintf(&b, "  - 2001:db8:%x::/48\n", i)
+		}
+		return []byte(b.String())
+	}
+	p, err := ParsePolicy(list(8192, 8192))
+	if err != nil || len(p.Block) != 16384 {
+		t.Fatalf("8192 of each family: %d prefixes, %v", len(p.Block), err)
+	}
+	for _, n := range [][2]int{{8193, 0}, {0, 8193}} {
+		if _, err := ParsePolicy(list(n[0], n[1])); err == nil || !strings.Contains(err.Error(), "block") {
+			t.Errorf("%d IPv4 and %d IPv6 prefixes: %v, want a block error", n[0], n[1], err)
+		}
 	}
 }
 
