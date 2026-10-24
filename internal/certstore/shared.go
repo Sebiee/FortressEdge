@@ -3,11 +3,17 @@ package certstore
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"maps"
+	"path"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,7 +31,10 @@ type Remote interface {
 // Shared is certmagic.Storage on the edge's disk and a store the edges
 // share. The shared store is the truth: every read asks it first, so a
 // certificate another edge obtained or renewed is used, and keeps a copy
-// on disk; every write goes to disk, then to the shared store. A key the
+// on disk; every write goes to disk, then to the shared store. Anyone who
+// can write to the store reaches every edge, so what it returns is
+// checked before it is used or copied (check): a value the edge could not
+// use is refused, and the disk's copy serves instead. A key the
 // shared store does not have is not there, unless this edge wrote it
 // while the store was down and has not got it there yet (pending).
 //
@@ -212,9 +221,18 @@ func (s *Shared) Load(ctx context.Context, key string) ([]byte, error) {
 		switch {
 		case err == nil:
 			s.ok()
-			if cur, lerr := s.Local.Load(ctx, key); lerr != nil || !bytes.Equal(cur, v) {
-				_ = s.Local.Store(ctx, key, v) // the copy for when the store is down
+			otherKey, other, err := s.check(ctx, key, v)
+			if err != nil {
+				slog.Warn("cert store: refusing what the shared store holds", "key", key, "err", err)
+				if v, lerr := s.Local.Load(ctx, key); lerr == nil {
+					return v, nil
+				}
+				return nil, fmt.Errorf("cert store: %s: %w", key, err)
 			}
+			if otherKey != "" {
+				s.keep(ctx, otherKey, other)
+			}
+			s.keep(ctx, key, v)
 			return v, nil
 		case errors.Is(err, fs.ErrNotExist):
 			s.ok()
@@ -227,6 +245,95 @@ func (s *Shared) Load(ctx context.Context, key string) ([]byte, error) {
 		}
 	}
 	return s.Local.Load(ctx, key)
+}
+
+// keep copies v to the disk, for when the store is down.
+func (s *Shared) keep(ctx context.Context, key string, v []byte) {
+	if cur, err := s.Local.Load(ctx, key); err != nil || !bytes.Equal(cur, v) {
+		_ = s.Local.Store(ctx, key, v)
+	}
+}
+
+// maxValue bounds a value taken from the shared store: a certificate
+// chain, a key, or certmagic's JSON is a few KiB.
+const maxValue = 64 << 10
+
+// check is whether the edge can use v, the shared store's value at key. A
+// site's certificate and key are checked as a pair, the other half read
+// from the store too: the certificate is for the site's name and valid
+// now, and the key is its key. check returns that other half, to keep on
+// disk with v. An account key must parse, JSON must be JSON. A swapped
+// account key passes, and so does a certificate for the right name from
+// another CA: the edge has no root for a private CA's chain.
+func (s *Shared) check(ctx context.Context, key string, v []byte) (otherKey string, other []byte, err error) {
+	if len(v) > maxValue {
+		return "", nil, fmt.Errorf("%d bytes, more than %d", len(v), maxValue)
+	}
+	name, site := siteName(key)
+	switch ext := path.Ext(key); {
+	case ext == ".json":
+		if !json.Valid(v) {
+			return "", nil, errors.New("not JSON")
+		}
+	case site && (ext == ".crt" || ext == ".key"):
+		otherKey = strings.TrimSuffix(key, ext) + ".key"
+		if ext == ".key" {
+			otherKey = strings.TrimSuffix(key, ext) + ".crt"
+		}
+		other, err = s.Remote.Load(ctx, otherKey)
+		if err == nil && len(other) > maxValue {
+			err = fmt.Errorf("%d bytes, more than %d", len(other), maxValue)
+		}
+		if err != nil {
+			return "", nil, fmt.Errorf("%s: %w", otherKey, err)
+		}
+		crt, priv := v, other
+		if ext == ".key" {
+			crt, priv = other, v
+		}
+		if err := checkPair(name, crt, priv); err != nil {
+			return "", nil, err
+		}
+	case ext == ".key":
+		if _, err := certmagic.PEMDecodePrivateKey(v); err != nil {
+			return "", nil, err
+		}
+	}
+	return otherKey, other, nil
+}
+
+// siteName is the name a site's certificate, key, or metadata is for, at
+// certmagic's certificates/<issuer>/<name>/<name>.<ext>.
+func siteName(key string) (string, bool) {
+	parts := strings.Split(key, "/")
+	if len(parts) != 4 || parts[0] != "certificates" || strings.TrimSuffix(parts[3], path.Ext(parts[3])) != parts[2] {
+		return "", false
+	}
+	return parts[2], true
+}
+
+// skew is how far ahead of the edge's clock a certificate may start: a
+// CA that just issued it may run a little ahead.
+const skew = 5 * time.Minute
+
+// checkPair is whether crt is a certificate for name, valid now, and priv
+// its key.
+func checkPair(name string, crt, priv []byte) error {
+	c, err := tls.X509KeyPair(crt, priv)
+	if err != nil {
+		return err
+	}
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(leaf.DNSNames, name) {
+		return fmt.Errorf("a certificate for %v, not %s", leaf.DNSNames, name)
+	}
+	if now := time.Now(); now.Add(skew).Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
+		return fmt.Errorf("a certificate valid from %s to %s", leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 func (s *Shared) Delete(ctx context.Context, key string) error {
