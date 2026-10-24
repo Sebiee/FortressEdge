@@ -602,6 +602,19 @@ func TestParseStoredPolicyKeepsWhatItCan(t *testing.T) {
 	if len(problems) != 1 || p.Limits != DefaultLimits() || len(p.Block) != 1 {
 		t.Errorf("bad limits: %+v %v %v", p.Limits, p.Block, problems)
 	}
+	// A value of another type leaves out its key, whole, and only it.
+	typed := []byte("access_log: always\nexempt: [192.0.2.7]\nblock: [192.0.2.9]\nsites:\n  app.example.com:\n    tcp_connections_per_source: [4]\n")
+	if _, err := ParsePolicy(typed); err == nil {
+		t.Fatal("ParsePolicy took a value of another type")
+	}
+	p, problems = ParseStoredPolicy(typed)
+	if len(p.Block) != 1 || len(p.Exempt) != 1 || p.AccessLog.On || p.Sites != nil || len(problems) < 2 {
+		t.Errorf("type errors: block %v, exempt %v, access_log %v, sites %v, problems %v", p.Block, p.Exempt, p.AccessLog.On, p.Sites, problems)
+	}
+	p, problems = ParseStoredPolicy([]byte("block: [192.0.2.9, {a: 1}, 198.51.100.7]\n"))
+	if len(p.Block) != 0 || len(problems) != 1 {
+		t.Errorf("a block list with an item of another type: %v %v; want none of it", p.Block, problems)
+	}
 	p, problems = ParseStoredPolicy([]byte("block: [\n"))
 	if len(problems) != 1 || p.Limits != DefaultLimits() || len(p.Block) != 0 {
 		t.Errorf("not YAML: %+v %v", p, problems)
