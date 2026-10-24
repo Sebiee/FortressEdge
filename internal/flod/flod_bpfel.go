@@ -13,11 +13,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type flodBlockval struct {
-	_        structs.HostLayout
-	ExpireNs uint64
-}
-
 type flodBucket struct {
 	_      structs.HostLayout
 	LastNs uint64
@@ -55,6 +50,7 @@ type flodSynRateCfg struct {
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	flodMapAllowQuic  = "allow_quic"
+	flodMapBans       = "bans"
 	flodMapBlock4     = "block4"
 	flodMapBlock6     = "block6"
 	flodMapCounts     = "counts"
@@ -115,6 +111,7 @@ type flodProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type flodMapSpecs struct {
 	AllowQuic  *ebpf.MapSpec `ebpf:"allow_quic"`
+	Bans       *ebpf.MapSpec `ebpf:"bans"`
 	Block4     *ebpf.MapSpec `ebpf:"block4"`
 	Block6     *ebpf.MapSpec `ebpf:"block6"`
 	Counts     *ebpf.MapSpec `ebpf:"counts"`
@@ -151,6 +148,7 @@ func (o *flodObjects) Close() error {
 // It can be passed to loadFlodObjects or ebpf.CollectionSpec.LoadAndAssign.
 type flodMaps struct {
 	AllowQuic  *ebpf.Map `ebpf:"allow_quic"`
+	Bans       *ebpf.Map `ebpf:"bans"`
 	Block4     *ebpf.Map `ebpf:"block4"`
 	Block6     *ebpf.Map `ebpf:"block6"`
 	Counts     *ebpf.Map `ebpf:"counts"`
@@ -163,6 +161,7 @@ type flodMaps struct {
 func (m *flodMaps) Close() error {
 	return _FlodClose(
 		m.AllowQuic,
+		m.Bans,
 		m.Block4,
 		m.Block6,
 		m.Counts,

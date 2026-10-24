@@ -98,10 +98,6 @@ struct lpm6 {
 	__u8 addr[16];
 } __attribute__((packed));
 
-struct blockval {
-	__u64 expire_ns; // 0 = forever (config); non-zero = monotonic deadline (WAF ban)
-};
-
 struct src_key {
 	__u32 family; // 4 or 6
 	__u8 ip[16];
@@ -135,7 +131,6 @@ struct bpf_sock;
 
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *)2;
-static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
 static struct bpf_sock *(*bpf_sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple, __u32 tuple_size, __u64 netns, __u64 flags) = (void *)85;
 static long (*bpf_sk_release)(void *sock) = (void *)86;
