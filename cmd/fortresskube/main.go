@@ -28,6 +28,7 @@ import (
 	"github.com/fatedier/frp/pkg/config"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/config/v1/validation"
+	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/util/log"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -179,7 +180,7 @@ func run() error {
 		}()
 	}
 	edge := &edgeSupport{status: ts}
-	pub := &publisher{gwNS: gwNS, gwName: gwName, backend: be}
+	pub := &publisher{gwNS: gwNS, gwName: gwName, backend: be, static: staticNames(res.Proxies)}
 	v := view{
 		gateways: infs[gateways].GetStore(), classes: infs[gatewayClasses].GetStore(),
 		namespaces: infs[namespaces].GetStore(), services: infs[services].GetStore(),
@@ -202,7 +203,7 @@ func run() error {
 			for _, r := range stats.update(len(httpProxies), len(tlsProxies), refused) {
 				log.Warnf("%s not published: %s", strings.ToLower(r.kind), r)
 			}
-			// Static proxies come last so they win a name clash.
+			// Static proxies come last so they win a proxy name clash.
 			all := append(append(httpProxies, tlsProxies...), res.Proxies...)
 			if err := ts.publish(all); err != nil {
 				log.Warnf("publish routes: %v", err)
@@ -217,7 +218,21 @@ func run() error {
 // publisher publishes the routes its Gateway accepted.
 type publisher struct {
 	gwNS, gwName string
-	backend      backend // where the http proxies forward to
+	backend      backend         // where the http proxies forward to
+	static       map[string]bool // the names the frpc config's own proxies have
+}
+
+// staticNames is the names proxies publish.
+func staticNames(proxies []v1.ProxyConfigurer) map[string]bool {
+	names := map[string]bool{}
+	for _, p := range proxies {
+		var m msg.NewProxy
+		p.MarshalToMsg(&m)
+		for _, d := range m.CustomDomains {
+			names[strings.ToLower(d)] = true
+		}
+	}
+	return names
 }
 
 // backend is where the http proxies forward to: a Service, at its
@@ -287,7 +302,7 @@ func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfi
 	if v.tlsRoutes == nil {
 		return httpProxies, nil, refused
 	}
-	tlsProxies, tlsRefused := publishedTLS(v, gw, names)
+	tlsProxies, tlsRefused := p.publishedTLS(v, gw, names)
 	return httpProxies, tlsProxies, append(refused, tlsRefused...)
 }
 
@@ -463,8 +478,10 @@ func tunnelDefaults(common, file *v1.ClientCommonConfig) {
 // a listener which accepted them takes: the listeners' hostnames and
 // allowedRoutes decide which namespace may publish which name. Wildcards
 // and routes without hostnames are skipped: the edge only gets
-// certificates for exact names. Each name is an http proxy to p's
-// backend; while the backend has no address, each is refused instead.
+// certificates for exact names, and a name a static proxy has is
+// refused: frps would put both proxies in one group. Each name is an
+// http proxy to p's backend; while the backend has no address, each is
+// refused instead.
 func (p *publisher) published(v view, gw *gateway) (names map[string]bool, proxies []v1.ProxyConfigurer, refused []refusal) {
 	names = map[string]bool{}
 	ip, ok := p.backend.addr(v.services)
@@ -473,6 +490,10 @@ func (p *publisher) published(v view, gw *gateway) (names map[string]bool, proxi
 		for _, h := range r.Spec.Hostnames {
 			h = strings.ToLower(h)
 			if len(k8svalidation.IsDNS1123Subdomain(h)) > 0 || !covers(ls, h) {
+				continue
+			}
+			if p.static[h] {
+				refused = append(refused, refusal{httpKind.name, r.key(), h, refusedStatic})
 				continue
 			}
 			names[h] = true
@@ -490,7 +511,7 @@ func (p *publisher) published(v view, gw *gateway) (names map[string]bool, proxi
 			DomainConfig:    v1.DomainConfig{CustomDomains: []string{h}},
 		})
 	}
-	return names, proxies, nil
+	return names, proxies, refused
 }
 
 func deref(s *string, def string) string {

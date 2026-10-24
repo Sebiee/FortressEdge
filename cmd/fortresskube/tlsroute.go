@@ -60,15 +60,17 @@ const (
 	refusedALPN          = "invalid_alpn"          // fortressedge.io/alpn
 	refusedHTTPRoute     = "hostname_of_httproute" // a name is an HTTP name or a TCP route
 	refusedOlderTLSRoute = "hostname_of_tlsroute"  // an older TLSRoute has it
+	refusedStatic        = "static_proxy"          // a proxy of the frpc config has it
 )
 
 // publishedTLS is one tcp-tls proxy per hostname of each TLSRoute gw
 // accepted that a listener which accepted it takes, dialing the cluster
 // IP of the route's first backend Service directly: the edge ends TLS,
 // so the Gateway's proxy, which routes a TLS stream by its server name,
-// cannot take the stream. A hostname an HTTPRoute publishes (httpNames)
-// is refused, and so is one an older TLSRoute has.
-func publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
+// cannot take the stream. A hostname a static proxy has is refused, and
+// so are one an HTTPRoute publishes (httpNames) and one an older
+// TLSRoute has.
+func (p *publisher) publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyConfigurer, []refusal) {
 	rs := routes(v.tlsRoutes)
 	// The oldest route keeps a hostname two routes name.
 	slices.SortFunc(rs, func(a, b route) int {
@@ -107,6 +109,9 @@ func publishedTLS(v view, gw *gateway, httpNames map[string]bool) ([]v1.ProxyCon
 				refused = append(refused, refusal{tlsKind.name, key, h, refusedHostname})
 				continue
 			case !covers(ls, h):
+				continue
+			case p.static[h]:
+				refused = append(refused, refusal{tlsKind.name, key, h, refusedStatic})
 				continue
 			case httpNames[h]:
 				refused = append(refused, refusal{tlsKind.name, key, h, refusedHTTPRoute})

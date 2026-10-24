@@ -264,6 +264,47 @@ func TestPublishedDialsTheGatewaysClusterIP(t *testing.T) {
 	}
 }
 
+// A name a proxy of the frpc config has stays that proxy's: a route of
+// either kind that names it is refused, so frps never groups a tenant's
+// proxy with the operator's.
+func TestPublishedLeavesTheConfigsNamesAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frpc.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`serverAddr = "edge.example.com"
+[[proxies]]
+name = "grafana"
+type = "http"
+localIP = "10.0.0.5"
+localPort = 3000
+customDomains = ["Grafana.Ops.example.com"]
+[[proxies]]
+name = "pg"
+type = "tcp-tls"
+localIP = "10.0.0.6"
+localPort = 5432
+customDomains = ["db.ops.example.com"]
+`), 0o644))
+	res, err := config.LoadClientConfigResult(path, true)
+	require.NoError(t, err)
+	pub := *testPublisher
+	pub.static = staticNames(res.Proxies)
+
+	v := apiView(t, gatewayObj(t), classObj(t, "cilium", controller), clusterIPSvc(t, "tenant", "db", "10.0.0.7"),
+		testRoute{ns: "tenant", hostnames: []string{"app.tenant.example.com", "grafana.ops.example.com", "db.ops.example.com"}}.obj(t),
+		testRoute{kind: "TLSRoute", ns: "tenant", name: "db", hostnames: []string{"db.tenant.example.com", "db.ops.example.com", "grafana.ops.example.com"},
+			backend: map[string]any{"name": "db", "port": 5432}}.obj(t),
+	)
+	httpProxies, tlsProxies, refused := pub.publication(v)
+
+	require.Equal(t, []string{"app.tenant.example.com"}, names(httpProxies))
+	require.Equal(t, []string{"db.tenant.example.com"}, names(tlsProxies))
+	require.ElementsMatch(t, []refusal{
+		{"HTTPRoute", "tenant/r", "grafana.ops.example.com", refusedStatic},
+		{"HTTPRoute", "tenant/r", "db.ops.example.com", refusedStatic},
+		{"TLSRoute", "tenant/db", "db.ops.example.com", refusedStatic},
+		{"TLSRoute", "tenant/db", "grafana.ops.example.com", refusedStatic},
+	}, refused)
+}
+
 // -backend is a Service, dialed at its cluster IP, or an address that
 // no DNS search list changes.
 func TestParseBackend(t *testing.T) {
