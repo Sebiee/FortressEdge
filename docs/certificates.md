@@ -96,7 +96,7 @@ takes over from another) can share their certificates, ACME account,
 and challenges through a path in Vault's KV v2 engine:
 
 ```yaml
-# fortress.yml, the same on each edge but for the AppRole
+# fortress.yml, the same on each edge
 vault: https://vault.internal.example:8200
 vault_ca: |
   -----BEGIN CERTIFICATE-----
@@ -104,8 +104,12 @@ vault_ca: |
   -----END CERTIFICATE-----
 vault_mount: edge-certs   # a KV v2 mount
 vault_path: prod/public   # these edges' path in it, and nothing else's
-vault_role_id: ...        # this edge's AppRole
-vault_secret_id: ...
+vault_role_id: ...        # the edges' AppRole
+```
+
+```yaml
+# user-data, on each edge's NoCloud drive (see provisioning.md)
+vault_secret_id: ...      # this edge's own
 ```
 
 - **A certificate is ordered once.** The edge that orders a name holds a
@@ -137,13 +141,22 @@ path "edge-certs/metadata/prod/public/*" { capabilities = ["create", "read", "up
 ```
 
 Its tokens may be short-lived and renewable: the edge renews them, and
-logs in again when Vault forgets them. Binding its secret ID and tokens
-to the edge's address (`secret_id_bound_cidrs`, `token_bound_cidrs`)
-makes a leaked secret ID useless anywhere else. The secret ID is baked
-into the ISO like the rest of `fortress.yml`, and the ops API never shows
-it. Every edge with the AppRole can read the private keys of every name
-on the path: give one path to edges that serve the same names, and keep
-the ISO as you keep the keys.
+logs in again when Vault forgets them. Give each edge a secret ID of its
+own, bound, with its tokens, to that edge's address, and without expiry
+(the role's `secret_id_ttl` 0, the default), since the edge logs in at
+each boot:
+
+```sh
+vault write auth/approle/role/edge-prod/secret-id \
+  cidr_list=10.0.10.21/32 token_bound_cidrs=10.0.10.21/32
+```
+
+A secret ID taken from one edge's drive is then useless anywhere else,
+and destroying it cuts off that edge alone. The secret ID is never in
+the ISO, and the ops API never shows it. Every edge with the AppRole can
+read the private keys of every name on the path: give one path to edges
+that serve the same names, and keep each edge's `user-data` as you keep
+the keys.
 
 `cert_store` in the [status](operations.md) says whether Vault is
 `reachable`, when a call last worked (`last_ok`), failed calls by
