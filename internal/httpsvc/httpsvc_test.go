@@ -426,7 +426,7 @@ func TestDomainsObtainInTheBackground(t *testing.T) {
 	// frps holds its router lock across this call; the obtain must not.
 	returned := make(chan struct{})
 	go func() {
-		d.Domain("App.Example.com:443", true)
+		d.Domain("App.Example.com", true)
 		close(returned)
 	}()
 	within(t, returned, "Domain blocked on the obtain")
@@ -739,6 +739,35 @@ func TestDomainsRefuseWhatCannotBeADNSName(t *testing.T) {
 		if took := time.Since(start); known || took > 100*time.Millisecond {
 			t.Errorf("%d-byte host %.20q: known %v, in %v", len(host), host, known, took)
 		}
+	}
+}
+
+// frps keys a name as its dark node wrote it, lower-cased only: to it,
+// "app.example.com." and "app.example.com:443" are names of their own,
+// which no request reaches. Another node publishing and withdrawing one
+// of them, as either kind, leaves the real name's route and certificate.
+func TestDomainsIgnoreAliasesOfAName(t *testing.T) {
+	for _, alias := range []string{"app.example.com.", "app.example.com:443", "APP.example.com.:80", "app.example.com.."} {
+		d := NewDomains("tunnel.example.com")
+		d.Domain("app.example.com", true)
+		d.Domain(alias, true)
+		d.Domain(alias, false)
+		d.TCPDomain(alias, true)
+		d.TCPDomain(alias, false)
+		if !d.Routed("app.example.com") || !d.Allowed("app.example.com") {
+			t.Errorf("alias %q took app.example.com down", alias)
+		}
+	}
+	d := NewDomains("tunnel.example.com")
+	d.Domain("db.example.com.", true)
+	d.TCPDomain("db.example.com", true)
+	d.Domain("db.example.com.", false)
+	if !d.TCPRoute("db.example.com") || !d.Allowed("db.example.com") {
+		t.Fatal("an HTTP alias took a TCP route down")
+	}
+	d.Domain("new.example.com.", true)
+	if d.Known("new.example.com") || issueable("new.example.com.") {
+		t.Fatal("an alias alone published its name")
 	}
 }
 

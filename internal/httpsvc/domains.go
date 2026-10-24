@@ -19,7 +19,7 @@ import (
 	"github.com/Sebiee/fortressedge/internal/config"
 )
 
-var fqdnRegex = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}\.?$`)
+var fqdnRegex = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$`)
 
 // Domains is the set of hostnames that currently have an HTTP route or
 // a TCP route: a name is one or the other, which frps decides. frps
@@ -132,12 +132,16 @@ func (d *Domains) Domain(domain string, added bool) { d.publish(domain, added, f
 // route.
 func (d *Domains) TCPDomain(domain string, added bool) { d.publish(domain, added, true) }
 
+// publish keeps a name as frps keys it, lower case only. A name with a
+// port or a trailing dot is one of frps's own, which no request reaches
+// (frps routes a request by its host without them): folded into the bare
+// name here, its withdrawal by one node would take down another node's.
 func (d *Domains) publish(domain string, added, tcp bool) {
 	if d == nil {
 		return
 	}
-	domain = hostname(domain)
-	if domain == "" {
+	domain = strings.ToLower(domain)
+	if domain == "" || hostname(domain) != domain {
 		return
 	}
 	d.mu.Lock()
