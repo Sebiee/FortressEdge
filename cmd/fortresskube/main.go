@@ -137,14 +137,12 @@ func run() error {
 		UpdateFunc: func(_, obj any) { poke(obj) },
 		DeleteFunc: poke,
 	}
+	forbidden := make(chan error, 1)
 	infs := map[schema.GroupVersionResource]cache.SharedIndexInformer{}
 	for _, r := range []schema.GroupVersionResource{httpRoutes, gateways, gatewayClasses, namespaces, services} {
-		inf := factory.ForResource(r).Informer()
-		if _, err := inf.AddEventHandler(handler); err != nil {
+		if infs[r], err = watch(ctx, factory, r, handler, forbidden); err != nil {
 			return err
 		}
-		go inf.Run(ctx.Done())
-		infs[r] = inf
 	}
 	// Up before the first lists, so a liveness probe never finds it
 	// missing while the routes are listed.
@@ -160,8 +158,11 @@ func run() error {
 	})
 	// Publishing before the first full lists would drop every name the
 	// edge already serves.
-	if !waitSynced(ctx, infs) {
-		return <-errc
+	if err := waitSynced(ctx, infs, forbidden); err != nil {
+		if ctx.Err() != nil {
+			return <-errc
+		}
+		return fmt.Errorf("%w: fortresskube needs list and watch on it, see docs/kubernetes.md", err)
 	}
 	log.Infof("watching httproutes accepted by gateway %s/%s, forwarding to %s", gwNS, gwName, be)
 
@@ -306,22 +307,58 @@ func (p *publisher) publication(v view) (httpProxies, tlsProxies []v1.ProxyConfi
 	return httpProxies, tlsProxies, append(refused, tlsRefused...)
 }
 
+// watch starts an informer on r that calls handler, and sends to
+// forbidden the first error that says fortresskube may not list or
+// watch r.
+func watch(ctx context.Context, factory dynamicinformer.DynamicSharedInformerFactory, r schema.GroupVersionResource,
+	handler cache.ResourceEventHandler, forbidden chan<- error,
+) (cache.SharedIndexInformer, error) {
+	inf := factory.ForResource(r).Informer()
+	err := inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, rf *cache.Reflector, err error) {
+		if apierrors.IsForbidden(err) {
+			select {
+			case forbidden <- fmt.Errorf("%s: %w", r.Resource, err):
+			default:
+			}
+		}
+		cache.DefaultWatchErrorHandler(ctx, rf, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := inf.AddEventHandler(handler); err != nil {
+		return nil, err
+	}
+	go inf.Run(ctx.Done())
+	return inf, nil
+}
+
 // waitSynced waits for the informers' first full lists, and warns once
-// of each still missing after 30 seconds.
-func waitSynced(ctx context.Context, infs map[schema.GroupVersionResource]cache.SharedIndexInformer) bool {
+// of each still missing after 30 seconds. It gives up when ctx ends, or
+// with the first error from stop.
+func waitSynced(ctx context.Context, infs map[schema.GroupVersionResource]cache.SharedIndexInformer, stop <-chan error) error {
 	var synced []cache.InformerSynced
 	for _, i := range infs {
 		synced = append(synced, i.HasSynced)
 	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	go func() {
+		select {
+		case err := <-stop:
+			cancel(err)
+		case <-ctx.Done():
+		}
+	}()
 	for warned := false; ; warned = true {
-		wait, cancel := context.WithTimeout(ctx, 30*time.Second)
+		wait, cancelWait := context.WithTimeout(ctx, 30*time.Second)
 		ok := cache.WaitForCacheSync(wait.Done(), synced...)
-		cancel()
+		cancelWait()
 		if ok {
-			return true
+			return nil
 		}
 		if ctx.Err() != nil {
-			return false
+			return context.Cause(ctx)
 		}
 		for r, i := range infs {
 			if !warned && !i.HasSynced() {
@@ -355,13 +392,12 @@ func watchTLSRoutes(ctx context.Context, rc *rest.Config, factory dynamicinforme
 		case <-time.After(delay):
 		}
 	}
-	inf := factory.ForResource(tlsRoutes).Informer()
-	if _, err := inf.AddEventHandler(handler); err != nil {
+	inf, err := watch(ctx, factory, tlsRoutes, handler, nil)
+	if err != nil {
 		log.Warnf("tlsroutes: %v", err)
 		return
 	}
-	go inf.Run(ctx.Done())
-	if waitSynced(ctx, map[schema.GroupVersionResource]cache.SharedIndexInformer{tlsRoutes: inf}) {
+	if waitSynced(ctx, map[schema.GroupVersionResource]cache.SharedIndexInformer{tlsRoutes: inf}, nil) == nil {
 		synced(inf)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	dynfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/rest"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -278,6 +280,37 @@ func TestPublicationFollowsTheAPI(t *testing.T) {
 
 	require.NoError(t, dyn.Resource(tlsRoutes).Namespace("dev").Delete(ctx, "db", metav1.DeleteOptions{}))
 	wait(nil)
+}
+
+// A resource fortresskube may not list ends the wait for the first
+// lists at once, naming it, so that fortresskube exits and a Deployment
+// rolled out without the ClusterRole keeps its old pods; resources it may
+// list are waited for.
+func TestWaitSyncedStopsOnAForbiddenList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	scheme := runtime.NewScheme()
+	resources := map[schema.GroupVersionResource]string{namespaces: "NamespaceList", services: "ServiceList"}
+	for r, list := range resources {
+		scheme.AddKnownTypeWithName(r.GroupVersion().WithKind(list), &unstructured.UnstructuredList{})
+	}
+	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, resources)
+	dyn.PrependReactor("list", "namespaces", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(namespaces.GroupResource(), "", errors.New("RBAC: access denied"))
+	})
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 0)
+	forbidden := make(chan error, 1)
+	infs := map[schema.GroupVersionResource]cache.SharedIndexInformer{}
+	for r := range resources {
+		inf, err := watch(ctx, factory, r, cache.ResourceEventHandlerFuncs{}, forbidden)
+		require.NoError(t, err)
+		infs[r] = inf
+	}
+
+	require.NoError(t, waitSynced(ctx, map[schema.GroupVersionResource]cache.SharedIndexInformer{services: infs[services]}, nil))
+	err := waitSynced(ctx, infs, forbidden)
+	require.True(t, apierrors.IsForbidden(err), "%v", err)
+	require.ErrorContains(t, err, "namespaces")
 }
 
 func TestOldEdge(t *testing.T) {
