@@ -713,9 +713,12 @@ func TestUnreadBodyHoldsNoConnection(t *testing.T) {
 		t.Fatalf("got %q, then %v", b, err)
 	}
 	// A name the edge hides: net/http reads the body before it closes.
-	b, err = exchangeRaw(t, addr, "POST /x HTTP/1.1\r\nHost: nobody.example.com\r\nContent-Length: 10\r\n\r\n")
-	if len(b) != 0 || err != nil {
-		t.Fatalf("hidden name: got %q, then %v", b, err)
+	// Its HTTP/1 server takes "PRI * HTTP/2.0" as a request too.
+	for _, line := range []string{"POST /x HTTP/1.1", "PRI * HTTP/2.0"} {
+		b, err = exchangeRaw(t, addr, line+"\r\nHost: nobody.example.com\r\nContent-Length: 10\r\n\r\n")
+		if len(b) != 0 || err != nil {
+			t.Fatalf("hidden name, %s: got %q, then %v", line, b, err)
+		}
 	}
 
 	// A connection a handler hijacked is its own, even once that handler
