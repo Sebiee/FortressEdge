@@ -486,8 +486,10 @@ names visitors make up.
 | `fortressedge_ntp_falsetickers_total` | `server` | polls that found a server's time off from the others' |
 
 XDP's reasons: `pass` for `service` (HTTP, HTTPS, QUIC), `reply` (to the
-edge's own connections), `arp`, `icmp6`, `icmp3`, `ntp`, `dns`; `drop` for
-`block` (block list and bans), `port`, `synrate`, `ntprate`, `dnsrate`,
+edge's own connections), `arp`, `icmp6`, `icmp3`, `ntp`, `dns` (replies to
+the edge's own queries: only to a port it sent one from); `drop` for
+`block` (block list and bans), `port` (also an NTP or DNS reply to a port
+with no query), `synrate`,
 `ethertype` (not IPv4, IPv6, or ARP), `proto` (an IP protocol other than
 TCP, UDP, ICMP: VRRP, IGMP, GRE…), `icmp` (ICMPv4 other than unreachable),
 `fragment` (an IPv4 fragment after the first), and `truncated` (a header
@@ -516,7 +518,7 @@ limits:
   connections_per_source: 256       # open connections
   requests_per_second: 150          # sustained, per source
   request_burst: 600                # at once: several heavy pages from one address
-  new_connections_per_second: 64    # TCP SYNs, dropped in XDP
+  new_connections_per_second: 64    # TCP SYNs, dropped in XDP during a SYN flood
   new_connection_burst: 128
   ban: 15m                          # how long; 0: refuse, never ban
   ban_after: 200                    # refusals that earn a ban...
@@ -560,7 +562,7 @@ logs.
 
 | Over the limit | What the source sees |
 | --- | --- |
-| `new_connections_per_second` | its SYN is dropped; the client retries after a second or more |
+| `new_connections_per_second` | during a SYN flood, its SYN is dropped; the client retries after a second or more |
 | `connections_per_source` | the connection is closed at accept, before any byte |
 | `max_connections` | accept waits until a connection closes |
 | `requests_per_second` / `request_burst` | `429` with `Retry-After: 1` |
@@ -571,6 +573,14 @@ logs.
 | `response_header_timeout` | `504` with an empty body |
 | `tcp_connections_per_source` | the connection to the TCP route is closed before its TLS handshake |
 | `tcp_idle_timeout` | the TCP route's connection is closed: the client reads EOF |
+
+`new_connections_per_second` and `new_connection_burst` apply only while
+the edge is in a SYN flood: more than 4096 SYNs a second, or 4096 at
+once, from all sources together. A source address can be forged: a
+limit per source that always applied would let a stranger spend a
+source's allowance with a few forged SYNs a second and cut it off. Below
+the flood rate, the kernel's SYN cookies and the limits above protect the
+edge; during a flood, each source is held to its rate again.
 
 Each refused request (`429`) or connection is a strike. A source with
 more than `ban_after` strikes within `ban_window`, counted from its first
@@ -587,7 +597,7 @@ a second for ten seconds:
 | a script at 151 requests a second | about one `429` a second once its burst is spent; never banned |
 | a script at 300 requests a second | about 150 `429`s a second once its burst is spent (after 4 s); banned about 1.3 s later |
 | a flood at 1000 requests a second | burst spent in under a second; banned a quarter of a second later |
-| a burst of new connections | SYNs over the rate dropped; never banned |
+| a burst of new connections | all pass, unless the edge is in a SYN flood; then SYNs over the rate are dropped; never banned |
 
 For scale: one vCPU serves about 1,500 site requests a second end to
 end (TLS, frp, a small origin response), and the limit check costs

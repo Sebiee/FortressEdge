@@ -112,10 +112,33 @@ struct bucket {
 	__u32 tokens;
 };
 
+struct bpf_sock_tuple {
+	union {
+		struct {
+			__u32 saddr;
+			__u32 daddr;
+			__u16 sport;
+			__u16 dport;
+		} ipv4;
+		struct {
+			__u32 saddr[4];
+			__u32 daddr[4];
+			__u16 sport;
+			__u16 dport;
+		} ipv6;
+	};
+};
+
+struct bpf_sock;
+
+#define BPF_F_CURRENT_NETNS (-1L)
+
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *)2;
 static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static struct bpf_sock *(*bpf_sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple, __u32 tuple_size, __u64 netns, __u64 flags) = (void *)85;
+static long (*bpf_sk_release)(void *sock) = (void *)86;
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define bpf_htons(x) __builtin_bswap16(x)
