@@ -236,6 +236,9 @@ func TestSharedGivesUpOnALockHeldTooLong(t *testing.T) {
 	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	must(t, s.Lock(lctx, "issue_cert_a.example.com"))
+	if s.Status()["reachable"] != true {
+		t.Fatal("a lock held too long took Vault for down: what the edge orders would not reach it")
+	}
 	must(t, s.Unlock(ctx, "issue_cert_a.example.com"))
 }
 
@@ -360,8 +363,9 @@ func pair(t *testing.T, name string, from, until time.Time) (crt, key []byte) {
 // What Vault holds is checked before an edge copies it to its disk or
 // uses it, since every edge on the path trusts it: a value too large to
 // be a certificate, a key that is not the certificate's, a certificate for
-// another name or outside its dates, or metadata that is not JSON. The
-// edge keeps its disk's copy instead, and without one, the load fails.
+// another name or outside its dates, or metadata certmagic cannot read.
+// The edge keeps its disk's copy instead, and without one, the load fails;
+// but an expired certificate is taken, for certmagic to renew.
 func TestSharedRefusesWhatItCannotUse(t *testing.T) {
 	ctx := context.Background()
 	srv := fakeVault(t)
@@ -380,16 +384,18 @@ func TestSharedRefusesWhatItCannotUse(t *testing.T) {
 	oldCrt, oldKey := pair(t, "app.example.com", now.Add(-2*time.Hour), now.Add(-time.Hour))
 	newCrt, newKey := pair(t, "app.example.com", now.Add(time.Hour), now.Add(2*time.Hour))
 	for _, tc := range []struct {
-		name string
-		bad  map[string][]byte
+		name      string
+		bad       map[string][]byte
+		renewable bool
 	}{
-		{"too large", map[string][]byte{".json": []byte(`"` + strings.Repeat("A", 1<<20) + `"`)}},
-		{"another key", map[string][]byte{".key": strayKey}},
-		{"another name", map[string][]byte{".crt": otherCrt, ".key": otherKey}},
-		{"expired", map[string][]byte{".crt": oldCrt, ".key": oldKey}},
-		{"not yet valid", map[string][]byte{".crt": newCrt, ".key": newKey}},
-		{"not a certificate", map[string][]byte{".crt": []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")}},
-		{"metadata", map[string][]byte{".json": []byte("{")}},
+		{"too large", map[string][]byte{".json": []byte(`"` + strings.Repeat("A", 1<<20) + `"`)}, false},
+		{"another key", map[string][]byte{".key": strayKey}, false},
+		{"another name", map[string][]byte{".crt": otherCrt, ".key": otherKey}, false},
+		{"expired", map[string][]byte{".crt": oldCrt, ".key": oldKey}, true},
+		{"not yet valid", map[string][]byte{".crt": newCrt, ".key": newKey}, false},
+		{"not a certificate", map[string][]byte{".crt": []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")}, false},
+		{"metadata not JSON", map[string][]byte{".json": []byte("{")}, false},
+		{"metadata of another shape", map[string][]byte{".json": []byte(`{"sans":"app.example.com"}`)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for ext, v := range good {
@@ -407,9 +413,16 @@ func TestSharedRefusesWhatItCannotUse(t *testing.T) {
 				}
 			}
 			fresh, freshDisk := shared(t, srv)
-			for ext := range tc.bad {
-				if v, err := fresh.Load(ctx, site+ext); err == nil {
-					t.Errorf("an edge without a copy loads %s: %.40q", ext, v)
+			for ext, bad := range tc.bad {
+				v, err := fresh.Load(ctx, site+ext)
+				if tc.renewable {
+					if err != nil || !bytes.Equal(v, bad) || !freshDisk.Exists(ctx, site+ext) {
+						t.Errorf("an edge without a copy does not take %s to renew it: %v", ext, err)
+					}
+					continue
+				}
+				if err == nil || errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("an edge without a copy loads %s: %.40q, %v", ext, v, err)
 				}
 				if freshDisk.Exists(ctx, site+ext) {
 					t.Errorf("%s written to the disk", ext)
@@ -428,6 +441,40 @@ func TestSharedRefusesWhatItCannotUse(t *testing.T) {
 	}
 	if got, _ := disk.Load(ctx, site+".key"); !bytes.Equal(got, key2) {
 		t.Fatal("the renewed certificate's key is not on the disk with it")
+	}
+}
+
+// flaky is a store that does not answer for one key.
+type flaky struct {
+	Remote
+	key string
+}
+
+func (f flaky) Load(ctx context.Context, key string) ([]byte, error) {
+	if key == f.key {
+		return nil, errors.New("connection reset")
+	}
+	return f.Remote.Load(ctx, key)
+}
+
+// A certificate whose key Vault does not answer for is Vault down, not a
+// value refused: the edge serves from its disk, and an edge with nothing
+// there finds nothing, so it orders rather than remove what Vault holds.
+func TestSharedTakesAHalfAnsweredPairAsTheStoreDown(t *testing.T) {
+	ctx := context.Background()
+	srv := fakeVault(t)
+	const site = "certificates/ca/app.example.com/app.example.com"
+	crt, key := pair(t, "app.example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	other := client(t, srv)
+	must(t, other.Store(ctx, site+".crt", crt))
+	must(t, other.Store(ctx, site+".key", key))
+	s := NewShared(newDisk(t), flaky{client(t, srv), site + ".key"})
+	s.Seed(ctx)
+	if _, err := s.Load(ctx, site+".crt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("load: %v", err)
+	}
+	if s.Status()["reachable"] != false {
+		t.Fatal("Vault not taken as down")
 	}
 }
 
