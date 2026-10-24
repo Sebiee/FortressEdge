@@ -223,9 +223,14 @@ func TestParseVault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	full := "vault: https://130.92.187.120:8200/\nvault_mount: edge-certs\nvault_path: test/private\n" +
-		"vault_role_id: r\nvault_secret_id: s\n"
-	c, err = parse(full + "vault_ca: |\n" + indentPEM(string(crt)+string(other)))
+	// The secret ID is the edge's own, on its NoCloud drive: an ISO is
+	// shared and copied, and holds no secret.
+	secret := []byte(testUserData + "vault_secret_id: s\n")
+	parseVault := func(edge string) (Config, error) {
+		return Parse(secret, []byte(testNetv1), withCA(edge), nil)
+	}
+	full := "vault: https://130.92.187.120:8200/\nvault_mount: edge-certs\nvault_path: test/private\nvault_role_id: r\n"
+	c, err = parseVault(full + "vault_ca: |\n" + indentPEM(string(crt)+string(other)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,19 +238,31 @@ func TestParseVault(t *testing.T) {
 		v.RoleID != "r" || v.SecretID != "s" || !bytes.Contains(v.CA, []byte("BEGIN CERTIFICATE")) {
 		t.Fatalf("vault: %+v", c.Vault)
 	}
-	if c, err := parse(full); err != nil || c.Vault == nil || c.Vault.CA != nil {
+	if c, err := parseVault(full); err != nil || c.Vault == nil || c.Vault.CA != nil {
 		t.Fatalf("system roots: %+v %v", c.Vault, err)
+	}
+	if err := CheckEdge(withCA(full)); err != nil {
+		t.Fatalf("a bake checks fortress.yml without the secret ID: %v", err)
+	}
+	if err := CheckEdge(withCA(full + "vault_secret_id: s\n")); err == nil || !strings.Contains(err.Error(), "user-data") {
+		t.Fatalf("a secret ID in fortress.yml: %v", err)
+	}
+	if _, err := parse(full); err == nil || !strings.Contains(err.Error(), "vault_secret_id") {
+		t.Fatalf("no secret ID in user-data: %v", err)
+	}
+	if _, err := parseVault(""); err == nil {
+		t.Fatal("a secret ID without vault: want error")
 	}
 	for _, bad := range []string{
 		"vault: https://v.example.com:8200\n", // no mount, path, or role
 		strings.Replace(full, "https://130.92.187.120:8200/", "http://130.92.187.120:8200", 1),
 		strings.Replace(full, "https://130.92.187.120:8200/", "https://130.92.187.120:8200/v1", 1),
 		strings.Replace(full, "test/private", "test/../x", 1),
-		strings.Replace(full, "vault_secret_id: s\n", "", 1),
+		strings.Replace(full, "vault_role_id: r\n", "", 1),
 		full + "vault_ca: not-a-cert\n",
 		"vault_ca: |\n" + indentPEM(string(crt)),
 	} {
-		if _, err := parse(bad); err == nil {
+		if _, err := parseVault(bad); err == nil {
 			t.Errorf("%q: want error", bad)
 		}
 	}
