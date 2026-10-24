@@ -45,8 +45,10 @@ rejecting it, removes the name, and other names keep running.
   and counted (`backend_service`).
 - Nothing is published until the first full list of each resource it
   reads arrives, and an API server outage keeps the last lists. A list
-  still missing after 30 s is warned about: usually a permission the
-  ClusterRole below lacks.
+  the API server forbids at start stops `fortresskube` with an error that
+  names the resource, so a Deployment rolled out without the ClusterRole
+  below keeps its old pods; a list missing after 30 s for another reason
+  is warned about, and waited for.
 - The frpc admin API's reload is refused: it would replace the routes
   with the file's proxies.
 - Outside a cluster, `-kubeconfig` (or `KUBECONFIG`) points it at one.
