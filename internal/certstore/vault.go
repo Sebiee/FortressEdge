@@ -384,8 +384,8 @@ var (
 
 // lockData is what a lock holds. This edge reads none of it; edges
 // before it take a lock over once expires has passed.
-func lockData() map[string]any {
-	return map[string]any{"expires": time.Now().Add(lockTTL).Unix()}
+func lockData(ttl time.Duration) map[string]any {
+	return map[string]any{"expires": time.Now().Add(ttl).Unix()}
 }
 
 // lockSeen is a version of a lock another edge holds, and when this edge
@@ -403,7 +403,7 @@ type lockSeen struct {
 func (v *Vault) tryLock(ctx context.Context, p string, seen *lockSeen) (int, error) {
 	var ver int
 	err := v.do(ctx, func(ctx context.Context) error {
-		s, err := v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(0))
+		s, err := v.kv.Put(ctx, p, lockData(lockTTL), vault.WithCheckAndSet(0))
 		if err == nil {
 			ver = s.VersionMetadata.Version
 			return nil
@@ -426,7 +426,7 @@ func (v *Vault) tryLock(ctx context.Context, p string, seen *lockSeen) (int, err
 		if time.Since(seen.at) < lockTTL {
 			return errLocked
 		}
-		s, err = v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(m.Version))
+		s, err = v.kv.Put(ctx, p, lockData(lockTTL), vault.WithCheckAndSet(m.Version))
 		if casMismatch(err) {
 			return errLocked
 		}
@@ -445,9 +445,10 @@ func (v *Vault) hold(name, p string, ver int) {
 	v.locksMu.Lock()
 	v.locks[name] = l
 	v.locksMu.Unlock()
+	ttl := lockTTL
 	go func() {
 		defer close(l.done)
-		t := time.NewTicker(lockTTL / 3)
+		t := time.NewTicker(ttl / 3)
 		defer t.Stop()
 		for {
 			select {
@@ -461,7 +462,7 @@ func (v *Vault) hold(name, p string, ver int) {
 			var s *vault.KVSecret
 			err := v.do(ctx, func(ctx context.Context) error {
 				var err error
-				s, err = v.kv.Put(ctx, p, lockData(), vault.WithCheckAndSet(ver))
+				s, err = v.kv.Put(ctx, p, lockData(ttl), vault.WithCheckAndSet(ver))
 				return err
 			})
 			if casMismatch(err) {
