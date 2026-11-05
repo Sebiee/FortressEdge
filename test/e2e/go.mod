@@ -109,7 +109,11 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // headers, the OnDomain callback, 502 for a down origin, a
 // client-certificate VerifyConnection hook, and a site proxy the edge
 // calls in-process that uses work connections on the request's goroutine,
-// groups by client identity, and tcp-tls proxies whose TLS the edge ends.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261007202022-a4cf06922fe7
+// groups by client identity, and tcp-tls proxies whose TLS the edge ends;
+// and, for a client with an identity, a name owned by one identity with a
+// grace after it leaves, canonical names, proxy names and run IDs of its
+// own, http and tcp-tls proxies only, and limits on its logins, proxies,
+// names and stream windows.
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261024234117-b90c5c91aa80
 
 tool gotest.tools/gotestsum
