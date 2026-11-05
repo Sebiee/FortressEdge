@@ -1,5 +1,87 @@
 # Changelog
 
+## Unreleased
+
+Security fixes from an audit of the edge, the frp fork and
+`fortresskube`. Some change configuration or permissions, so this is a
+minor release.
+
+Changes that need an operator:
+
+- The Vault AppRole secret ID moves out of `fortress.yml`, and so out of
+  the ISO, into each edge's cloud-init `user-data`
+  (`vault_secret_id`). `fortress.yml` and `bake` refuse the key, so an
+  ISO can no longer carry a secret, and each edge gets its own secret ID
+  that Vault can bind to its address. See
+  [provisioning](docs/provisioning.md). The Terraform provider needs the
+  matching release.
+- `fortresskube` needs `list` and `watch` on `gateways`,
+  `gatewayclasses`, `namespaces` and `services` besides the routes, and
+  stops at start, naming the resource, when one is forbidden. An
+  explicit `-backend` must be `NAME.NAMESPACE.svc:PORT`, an IP, or a
+  name ending with a dot.
+- A dark node may publish `http` and `tcp-tls` proxies only, at most 16
+  logins, 1024 proxies and 256 names per node certificate, and at most
+  64 routes per name. Names are refused with a port, a trailing dot, an
+  IP address or a `*` anywhere but in front, and locations must be clean
+  path prefixes.
+- A block list holds at most 8192 prefixes of each family.
+- The XDP metric reasons `drop_ntprate` and `drop_dnsrate` are gone:
+  such packets count as `drop_port`.
+
+The fixes:
+
+- Names belong to one dark node. A name, with all its locations, HTTP
+  users and kinds, is one node certificate's while any of its proxies
+  has it, and for 10 minutes after the last leaves, so another node
+  cannot take it during a reconnect. A name the edge holds is answered
+  503 by the edge itself, never by another node's wildcard, and an exact
+  name never falls back to another node's wildcard for a path or user it
+  does not serve. Proxy names, run IDs and idle work connections are
+  each node's own.
+- A forged source address no longer spends a real source's limits. The
+  per-source SYN limit applies only during a SYN flood, NTP and DNS
+  replies pass only to a query an edge socket made, bans live in a map
+  of their own and are swept, and a block list update either applies
+  whole or leaves the old one in force.
+- A policy is stored only once it is in force, in both the live and the
+  rebooting branch: a refused PUT changes nothing. A stored policy that
+  cannot load no longer stops the boot: the edge runs without what it
+  could not load, keeps the rest, and reports it in `/~!ops/status` as
+  `policy_degraded` and in `fortressedge_policy_degraded` until the next
+  apply.
+- A host name longer than any DNS name is refused before any lookup.
+- A request body or response that stops moving for a minute ends (`408`
+  for a body, counted as `body_timeout`), HTTP/2 connections are pinged
+  and closed when they do not answer, and a source may have at most
+  `request_burst` requests open at once. WebSockets and quiet streams go
+  on.
+- An origin's response head is bounded at 64 KiB and five 1xx
+  responses, and a request write to an origin that stops reading times
+  out with a `504`.
+- A dark node's tunnel gets 256 KiB stream windows, its login fields are
+  bounded, and QUIC validates a new source's address with a Retry before
+  any handshake.
+- Port 80 sends nothing to a request it would not redirect, Go's own
+  error replies included, and answers one request per connection.
+- What Vault returns is checked before it is used or copied to disk: a
+  certificate and key that parse and match, for the name, valid now,
+  each value at most 64 KiB. A stored certificate the edge cannot use,
+  the tunnel's included, is ordered again instead of stopping the boot.
+  A Vault lock that nobody refreshes is taken over after a minute, and
+  waiting for one gives up after two.
+- New ACME orders are capped at 30 at once, then one every two minutes,
+  and a name whose order failed waits, doubling up to 6 hours, even when
+  it is published again.
+- `fortresskube` trusts a route's status only from its Gateway's
+  controller, for the current generation and a parent the route still
+  names. It publishes only the hostnames a listener that accepted the
+  route takes, a TLSRoute's only under its most specific TLS listener,
+  and only with `ResolvedRefs`. It dials Services at their cluster IP,
+  never a relative name, `-health` included, refuses ExternalName and
+  headless Services, and refuses a route's hostname that a static proxy
+  in `frpc.toml` has.
+
 ## 0.8.0
 
 - `fortresskube` for an edge service with several edges behind one
