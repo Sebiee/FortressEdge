@@ -61,6 +61,8 @@ func run() error {
 	backend := flag.String("backend", "", "host:port the published proxies forward to (default cilium-gateway-NAME.NAMESPACE.svc:80)")
 	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path; empty means in-cluster")
 	metricsAddr := flag.String("metrics", "", "host:port to serve Prometheus metrics on, such as :9100; empty serves none")
+	healthAddr := flag.String("health", "", "host:port to serve /healthz on, such as :8081, for a liveness probe: "+
+		"200 while a TCP connection to the backend opens, 503 while not; empty serves none")
 	flag.Parse()
 
 	gwNS, gwName, ok := strings.Cut(*gateway, "/")
@@ -77,6 +79,11 @@ func run() error {
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return fmt.Errorf("-backend port: %w", err)
+	}
+	// Up from the start, so a liveness probe never finds it missing while
+	// the routes are still being listed.
+	if *healthAddr != "" {
+		go serveHealth(*healthAddr, newBackendHealth(host, port))
 	}
 
 	res, err := config.LoadClientConfigResult(*cfgPath, true)

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `fortresskube -health :8081` serves `/healthz` for a liveness probe:
+  `200` while a TCP connection to `-backend` opens, `503` while not. A
+  replica that cannot reach its backend while the others can (its node's
+  networking, or a Gateway served per node such as Cilium's Envoy) is
+  restarted by the kubelet, its tunnel closes, and the edge sends its
+  share to the other replicas. Use it with two or more replicas on
+  different nodes: with the backend down for all of them, all restart.
+  Off by default. See "A replica without its backend" in
+  [Kubernetes](docs/kubernetes.md).
+
 ## 0.7.2
 
 - The release of 0.7.0's changes. The release jobs of v0.7.0 and v0.7.1

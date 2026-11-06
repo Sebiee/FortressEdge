@@ -23,6 +23,9 @@ rejecting it, removes the name, and other names keep running.
   `fortresskube_published_names{kind}` and the TLSRoutes it refuses
   (`fortresskube_refused_tlsroutes{reason}`,
   `fortresskube_tlsroute_refusals_total{reason}`). Off by default.
+- `-health :8081` serves `/healthz`, for a liveness probe on a replica
+  that cannot reach its backend. Off by default. See **A replica without
+  its backend** below.
 
 Releases attach the binary and push the image
 `ghcr.io/sebiee/fortressedge/fortresskube:<tag>`.
@@ -122,6 +125,47 @@ unused, without the error message older edges sent (frpc logged it as
 most that helps. The edge's [metrics](operations.md#metrics) cover `fortresskube`'s
 health: `fortressedge_tunnel_clients{node="<name>"}` counts its open
 tunnels; `-metrics` adds what it publishes and refuses.
+
+**A replica without its backend.** A replica forwards every request it
+gets to `-backend`. If it cannot reach the backend while the others can,
+its tunnel stays up and the edge keeps sending it its share, which fails.
+`-health :8081` lets the kubelet take such a replica out: `/healthz`
+answers `200` while a TCP connection to `-backend` opens and `503` while
+not, with the reason. A liveness probe on it restarts the replica, its
+tunnel closes, and the edge sends its share to the others.
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 8081 }
+  periodSeconds: 1
+  timeoutSeconds: 1
+  failureThreshold: 3
+```
+
+- It helps when the failure is one replica's own: its node's networking,
+  or a Gateway served per node. Cilium is the common case: a connection to
+  a Gateway's address goes only to the node's own Envoy, never another
+  node's, so a replica whose Envoy is gone fails the check. With the probe
+  above, a short restart of the backend (Cilium's Envoy restarts in about
+  2 s) does not trip it.
+- Use it with two or more replicas on different nodes. It has no fail-open:
+  when the backend is down for every replica, or there is only one, every
+  replica restarts, the tunnels come and go, and the kubelet's growing
+  restart delay can hold them back for a while after the backend returns.
+  Without the probe the edge would answer `502` meanwhile; with it, `503`
+  for `tunnel_grace`, then nothing.
+- It reports the backend only, not the tunnel: frpc reconnects a tunnel by
+  itself, and a restart would not help it.
+- It checks the HTTP backend only. [TCP routes](#tcp-routes) go to each
+  TLSRoute's own Service, which it does not check.
+- A backend that accepts connections but does not answer passes: the check
+  opens a TCP connection and sends nothing, so it adds nothing to the
+  backend's request logs.
+- The name is resolved on each check, so a new Service address is
+  followed. When the lookup fails, the last address is used: the
+  cluster's DNS being away is not the backend being away. A check takes at
+  most 0.8 s, within the probe's timeout. Each change between up and down
+  is logged once, with its reason.
 
 **Several replicas.** Every replica of the Deployment uses the same
 node certificate, so the edge sees them as one dark node,
