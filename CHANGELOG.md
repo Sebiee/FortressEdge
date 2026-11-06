@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.3
 
 - `fortresskube -health :8081` serves `/healthz` for a liveness probe:
   `200` while a TCP connection to `-backend` opens, `503` while not. A
