@@ -174,7 +174,10 @@ its tunnel stays up and the edge keeps sending it its share, which fails.
 `-health :8081` lets the kubelet take such a replica out: `/healthz`
 answers `200` while a TCP connection to `-backend` opens and `503` while
 not, with the reason. A Service is checked at its cluster IP, as the
-proxies dial it, and passes until the replica has listed the Services.
+proxies dial it. The check passes until the replica has listed the
+Services, and while the Service has no cluster IP (missing, headless, or
+ExternalName): the replica then refuses its routes, the same as every
+other replica, and a restart would not bring it back; it logs that once.
 A liveness probe on it restarts the replica, its tunnel closes, and the
 edge sends its share to the others.
 

@@ -65,7 +65,8 @@ func TestBackendHealth(t *testing.T) {
 }
 
 // A Service backend is checked at its cluster IP from the Services watch,
-// and passes until the Services are listed.
+// as the proxies dial it, never an address it had before; it passes until
+// the Services are listed, and while the Service has no cluster IP.
 func TestBackendHealthService(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -84,14 +85,34 @@ func TestBackendHealthService(t *testing.T) {
 	services := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	listed := false
 	b := newBackendHealth(backend{svcNS: "infra", svc: "cilium-gateway-public", port: port}, services, func() bool { return listed })
+	dials := 0
+	dial := b.dial
+	b.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials++
+		return dial(ctx, network, addr)
+	}
 	require.NoError(t, b.check(context.Background()), "Services not listed yet")
 
 	listed = true
-	require.Error(t, b.check(context.Background()), "no such Service")
+	require.NoError(t, b.check(context.Background()), "no such Service")
+	require.True(t, b.unchecked)
 
-	require.NoError(t, services.Add(svcObj(t, "infra", "cilium-gateway-public", map[string]any{"type": "ExternalName", "externalName": "127.0.0.1"})))
-	require.Error(t, b.check(context.Background()), "ExternalName")
-
-	require.NoError(t, services.Update(clusterIPSvc(t, "infra", "cilium-gateway-public", "127.0.0.1")))
+	svc := clusterIPSvc(t, "infra", "cilium-gateway-public", "127.0.0.1")
+	require.NoError(t, services.Add(svc))
 	require.NoError(t, b.check(context.Background()))
+	require.False(t, b.unchecked)
+	require.Equal(t, 1, dials)
+
+	require.NoError(t, services.Update(svcObj(t, "infra", "cilium-gateway-public", map[string]any{"type": "ExternalName", "externalName": "127.0.0.1"})))
+	require.NoError(t, b.check(context.Background()), "ExternalName")
+	require.Equal(t, 1, dials, "the old cluster IP is not dialled")
+
+	require.NoError(t, services.Update(svc))
+	require.NoError(t, ln.Close())
+	require.Error(t, b.check(context.Background()), "backend gone")
+	require.NotEmpty(t, b.down)
+
+	require.NoError(t, services.Delete(svc))
+	require.NoError(t, b.check(context.Background()), "Service deleted")
+	require.Equal(t, 2, dials, "the old cluster IP is not dialled")
 }
