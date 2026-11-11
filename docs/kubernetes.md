@@ -208,11 +208,12 @@ livenessProbe:
 - A backend that accepts connections but does not answer passes: the check
   opens a TCP connection and sends nothing, so it adds nothing to the
   backend's request logs.
-- The name is resolved on each check, so a new Service address is
-  followed. When the lookup fails, the last address is used: the
-  cluster's DNS being away is not the backend being away. A check takes at
-  most 0.8 s, within the probe's timeout. Each change between up and down
-  is logged once, with its reason.
+- A Service is read from the replica's watch of Services on each check,
+  so a new cluster IP is followed. An IP or a name ending with a dot is
+  resolved on each check; when that lookup fails, the last address is
+  used: the cluster's DNS being away is not the backend being away. A
+  check takes at most 0.8 s, within the probe's timeout. Each change
+  between up, down and not checked is logged once, with its reason.
 
 **An edge service with several edges.** A replica holds one tunnel. When
 `serverAddr` stands for several edges, three things keep that tunnel in
@@ -234,21 +235,27 @@ the right place:
   replicas do not renew together), and the balancer can give it to the
   edge with the fewest. The new tunnel logs in under its own frp `user`
   (`<host name>-<n>`), so the edge tells it from the old one. If it does
-  not log in and publish within 15 seconds it is dropped and the old one
-  stays.
+  not log in and publish every name the old one publishes within 15
+  seconds, it is dropped and the old one stays.
 - **The retirement.** The old tunnel takes its names back, so the edge
-  sends it no new request, and closes when the requests and TCP sessions
-  it carries have ended. A long TCP session or a stream is not cut. The
-  edge keeps a work connection for the next request for up to a minute,
-  so the old tunnel closes up to a minute after its last request, or at
-  once when its connection ends by itself.
+  sends it no new request, and closes a few seconds after the requests
+  and TCP sessions it carries have ended, or at once when its connection
+  ends by itself. A replica keeps at most 4 old tunnels: a renewal that
+  would keep a fifth closes the oldest, and cuts what it still carries.
+  So a WebSocket, a stream or a TCP session lives through at least 4
+  renewals, 20 minutes at `-renew 5m`; a client that holds one longer
+  must reconnect. `fortresskube_tunnels_cut_total` and
+  `fortresskube_tunnel_streams_cut_total` count the cuts, and each is
+  logged with what it cut.
 
 `-metrics` adds the tunnel's own: `fortresskube_tunnel_up`,
 `fortresskube_tunnel_info{server}` (the address it dialled last),
 `fortresskube_tunnel_age_seconds`, `fortresskube_tunnel_streams` (the
 requests and TCP sessions it carries now), `fortresskube_tunnels_retiring`,
-`fortresskube_tunnel_dials_total{result}` and
-`fortresskube_tunnel_renewals_total{result}`.
+`fortresskube_tunnel_dials_total{result}`,
+`fortresskube_tunnel_renewals_total{result}`,
+`fortresskube_tunnels_cut_total` and
+`fortresskube_tunnel_streams_cut_total`.
 
 **Several replicas.** Every replica of the Deployment uses the same
 node certificate, so the edge sees them as one dark node,
@@ -270,15 +277,14 @@ count the replicas logged in. Spread them across zones, as above, so
 that losing a node or a zone leaves the sites up.
 
 Each edge limits one certificate to 64 logins, 4096 proxies and 256
-names. The logins of a certificate on an edge are the replicas that
-reach it, plus one for each replica renewing its tunnel (`-renew`), plus
-retired tunnels that still carry a stream: a renewal waits while a
-replica has two of those, so a replica holds at most four. Where edges
-are away and one edge takes every replica, about 15 replicas of one
-certificate fit with room to spare. Every login publishes every name, so
-the proxies are the logins times the names. Past a limit, the edge
-refuses the login or the proxy, and a renewal that cannot publish every
-name keeps the tunnel it has.
+names. With `-renew`, a replica that reaches an edge holds up to 5
+logins there (its tunnel and up to 4 old ones still carrying streams),
+and one more for the seconds of a renewal; without it, one. So where
+edges are away and one edge takes every replica, 10 renewing replicas of
+one certificate fit (60 logins), or 64 that do not renew. Every login
+publishes every name, so the proxies are the logins times the names.
+Past a limit, the edge refuses the login or the proxy, and a renewal
+that cannot publish every name keeps the tunnel it has.
 
 The group is the certificate's, not the Deployment's: two
 `fortresskube` Deployments with one certificate are one node to the

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -57,7 +59,20 @@ func freePort(t *testing.T) int {
 // A renewal opens a new tunnel under another user, sends new requests
 // through it, and closes the old one only when the request it carries has
 // ended.
-func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
+// renewLab is an edge's frps, a backend whose /slow answers "a" at once
+// and "b" once release closes, and a replica's tunnels publishing it as
+// site.test.
+type renewLab struct {
+	ctx     context.Context
+	ts      *tunnels
+	host    string
+	port    int
+	release chan struct{}
+	visit   func(path string) (*http.Response, error)
+	served  func() bool
+}
+
+func newRenewLab(t *testing.T) *renewLab {
 	old := retireTick
 	retireTick = 20 * time.Millisecond
 	t.Cleanup(func() { retireTick = old })
@@ -88,6 +103,14 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 		_, _ = io.WriteString(w, "b")
 	}))
 	t.Cleanup(backend.Close)
+	// Before the backend closes, which waits for its requests.
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
 	host, portStr, err := net.SplitHostPort(backend.Listener.Addr().String())
 	require.NoError(t, err)
 	port, err := strconv.Atoi(portStr)
@@ -123,15 +146,28 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 		return resp.StatusCode == http.StatusOK && string(body) == "ok"
 	}
 	require.Eventually(t, served, 10*time.Second, 50*time.Millisecond, "the site answers through the tunnel")
+	return &renewLab{ctx: ctx, ts: ts, host: host, port: port, release: release, visit: visit, served: served}
+}
 
-	// A request that lasts, on the first tunnel.
-	slow, err := visit("/slow")
+// slow starts a request on the current tunnel that lasts until release.
+func (l *renewLab) slow(t *testing.T) *http.Response {
+	t.Helper()
+	resp, err := l.visit("/slow")
 	require.NoError(t, err)
-	t.Cleanup(func() { slow.Body.Close() })
+	t.Cleanup(func() { resp.Body.Close() })
 	first := make([]byte, 1)
-	_, err = io.ReadFull(slow.Body, first)
+	_, err = io.ReadFull(resp.Body, first)
 	require.NoError(t, err)
 	require.Equal(t, "a", string(first))
+	return resp
+}
+
+func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
+	l := newRenewLab(t)
+	ctx, ts, host, port, release, served := l.ctx, l.ts, l.host, l.port, l.release, l.served
+
+	// A request that lasts, on the first tunnel.
+	slow := l.slow(t)
 	before := ts.cur
 	// The edge keeps idle work connections for the next request; they
 	// count until it drops them with the retired tunnel's proxies.
@@ -192,25 +228,48 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 	require.False(t, next.ready(ctx, refused, ts.cur), "site.test would go dark")
 }
 
-// A replica with maxRetiring tunnels still carrying streams does not
-// renew, so its logins on the edge stay bounded, and renews again once one
-// of them closed.
-func TestRenewWaitsForRetiringTunnels(t *testing.T) {
-	old := renewReady
-	renewReady = 100 * time.Millisecond
-	t.Cleanup(func() { renewReady = old })
-	common := &v1.ClientCommonConfig{ServerAddr: "127.0.0.1", ServerPort: freePort(t), User: "replica"}
-	require.NoError(t, common.Complete())
-	ts := newTunnels(common, nil, nil)
-	ts.cur = &tunnel{set: ts, born: time.Now()}
-	ts.retiring = []*tunnel{{}, {}}
-	require.False(t, ts.renew(context.Background()))
-	var metrics bytes.Buffer
-	ts.writeMetrics(&metrics)
-	require.Contains(t, metrics.String(), `fortresskube_tunnel_renewals_total{result="skipped"} 1`)
-	require.Equal(t, 0, ts.gen, "no tunnel was opened")
+// A renewal is never skipped: one that would keep more than maxRetiring
+// old tunnels closes the oldest, with what it still carries, and the
+// others' requests end whole.
+func TestRenewClosesTheOldestPastMaxRetiring(t *testing.T) {
+	l := newRenewLab(t)
+	var slows []*http.Response
+	var tunnels []*tunnel
+	for range maxRetiring + 1 {
+		// The edge may send a request or two to the tunnel just retired
+		// while it takes the names back; those are held to the end too.
+		cur := l.ts.cur
+		for {
+			before := cur.streams.Load()
+			resp := l.slow(t)
+			if cur.streams.Load() > before {
+				slows = append(slows, resp)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		tunnels = append(tunnels, cur)
+		require.True(t, l.ts.renew(l.ctx))
+	}
 
-	ts.retiring = ts.retiring[:1]
-	ts.renew(context.Background())
-	require.Equal(t, 1, ts.gen, "a tunnel was opened")
+	l.ts.mu.Lock()
+	retiring := slices.Clone(l.ts.retiring)
+	l.ts.mu.Unlock()
+	require.Equal(t, tunnels[1:], retiring, "the oldest is gone, the others stay")
+	_, err := io.ReadAll(slows[0].Body)
+	require.Error(t, err, "the oldest tunnel's request is cut")
+
+	close(l.release)
+	for i, resp := range slows[1:] {
+		rest, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "request %d", i+1)
+		require.Equal(t, "b", string(rest), "request %d ends whole", i+1)
+	}
+	require.True(t, l.served())
+
+	var metrics bytes.Buffer
+	l.ts.writeMetrics(&metrics)
+	require.Contains(t, metrics.String(), fmt.Sprintf(`fortresskube_tunnel_renewals_total{result="ok"} %d`, maxRetiring+1))
+	require.Contains(t, metrics.String(), "fortresskube_tunnels_cut_total 1\n")
+	require.NotContains(t, metrics.String(), "fortresskube_tunnel_streams_cut_total 0\n")
 }
