@@ -20,9 +20,13 @@ rejecting it, removes the name, and other names keep running.
 - Outside a cluster, `-kubeconfig` (or `KUBECONFIG`) points it at one.
 - TLSRoutes it has accepted become [TCP routes](#tcp-routes).
 - `-metrics :9100` serves its own Prometheus metrics on `/metrics`:
-  `fortresskube_published_names{kind}` and the TLSRoutes it refuses
+  `fortresskube_published_names{kind}`, the TLSRoutes it refuses
   (`fortresskube_refused_tlsroutes{reason}`,
-  `fortresskube_tlsroute_refusals_total{reason}`). Off by default.
+  `fortresskube_tlsroute_refusals_total{reason}`), and its tunnel (see
+  **An edge service with several edges** below). Off by default.
+- `-renew 5m` opens a new tunnel at about that age and retires the old
+  one, for an edge service that spreads tunnels over several edges. Off
+  by default. See **An edge service with several edges** below.
 - `-health :8081` serves `/healthz`, for a liveness probe on a replica
   that cannot reach its backend. Off by default. See **A replica without
   its backend** below.
@@ -166,6 +170,42 @@ livenessProbe:
   cluster's DNS being away is not the backend being away. A check takes at
   most 0.8 s, within the probe's timeout. Each change between up and down
   is logged once, with its reason.
+
+**An edge service with several edges.** A replica holds one tunnel. When
+`serverAddr` stands for several edges, three things keep that tunnel in
+the right place:
+
+- **The address.** A name with several addresses (one per location of
+  the service) is dialled at one of them. Each replica has its own place
+  among the sorted addresses: the number its name ends with, so the
+  replicas 0, 1, 2 of a StatefulSet take the addresses in turn, else a
+  hash of its name, which is the same at every dial. An address that
+  does not answer is passed over: the next dial goes to the next
+  address, and the first dial after one that worked starts at the
+  replica's own again. The name is looked up at every dial, and it stays
+  the TLS server name.
+- **The renewal.** A balancer in front of several edges chooses the edge
+  only when a tunnel is dialled. An edge that comes back, or a new one,
+  gets no tunnel until some tunnel breaks. With `-renew 5m` the replica
+  opens a new tunnel about every 5 minutes (within a fifth of it, so
+  replicas do not renew together), and the balancer can give it to the
+  edge with the fewest. The new tunnel logs in under its own frp `user`
+  (`<host name>-<n>`), so the edge tells it from the old one. If it does
+  not log in and publish within 15 seconds it is dropped and the old one
+  stays.
+- **The retirement.** The old tunnel takes its names back, so the edge
+  sends it no new request, and closes when the requests and TCP sessions
+  it carries have ended. A long TCP session or a stream is not cut. The
+  edge keeps a work connection for the next request for up to a minute,
+  so the old tunnel closes up to a minute after its last request, or at
+  once when its connection ends by itself.
+
+`-metrics` adds the tunnel's own: `fortresskube_tunnel_up`,
+`fortresskube_tunnel_info{server}` (the address it dialled last),
+`fortresskube_tunnel_age_seconds`, `fortresskube_tunnel_streams` (the
+requests and TCP sessions it carries now), `fortresskube_tunnels_retiring`,
+`fortresskube_tunnel_dials_total{result}` and
+`fortresskube_tunnel_renewals_total{result}`.
 
 **Several replicas.** Every replica of the Deployment uses the same
 node certificate, so the edge sees them as one dark node,

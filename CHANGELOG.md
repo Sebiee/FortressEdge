@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0 (not released yet)
+
+- `fortresskube` for an edge service with several edges behind one
+  name (see "An edge service with several edges" in
+  [Kubernetes](docs/kubernetes.md)):
+  - A `serverAddr` with several addresses is dialled at one of them,
+    the replica's own (the number its name ends with, else a hash of
+    its name); an address that does not answer is passed over until the
+    next dial. Before, the dial took whichever address answered first.
+  - `-renew 5m` opens a new tunnel at about that age and retires the
+    old one: it takes no new request, and closes when the requests and
+    TCP sessions it carries have ended. A balancer that chooses the
+    edge at dial time can so give an edge that came back its tunnels.
+    Off by default.
+  - `-metrics` adds the tunnel's own: `fortresskube_tunnel_up`,
+    `fortresskube_tunnel_info{server}`, `fortresskube_tunnel_age_seconds`,
+    `fortresskube_tunnel_streams`, `fortresskube_tunnels_retiring`,
+    `fortresskube_tunnel_dials_total{result}` and
+    `fortresskube_tunnel_renewals_total{result}`.
+
 ## 0.7.3
 
 - `fortresskube -health :8081` serves `/healthz` for a liveness probe:
