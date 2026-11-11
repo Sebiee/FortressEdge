@@ -33,8 +33,9 @@ type Config struct {
 	// Vault is the https URL of a Vault whose KV v2 path the edges that
 	// serve the same names share their certificates in. Empty keeps them
 	// on each edge's disk only. With it, all of VaultMount, VaultPath, and
-	// VaultRoleID are required, and each edge needs its own
-	// vault_secret_id in user-data: the ISO holds no secret.
+	// VaultRoleID are required, and each edge needs its own secret ID: in
+	// its user-data, so a shared ISO holds no secret, or in an ISO baked
+	// for that edge alone (VaultSecretID with VaultSecretInISO).
 	Vault string `yaml:"vault"`
 	// VaultCA is the PEM CA, or chain, that signed Vault's HTTPS
 	// certificate: the only roots the connection trusts. Empty trusts the
@@ -47,6 +48,14 @@ type Config struct {
 	// VaultRoleID is the AppRole the edges log in with; its policy should
 	// allow the path and nothing else.
 	VaultRoleID string `yaml:"vault_role_id"`
+	// VaultSecretID is the edge's own AppRole secret ID, for an ISO baked
+	// for that one edge alone: it makes the ISO a credential, written 0600,
+	// to keep as the keys are kept and never publish. Valid only with
+	// VaultSecretInISO; empty puts it in each edge's user-data instead.
+	VaultSecretID string `yaml:"vault_secret_id"`
+	// VaultSecretInISO says this ISO is one edge's own, so it may carry
+	// VaultSecretID.
+	VaultSecretInISO bool `yaml:"vault_secret_in_iso"`
 }
 
 // Check reports what is wrong with c, as the edge would. An error names the

@@ -15,13 +15,18 @@ import (
 // it is not a hybrid USB image. Every date in it is at, so the same files
 // at the same time give the same bytes, on any machine.
 func WriteISO(dest, kernel, initrd, isolinux, ldlinux string, at time.Time) error {
-	if err := writeISO(dest, kernel, initrd, isolinux, ldlinux); err != nil {
+	return writeStamped(dest, kernel, initrd, isolinux, ldlinux, at, 0o644)
+}
+
+// writeStamped is WriteISO with dest created with perm.
+func writeStamped(dest, kernel, initrd, isolinux, ldlinux string, at time.Time, perm os.FileMode) error {
+	if err := writeISO(dest, kernel, initrd, isolinux, ldlinux, perm); err != nil {
 		return err
 	}
 	return stamp(dest, at)
 }
 
-func writeISO(dest, kernel, initrd, isolinux, ldlinux string) error {
+func writeISO(dest, kernel, initrd, isolinux, ldlinux string, perm os.FileMode) error {
 	dir, err := os.MkdirTemp("", "fortress-iso-")
 	if err != nil {
 		return err
@@ -52,7 +57,7 @@ func writeISO(dest, kernel, initrd, isolinux, ldlinux string) error {
 	if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	f, err := os.Create(dest)
+	f, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}

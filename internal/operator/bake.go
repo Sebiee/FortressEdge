@@ -18,7 +18,14 @@ func Bake(out, iso, edgePath string) error {
 	if err != nil {
 		return err
 	}
-	return bootimg.Bake(out, iso, edge)
+	if err := bootimg.Bake(out, iso, edge); err != nil {
+		return err
+	}
+	if config.EdgeHoldsSecret(edge) {
+		fmt.Fprintf(os.Stderr, "fortressctl: %s holds this edge's Vault secret ID, readable by you alone (0600): "+
+			"it is a credential for one edge. Keep it as you keep the keys, never publish it, and bind the secret ID to the edge's address.\n", out)
+	}
+	return nil
 }
 
 // ReadEdge reads and checks a fortress.yml.

@@ -244,8 +244,36 @@ func TestParseVault(t *testing.T) {
 	if err := CheckEdge(withCA(full)); err != nil {
 		t.Fatalf("a bake checks fortress.yml without the secret ID: %v", err)
 	}
-	if err := CheckEdge(withCA(full + "vault_secret_id: s\n")); err == nil || !strings.Contains(err.Error(), "user-data") {
-		t.Fatalf("a secret ID in fortress.yml: %v", err)
+	if err := CheckEdge(withCA(full + "vault_secret_id: s\n")); err == nil ||
+		!strings.Contains(err.Error(), "user-data") || !strings.Contains(err.Error(), "vault_secret_in_iso: true") {
+		t.Fatalf("a secret ID in a shared fortress.yml: %v", err)
+	}
+	if EdgeHoldsSecret(withCA(full)) {
+		t.Fatal("a shared fortress.yml holds a secret")
+	}
+
+	// An ISO baked for one edge alone may carry its secret ID, said so;
+	// then user-data has none, so there is one source.
+	own := full + "vault_secret_id: own\nvault_secret_in_iso: true\n"
+	if err := CheckEdge(withCA(own)); err != nil {
+		t.Fatalf("a per-edge ISO's secret ID: %v", err)
+	}
+	if !EdgeHoldsSecret(withCA(own)) {
+		t.Fatal("EdgeHoldsSecret misses the ISO's secret ID")
+	}
+	if c, err := parse(own); err != nil || c.Vault == nil || c.Vault.SecretID != "own" {
+		t.Fatalf("the ISO's secret ID: %+v %v", c.Vault, err)
+	}
+	if _, err := parseVault(own); err == nil || !strings.Contains(err.Error(), "one place") {
+		t.Fatalf("a secret ID in the ISO and in user-data: %v", err)
+	}
+	for _, bad := range []string{
+		full + "vault_secret_in_iso: true\n",
+		"vault_secret_id: own\nvault_secret_in_iso: true\n",
+	} {
+		if err := CheckEdge(withCA(bad)); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
 	}
 	if _, err := parse(full); err == nil || !strings.Contains(err.Error(), "vault_secret_id") {
 		t.Fatalf("no secret ID in user-data: %v", err)
