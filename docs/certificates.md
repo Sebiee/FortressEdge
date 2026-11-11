@@ -227,8 +227,16 @@ A name is one dark node's, by its certificate, while any of its proxies
 publishes it, and for `tunnel_grace` after the last leaves: another node
 that publishes it meanwhile is refused, so it cannot take the name while
 its node reconnects. A changed `tunnel_grace` applies at once, to names
-already in their grace too. The edge does not keep this across its own
-reboot yet: right after a boot, the first node to publish a name has it.
+already in their grace too. A name that moves to a cluster with another
+node certificate is refused there until the grace is up: a cluster that
+takes names over uses the same node name, or waits.
+
+The edge does not keep this across its own reboot yet: right after a
+boot, the first node to publish a name has it. Until it does, let the
+edges of one class serve a single node identity, or nodes that trust
+each other: behind several edges, a freshly booted edge gets the new
+tunnels first, and a node of another identity could publish a name
+there before its owner does.
 
 A published name whose origin does not answer gets `502`, or `504` after
 a minute without response headers (`response_header_timeout` in the

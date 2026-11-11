@@ -20,11 +20,14 @@ Changes that need an operator:
   stops at start, naming the resource, when one is forbidden. An
   explicit `-backend` must be `NAME.NAMESPACE.svc:PORT`, an IP, or a
   name ending with a dot.
-- A dark node may publish `http` and `tcp-tls` proxies only, at most 16
-  logins, 1024 proxies and 256 names per node certificate, and at most
-  64 routes per name. Names are refused with a port, a trailing dot, an
-  IP address or a `*` anywhere but in front, and locations must be clean
-  path prefixes.
+- A dark node may publish `http` and `tcp-tls` proxies only. On each
+  edge, a node certificate may have at most 64 logins, 4096 proxies and
+  256 names, and a name at most 64 routes. Every `fortresskube` replica
+  that reaches an edge is a login there, publishing every name, and one
+  more while it renews its tunnel or while an old tunnel still carries a
+  stream (see [kubernetes](docs/kubernetes.md), **Several replicas**). Names
+  are refused with a port, a trailing dot, an IP address or a `*`
+  anywhere but in front, and locations must be clean path prefixes.
 - A block list holds at most 8192 prefixes of each family.
 - The XDP metric reasons `drop_ntprate` and `drop_dnsrate` are gone:
   such packets count as `drop_port`.
@@ -55,7 +58,8 @@ The fixes:
   for a body, counted as `body_timeout`), HTTP/2 connections are pinged
   and closed when they do not answer, and a source may have at most
   `request_burst` requests open at once. WebSockets and quiet streams go
-  on.
+  on, and count while they last: behind a reverse proxy in front of an
+  edge, all its visitors are one source and share the `request_burst`.
 - An origin's response head is bounded at 64 KiB and five 1xx
   responses, and a request write to an origin that stops reading times
   out with a `504`.
@@ -72,7 +76,9 @@ The fixes:
   waiting for one gives up after two.
 - New ACME orders are capped at 30 at once, then one every two minutes,
   and a name whose order failed waits, doubling up to 6 hours, even when
-  it is published again.
+  it is published again. A new edge service with N names, and no
+  certificates in Vault yet, has them all after about (N - 30) x 2
+  minutes.
 - `fortresskube` trusts a route's status only from its Gateway's
   controller, for the current generation and a parent the route still
   names. It publishes only the hostnames a listener that accepted the
@@ -80,7 +86,16 @@ The fixes:
   and only with `ResolvedRefs`. It dials Services at their cluster IP,
   never a relative name, `-health` included, refuses ExternalName and
   headless Services, and refuses a route's hostname that a static proxy
-  in `frpc.toml` has.
+  in `frpc.toml` has. `-health` passes while the backend Service has no
+  cluster IP: every replica refuses its routes then, and restarting them
+  all would not help.
+- `fortresskube -renew`: a retired tunnel now closes once its requests
+  have ended. On 0.8.0 the edge's idle work connections kept it open, so
+  each renewal left one more login behind. A renewal now also waits
+  while two retired tunnels still carry streams (counted as
+  `fortresskube_tunnel_renewals_total{result="skipped"}`), and the new
+  tunnel takes over only once it publishes every name the current one
+  does.
 
 ## 0.8.0
 
