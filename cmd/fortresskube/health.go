@@ -24,23 +24,29 @@ import (
 //
 // A Service backend is dialed at its cluster IP, as the proxies dial it,
 // read from the Services watch on each check, so a new Service address is
-// followed; until the first list of Services it passes. A name ending with
-// a dot is resolved on each check. A failed lookup reuses the last address:
-// the cluster's DNS or API server being away is not this replica's backend
-// being away, and restarting every replica would not bring it back.
+// followed. It passes until the first list of Services, and while the
+// Service has no cluster IP (missing, headless, ExternalName): that is the
+// same for every replica, its routes are refused already, and restarting
+// every replica would not bring it back but would take down the static
+// proxies and TLSRoutes too. A name ending with a dot is resolved on each
+// check. A failed lookup reuses the last address: the cluster's DNS being
+// away is not this replica's backend being away either.
 type backendHealth struct {
 	name       string // the backend, for logs
 	host, port string // host is "" for a Service
-	listed     func() bool
+	// clusterIP is a Service backend's address now; nil for a host.
+	clusterIP func() (string, bool)
+	listed    func() bool
 	// timeout bounds a check, lookup and dial together, below a kubelet
 	// probe's one-second timeout.
 	timeout time.Duration
 	lookup  func(ctx context.Context, host string) ([]string, error)
 	dial    func(ctx context.Context, network, addr string) (net.Conn, error)
 
-	mu   sync.Mutex
-	last string // the last address the name resolved to
-	down string // why the last check failed; empty while up
+	mu        sync.Mutex
+	last      string // the last address the name resolved to
+	down      string // why the last check failed; empty while up
+	unchecked bool   // the last check found no Service address to dial
 }
 
 // newBackendHealth checks be; a Service backend reads services, which
@@ -49,16 +55,11 @@ func newBackendHealth(be backend, services cache.Store, listed func() bool) *bac
 	d := &net.Dialer{}
 	b := &backendHealth{
 		name: be.String(), host: be.host, port: strconv.Itoa(be.port), timeout: 800 * time.Millisecond,
-		listed: func() bool { return true }, lookup: net.DefaultResolver.LookupHost, dial: d.DialContext,
+		lookup: net.DefaultResolver.LookupHost, dial: d.DialContext,
 	}
 	if be.svc != "" {
 		b.listed = listed
-		b.lookup = func(context.Context, string) ([]string, error) {
-			if ip, ok := be.addr(services); ok {
-				return []string{ip}, nil
-			}
-			return nil, fmt.Errorf("Service %s/%s has no cluster IP", be.svcNS, be.svc)
-		}
+		b.clusterIP = func() (string, bool) { return be.addr(services) }
 	}
 	return b
 }
@@ -75,17 +76,27 @@ func (b *backendHealth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // check opens and closes one TCP connection to the backend.
 func (b *backendHealth) check(ctx context.Context) error {
-	if !b.listed() {
-		return nil
+	var addr string
+	var err error
+	if b.clusterIP != nil {
+		if !b.listed() {
+			return nil
+		}
+		var ok bool
+		if addr, ok = b.clusterIP(); !ok {
+			b.record(nil, true)
+			return nil
+		}
+	} else {
+		addr, err = b.address(ctx)
 	}
-	addr, err := b.address(ctx)
 	if err == nil {
 		var c net.Conn
 		if c, err = b.dial(ctx, "tcp", net.JoinHostPort(addr, b.port)); err == nil {
 			_ = c.Close()
 		}
 	}
-	b.record(err)
+	b.record(err, false)
 	return err
 }
 
@@ -114,17 +125,25 @@ func (b *backendHealth) address(ctx context.Context) (string, error) {
 	return "", err
 }
 
-// record logs each change between up and down, once.
-func (b *backendHealth) record(err error) {
+// record logs each change between up, down and not checked, once.
+func (b *backendHealth) record(err error, unchecked bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	switch {
-	case err != nil && b.down == "":
-		b.down = err.Error()
-		log.Warnf("backend %s down: %v", b.name, err)
-	case err == nil && b.down != "":
-		b.down = ""
+	case unchecked:
+		if !b.unchecked {
+			log.Warnf("backend %s not checked: the Service has no cluster IP, so its routes are refused; the probe passes", b.name)
+		}
+	case err != nil:
+		if b.down == "" {
+			log.Warnf("backend %s down: %v", b.name, err)
+		}
+	case b.down != "" || b.unchecked:
 		log.Infof("backend %s up again", b.name)
+	}
+	b.unchecked, b.down = unchecked, ""
+	if err != nil {
+		b.down = err.Error()
 	}
 }
 
