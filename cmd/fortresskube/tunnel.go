@@ -32,15 +32,17 @@ import (
 //     and retires the old one, so a balancer in front of several edges can
 //     give an edge that came back its share;
 //   - the retirement: the old tunnel takes no new request, and closes when
-//     the requests and TCP sessions it carries have ended. The edge keeps a
+//     the requests and TCP sessions it carries have ended, or when it is
+//     the oldest of more than maxRetiring. The edge keeps a
 //     work connection for the next request for up to a minute, so that is
 //     up to a minute after the last request.
 
 // maxRetiring is how many retired tunnels a replica keeps while their
 // streams last, a WebSocket of hours among them. Each is a login of the
 // node on the edge, which bounds those (the frp fork's limits), so a
-// renewal waits while this many are still open.
-const maxRetiring = 2
+// renewal that would keep one more closes the oldest, with what it still
+// carries: a stream lives through at least maxRetiring renewals.
+const maxRetiring = 4
 
 var (
 	// renewReady is how long a new tunnel gets to log in and publish.
@@ -213,7 +215,7 @@ type tunnels struct {
 
 	dialsOK, dialsFailed       atomic.Int64
 	renewalsOK, renewalsFailed atomic.Int64
-	renewalsSkipped            atomic.Int64
+	tunnelsCut, streamsCut     atomic.Int64
 }
 
 func newTunnels(common *v1.ClientCommonConfig, proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) *tunnels {
@@ -312,17 +314,11 @@ func (ts *tunnels) renewEvery(ctx context.Context, age time.Duration) {
 }
 
 // renew opens a new tunnel and, once it publishes what the current one
-// does, retires the current one. A new tunnel that does not come up in
-// time is dropped, and the current one stays. With maxRetiring tunnels
-// still retiring, it waits for the next time.
+// does, retires the current one, and closes the oldest retiring one past
+// maxRetiring. A new tunnel that does not come up in time is dropped, and
+// the current one stays, and so do the retiring ones.
 func (ts *tunnels) renew(ctx context.Context) bool {
 	ts.mu.Lock()
-	if len(ts.retiring) >= maxRetiring {
-		ts.mu.Unlock()
-		ts.renewalsSkipped.Add(1)
-		log.Infof("tunnel renewal skipped: %d old tunnels still carry streams", maxRetiring)
-		return false
-	}
 	proxies, cur := ts.proxies, ts.cur
 	t, err := ts.open(ctx, proxies)
 	ts.mu.Unlock()
@@ -339,6 +335,11 @@ func (ts *tunnels) renew(ctx context.Context) bool {
 	old := ts.cur
 	ts.cur = t
 	ts.retiring = append(ts.retiring, old)
+	var cut []*tunnel
+	for len(ts.retiring) > maxRetiring {
+		cut = append(cut, ts.retiring[0])
+		ts.retiring = ts.retiring[1:]
+	}
 	// What was published while the new tunnel came up.
 	c := *ts.common
 	c.User = t.user
@@ -349,7 +350,15 @@ func (ts *tunnels) renew(ctx context.Context) bool {
 	ts.renewalsOK.Add(1)
 	server, _ := t.server.Load().(string)
 	log.Infof("tunnel renewed (to %s); the old one closes when its requests have ended", server)
-	go ts.retire(ctx, old)
+	go ts.retire(ctx, old, retireTick)
+	for _, o := range cut {
+		if n := o.streams.Load(); n > 0 {
+			ts.tunnelsCut.Add(1)
+			ts.streamsCut.Add(n)
+			log.Warnf("old tunnel closed with %d streams still on it: it outlived %d renewals", n, maxRetiring)
+		}
+		o.close()
+	}
 	return true
 }
 
@@ -398,13 +407,13 @@ func (t *tunnel) runs(name string) bool {
 // retire takes the tunnel out of the edge's choice, so it gets no new
 // request, and closes it once nothing has been in flight for three looks,
 // or when its connection ends by itself.
-func (ts *tunnels) retire(ctx context.Context, t *tunnel) {
+func (ts *tunnels) retire(ctx context.Context, t *tunnel, every time.Duration) {
 	c := *ts.common
 	c.User = t.user
 	if err := t.svc.UpdateConfigSource(&c, nil, nil); err != nil {
 		log.Warnf("retire tunnel: %v", err)
 	}
-	tick := time.NewTicker(retireTick)
+	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for idle := 0; idle < 3 && t.open.Load(); {
 		select {
@@ -462,9 +471,14 @@ func (ts *tunnels) writeMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_dials_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"ok\"} %d\n", ts.dialsOK.Load())
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"failed\"} %d\n", ts.dialsFailed.Load())
-	fmt.Fprintln(w, "# HELP fortresskube_tunnel_renewals_total Renewals of the tunnel, by result: ok, failed (the new tunnel did not come up, the old one stayed), skipped (two old tunnels still carry streams).")
+	fmt.Fprintln(w, "# HELP fortresskube_tunnel_renewals_total Renewals of the tunnel, by result: ok, failed (the new tunnel did not come up, the old one stayed).")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_renewals_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"ok\"} %d\n", ts.renewalsOK.Load())
 	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"failed\"} %d\n", ts.renewalsFailed.Load())
-	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"skipped\"} %d\n", ts.renewalsSkipped.Load())
+	fmt.Fprintln(w, "# HELP fortresskube_tunnels_cut_total Old tunnels closed by a renewal while they still carried streams.")
+	fmt.Fprintln(w, "# TYPE fortresskube_tunnels_cut_total counter")
+	fmt.Fprintf(w, "fortresskube_tunnels_cut_total %d\n", ts.tunnelsCut.Load())
+	fmt.Fprintln(w, "# HELP fortresskube_tunnel_streams_cut_total Requests and TCP sessions ended by those closes.")
+	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_streams_cut_total counter")
+	fmt.Fprintf(w, "fortresskube_tunnel_streams_cut_total %d\n", ts.streamsCut.Load())
 }

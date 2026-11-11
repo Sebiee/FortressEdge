@@ -23,9 +23,10 @@ Changes that need an operator:
 - A dark node may publish `http` and `tcp-tls` proxies only. On each
   edge, a node certificate may have at most 64 logins, 4096 proxies and
   256 names, and a name at most 64 routes. Every `fortresskube` replica
-  that reaches an edge is a login there, publishing every name, and one
-  more while it renews its tunnel or while an old tunnel still carries a
-  stream (see [kubernetes](docs/kubernetes.md), **Several replicas**). Names
+  that reaches an edge is a login there, publishing every name; with
+  `-renew`, up to 5 (its tunnel and up to 4 old ones still carrying
+  streams), and one more while it renews (see [kubernetes](docs/kubernetes.md), **Several
+  replicas**). Names
   are refused with a port, a trailing dot, an IP address or a `*`
   anywhere but in front, and locations must be clean path prefixes.
 - A block list holds at most 8192 prefixes of each family.
@@ -91,11 +92,13 @@ The fixes:
   all would not help.
 - `fortresskube -renew`: a retired tunnel now closes once its requests
   have ended. On 0.8.0 the edge's idle work connections kept it open, so
-  each renewal left one more login behind. A renewal now also waits
-  while two retired tunnels still carry streams (counted as
-  `fortresskube_tunnel_renewals_total{result="skipped"}`), and the new
-  tunnel takes over only once it publishes every name the current one
-  does.
+  each renewal left one more login behind. A replica now keeps at most 4
+  old tunnels: a renewal that would keep a fifth closes the oldest and
+  cuts what it still carries, so a long connection lives through at
+  least 4 renewals (20 minutes at `-renew 5m`), counted in
+  `fortresskube_tunnels_cut_total` and
+  `fortresskube_tunnel_streams_cut_total`. The new tunnel takes over
+  only once it publishes every name the current one does.
 
 ## 0.8.0
 
