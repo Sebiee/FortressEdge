@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,7 +111,12 @@ func BootEdge(t *testing.T, o EdgeOptions) *Edge {
 // WaitUp waits until the ops API answers the operator.
 func (e *Edge) WaitUp(t *testing.T) {
 	t.Helper()
-	require.EventuallyWithT(t, func(c *assert.CollectT) { BootID(c, e.Ops) }, Until(t), Tick)
+	// A probe sent while the guest boots waits in slirp's SYN retries to the
+	// guest (1, 3, 7 s after it), so the wait would end in steps of seconds
+	// after the edge listens. A short attempt sends a fresh probe instead.
+	probe := *e.Ops
+	probe.Timeout = 2 * time.Second
+	require.EventuallyWithT(t, func(c *assert.CollectT) { BootID(c, &probe) }, Until(t), Tick)
 }
 
 // Cert is the certificate and key for role/name in the edge's PKI.
