@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 Security fixes from an audit of the edge, the frp fork and
 `fortresskube`. Some change configuration or permissions, so this is a
