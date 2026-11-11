@@ -204,6 +204,7 @@ func run() error {
 		Tunnel:        cfg.Tunnel,
 		OnProxyError:  httpsvc.ProxyError,
 		Node:          httpsvc.NodeName(cfg.Tunnel),
+		Grace:         cfg.TunnelGrace,
 	})
 	if err != nil {
 		return err
@@ -227,6 +228,7 @@ func run() error {
 		},
 		Store: func(b []byte) error { return initos.StorePolicy(config.PolicyFile, b) },
 		Commit: []func(config.Policy){func(p config.Policy) {
+			frps.SetGrace(p.TunnelGrace)
 			next := cfg
 			next.Policy = p
 			consoleStatus(true, true, next)

@@ -49,6 +49,36 @@ func TestStartListensLoopback(t *testing.T) {
 	}
 }
 
+// A name stays its dark node's for tunnel_grace after the node left, as
+// the policy sets it at start and in place, and not at all with none.
+func TestNameHeldForTunnelGrace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	frps, err := Start(ctx, Options{Grace: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frps.Stop()
+
+	if err := frps.svr.BindDomain("a.example.com", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if owner, ok := frps.svr.DomainOwner("a.example.com"); ok {
+		t.Fatalf("held for %s with no grace", owner)
+	}
+	frps.SetGrace(time.Hour)
+	if err := frps.svr.BindDomain("b.example.com", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := frps.svr.BindDomain("b.example.com", "node-b"); err == nil {
+		t.Fatal("another node took a name within the grace")
+	}
+	frps.SetGrace(0)
+	if owner, ok := frps.svr.DomainOwner("b.example.com"); ok {
+		t.Fatalf("still held for %s once the grace is gone", owner)
+	}
+}
+
 // TestVisitorLeftIsDebug writes frp's proxy errors through a logger set
 // up as Start sets frp's: a visitor who left is debug, the rest stay warn.
 // frp logs through slog's default too, from a server an earlier test left
