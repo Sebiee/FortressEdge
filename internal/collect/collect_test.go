@@ -105,7 +105,7 @@ func newCollector(t *testing.T, edges map[string]*edge) *Collector {
 func (c *Collector) copyAll() {
 	for _, e := range c.cfg.Edges {
 		for _, k := range logKinds {
-			c.copyLog(context.Background(), e, k.name, k.path)
+			_ = c.copyLog(context.Background(), e, k.name, k.path)
 		}
 	}
 }
@@ -367,5 +367,53 @@ func TestMetricsAndStatusOfAllEdges(t *testing.T) {
 	}
 	if st.Edges["a"].BootID != "boota" || st.Edges["b"].BootID != "bootb" || st.Edges["c"] != nil {
 		t.Fatalf("status: %+v", st.Edges)
+	}
+}
+
+// A read has what the edges have at that moment, and a collector whose
+// copy is behind another's answers that one's cursor: with the same lines
+// when it can reach the edge, with none and the cursor as it was when it
+// cannot. It never sends a line again and never signals a loss that is
+// none.
+func TestACopyThatIsBehindAnswersTheOthersCursor(t *testing.T) {
+	a := newEdge(t, "boota")
+	edges := map[string]*edge{"a": a}
+	a.write("access", "# boot boota\n"+`{"id":"1"}`+"\n")
+	front1, front2 := newCollector(t, edges), newCollector(t, edges)
+	front2.copyAll() // the partner has the first record, and then is away
+
+	// No timed copy since the edge wrote: the read fetches it.
+	a.write("access", `{"id":"2"}`+"\n")
+	first := get(t, front1, config.OpsAccessPath)
+	if got := strings.Join(lineIDs(t, first.Body.String()), " "); got != "a1 a2" {
+		t.Fatalf("a read has what the edge has now: got %s", got)
+	}
+
+	// The access log rotates, and the reader is in the new file.
+	a.rotate("access", "boota.log", "boota.1")
+	a.write("access", `{"id":"3"}`+"\n")
+	second := get(t, front1, config.OpsAccessPath+"?cursor="+url.QueryEscape(first.Header().Get("X-Log-Cursor")))
+	if got := strings.Join(lineIDs(t, second.Body.String()), " "); got != "a3" {
+		t.Fatalf("second read: %s", got)
+	}
+	cursor := second.Header().Get("X-Log-Cursor")
+	a.write("access", `{"id":"4"}`+"\n")
+
+	// The partner takes over while the edge does not answer: its copy ends
+	// in the old file. It has no line for the reader yet, and says so by
+	// the same cursor, not by a gap or by old lines.
+	a.down = true
+	waiting := get(t, front2, config.OpsAccessPath+"?cursor="+url.QueryEscape(cursor))
+	if waiting.Body.Len() != 0 || waiting.Header().Get("X-Log-Gap") != "" || waiting.Header().Get("X-Log-Cursor") != cursor {
+		t.Fatalf("a copy that is behind: body %q, gap %q, cursor %q (was %q)",
+			waiting.Body, waiting.Header().Get("X-Log-Gap"), waiting.Header().Get("X-Log-Cursor"), cursor)
+	}
+
+	// The edge answers again: the partner catches up at the read and goes
+	// on exactly where the reader was.
+	a.down = false
+	next := get(t, front2, config.OpsAccessPath+"?cursor="+url.QueryEscape(cursor))
+	if got := strings.Join(lineIDs(t, next.Body.String()), " "); got != "a4" || next.Header().Get("X-Log-Gap") != "" {
+		t.Fatalf("after it caught up: %s, gap %q", got, next.Header().Get("X-Log-Gap"))
 	}
 }

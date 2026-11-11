@@ -9,7 +9,10 @@
 //     ids, with the same bytes at the same offsets (mirror). A reader's
 //     cursor is every edge's own cursor, "a=<file-id>:<offset>,b=...", so
 //     it is good at either of two collectors that copy the same edges, and
-//     the edge's signal for lost lines (X-Log-Gap) passes through.
+//     the edge's signal for lost lines (X-Log-Gap) passes through. A read
+//     first brings the copies up to their edges, so its answer has what
+//     the edges have at that moment, and a collector whose copy was behind
+//     another's answers that one's cursor all the same.
 //   - Metrics and status: asked of every edge at the moment of the read, so
 //     a counter never goes backward when another collector answers next.
 package collect
@@ -119,7 +122,7 @@ func (c *Collector) Run(ctx context.Context) {
 				tick := time.NewTicker(c.cfg.Every)
 				defer tick.Stop()
 				for {
-					c.copyLog(ctx, e, k.name, k.path)
+					_ = c.copyLog(ctx, e, k.name, k.path)
 					select {
 					case <-ctx.Done():
 						return
@@ -135,8 +138,9 @@ func (c *Collector) Run(ctx context.Context) {
 // errNoLog is an edge that does not keep the log asked for.
 var errNoLog = errors.New("the edge keeps no such log")
 
-// copyLog reads what the edge has after the copy, file after file.
-func (c *Collector) copyLog(ctx context.Context, e Edge, kind, path string) {
+// copyLog reads what the edge has after the copy, file after file. It
+// reports whether the copy now has all the edge has.
+func (c *Collector) copyLog(ctx context.Context, e Edge, kind, path string) bool {
 	key := e.Name + "/" + kind
 	m := c.mirrors[key]
 	for more := true; more && ctx.Err() == nil; {
@@ -171,20 +175,47 @@ func (c *Collector) copyLog(ctx context.Context, e Edge, kind, path string) {
 			if _, told := c.accessOff.LoadOrStore(e.Name, true); !told {
 				slog.Info("collector: the edge keeps no access log (policy.yml's access_log)", "edge", e.Name)
 			}
-			return
+			return true
 		case err != nil:
 			c.pullsFailed[key].Add(1)
 			if ctx.Err() == nil {
 				slog.Warn("collector: reading an edge's log", "edge", e.Name, "log", kind, "err", err)
 			}
-			return
+			return false
 		}
 		c.pullsOK[key].Add(1)
 		if kind == "access" {
 			c.accessOff.Delete(e.Name)
 		}
 	}
+	return ctx.Err() == nil
 }
+
+// refresh brings every edge's copy of a log up to the edge, all at once,
+// within a few seconds. It returns the edges whose copy now has all the
+// edge has; the others' are as the last read left them.
+func (c *Collector) refresh(ctx context.Context, kind, path string) map[string]bool {
+	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+	var mu sync.Mutex
+	fresh := map[string]bool{}
+	var wg sync.WaitGroup
+	for _, e := range c.cfg.Edges {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok := c.copyLog(ctx, e, kind, path)
+			mu.Lock()
+			fresh[e.Name] = ok
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return fresh
+}
+
+// refreshTimeout bounds what a read waits for the edges.
+var refreshTimeout = 3 * time.Second
 
 type cancelBody struct {
 	io.ReadCloser
@@ -272,6 +303,12 @@ func (c *Collector) serveLog(w http.ResponseWriter, r *http.Request, kind string
 	}
 	records := kind == "access"
 	wrap := !records && q.Get("format") == "ndjson"
+	// What the edges have now, not what the last timed copy left.
+	path := config.OpsLogsPath
+	if records {
+		path = config.OpsAccessPath
+	}
+	fresh := c.refresh(r.Context(), kind, path)
 	var body bytes.Buffer
 	enc := json.NewEncoder(&body)
 	budget := maxAnswer
@@ -296,7 +333,7 @@ func (c *Collector) serveLog(w http.ResponseWriter, r *http.Request, kind string
 				fmt.Fprintf(&body, " edge=%s\n", name)
 			}
 		}
-		to, lost, err := c.mirrors[name+"/"+kind].read(at[name], now, &budget, emit)
+		to, lost, err := c.mirrors[name+"/"+kind].read(at[name], now, fresh[name], &budget, emit)
 		if err != nil {
 			http.Error(w, "collector: log unavailable", http.StatusServiceUnavailable)
 			return

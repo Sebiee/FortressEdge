@@ -60,6 +60,10 @@ type mirror struct {
 	records bool
 	keep    int64 // bytes kept; the oldest files go first
 
+	// pulling lets one pull at a time append: the copy's timer and a
+	// reader's own pull must not write the same bytes twice.
+	pulling sync.Mutex
+
 	mu   sync.Mutex
 	ids  []string // the files, oldest first; gapMark where lines were lost
 	gaps int64
@@ -147,6 +151,8 @@ type page struct {
 // pull asks the edge for what follows the copy and appends it. more means
 // the edge has a newer file to read at once.
 func (m *mirror) pull(fetch func(cursor string) (*page, error)) (more bool, err error) {
+	m.pulling.Lock()
+	defer m.pulling.Unlock()
 	at := m.end()
 	p, err := fetch(at.String())
 	if err != nil {
@@ -237,7 +243,13 @@ func (m *mirror) size() (total int64) {
 // and there are lost: the edge lost them before the collector read them,
 // or from names a file the copy no longer has, or never had. An empty from
 // starts at the oldest line kept; now starts at the end.
-func (m *mirror) read(from position, now bool, budget *int64, emit func(line []byte)) (to position, gap bool, err error) {
+//
+// A position never moves backward. One that is ahead of the copy (another
+// collector of the same edge gave it) gets no line and stays as it is,
+// until the copy has reached it. fresh says the copy was brought up to the
+// edge just now: only then is a file the copy does not have a lost one,
+// and not one the copy has yet to reach.
+func (m *mirror) read(from position, now, fresh bool, budget *int64, emit func(line []byte)) (to position, gap bool, err error) {
 	m.mu.Lock()
 	ids := slices.Clone(m.ids)
 	m.mu.Unlock()
@@ -254,9 +266,12 @@ func (m *mirror) read(from position, now bool, budget *int64, emit func(line []b
 		return position{id, lastNewlineEnd(f, fileSize(f))}, false, nil
 	}
 	i, off := slices.Index(ids, from.id), from.off
-	if from.id == "" {
+	switch {
+	case from.id == "":
 		i, off = 0, 0
-	} else if i < 0 {
+	case i < 0 && !fresh:
+		return from, false, nil
+	case i < 0:
 		i, off, gap = 0, 0, true
 	}
 	to = from
@@ -275,6 +290,10 @@ func (m *mirror) read(from position, now bool, budget *int64, emit func(line []b
 		end := fileSize(f)
 		if last {
 			end = lastNewlineEnd(f, end) // its last line may be half copied
+			if off > end {
+				_ = f.Close()
+				return to, gap, nil // ahead of the copy
+			}
 		}
 		off = min(off, end)
 		if m.records {

@@ -220,9 +220,11 @@ fortresscollector -listen :9464 -tunnel tunnel.example.com \
 
 **Logs.** The collector keeps a copy of every edge's log and access log:
 the edge's own files, by their ids, with the same bytes at the same
-offsets. It reads them with the edge's cursor, so it loses nothing while
-it is away, up to what the edge still has. A copy starts at the edge's
-current file.
+offsets. It reads them with the edge's cursor, every `-every` and again
+at each read, so it loses nothing while it is away, up to what the edge
+still has, and an answer has what the edges have at that moment (it
+waits up to 3 seconds for them). A copy starts at the edge's current
+file.
 
 A reader's cursor is every edge's own cursor, by name:
 `a=<file-id>:<offset>,b=<file-id>:<offset>`. Treat it as one opaque
@@ -230,7 +232,10 @@ string, as before. An edge it does not name is read from the oldest line
 kept. Because the copies have the edges' offsets, two collectors that
 copy the same edges answer the same cursor with the same lines: when
 the machine before the edges fails and its partner takes over, the
-reader goes on where it was.
+reader goes on where it was. A cursor never moves backward. If the
+partner's copy is behind the cursor and it cannot reach that edge, it
+returns no line for that edge and the cursor as it was, until it can: no
+line comes twice, and nothing is signalled as lost that is not.
 
 - Each line names its edge: an access record gets an `edge` key in
   front, a log line ` edge=<name>` at its end, or an `edge` key with
