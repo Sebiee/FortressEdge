@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (not released yet)
+## 0.8.0
 
 - `fortresskube` for an edge service with several edges behind one
   name (see "An edge service with several edges" in
