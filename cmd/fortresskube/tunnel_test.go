@@ -78,10 +78,6 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 
 	release := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The edge keeps a work connection for the next request, for up to
-		// a minute. Closing each one here lets the test see a tunnel
-		// without requests at once.
-		w.Header().Set("Connection", "close")
 		if r.URL.Path != "/slow" {
 			_, _ = io.WriteString(w, "ok")
 			return
@@ -137,7 +133,9 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "a", string(first))
 	before := ts.cur
-	require.Eventually(t, func() bool { return before.streams.Load() == 1 }, 2*time.Second, 10*time.Millisecond)
+	// The edge keeps idle work connections for the next request; they
+	// count until it drops them with the retired tunnel's proxies.
+	require.Eventually(t, func() bool { return before.streams.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
 
 	require.True(t, ts.renew(ctx))
 	require.NotSame(t, before, ts.cur)
@@ -169,4 +167,50 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 	require.Contains(t, metrics.String(), `fortresskube_tunnel_info{server="127.0.0.1"} 1`)
 	require.Contains(t, metrics.String(), `fortresskube_tunnel_renewals_total{result="ok"} 1`)
 	require.Contains(t, metrics.String(), "fortresskube_tunnels_retiring 0\n")
+
+	// A new tunnel the edge refuses a name the current one has does not
+	// take over, though it runs another.
+	oldReady := renewReady
+	renewReady = time.Second
+	t.Cleanup(func() { renewReady = oldReady })
+	refused := []v1.ProxyConfigurer{
+		&v1.HTTPProxyConfig{
+			ProxyBaseConfig: v1.ProxyBaseConfig{Name: "site.test", Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: host, LocalPort: port}},
+			DomainConfig:    v1.DomainConfig{CustomDomains: []string{"site.test."}},
+		},
+		&v1.HTTPProxyConfig{
+			ProxyBaseConfig: v1.ProxyBaseConfig{Name: "other.test", Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: host, LocalPort: port}},
+			DomainConfig:    v1.DomainConfig{CustomDomains: []string{"other.test"}},
+		},
+	}
+	ts.mu.Lock()
+	next, err := ts.open(ctx, refused)
+	ts.mu.Unlock()
+	require.NoError(t, err)
+	t.Cleanup(next.close)
+	require.Eventually(t, func() bool { return next.runs("other.test") }, 10*time.Second, 20*time.Millisecond)
+	require.False(t, next.ready(ctx, refused, ts.cur), "site.test would go dark")
+}
+
+// A replica with maxRetiring tunnels still carrying streams does not
+// renew, so its logins on the edge stay bounded, and renews again once one
+// of them closed.
+func TestRenewWaitsForRetiringTunnels(t *testing.T) {
+	old := renewReady
+	renewReady = 100 * time.Millisecond
+	t.Cleanup(func() { renewReady = old })
+	common := &v1.ClientCommonConfig{ServerAddr: "127.0.0.1", ServerPort: freePort(t), User: "replica"}
+	require.NoError(t, common.Complete())
+	ts := newTunnels(common, nil, nil)
+	ts.cur = &tunnel{set: ts, born: time.Now()}
+	ts.retiring = []*tunnel{{}, {}}
+	require.False(t, ts.renew(context.Background()))
+	var metrics bytes.Buffer
+	ts.writeMetrics(&metrics)
+	require.Contains(t, metrics.String(), `fortresskube_tunnel_renewals_total{result="skipped"} 1`)
+	require.Equal(t, 0, ts.gen, "no tunnel was opened")
+
+	ts.retiring = ts.retiring[:1]
+	ts.renew(context.Background())
+	require.Equal(t, 1, ts.gen, "a tunnel was opened")
 }

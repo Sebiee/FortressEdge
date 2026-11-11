@@ -36,6 +36,12 @@ import (
 //     work connection for the next request for up to a minute, so that is
 //     up to a minute after the last request.
 
+// maxRetiring is how many retired tunnels a replica keeps while their
+// streams last, a WebSocket of hours among them. Each is a login of the
+// node on the edge, which bounds those (the frp fork's limits), so a
+// renewal waits while this many are still open.
+const maxRetiring = 2
+
 var (
 	// renewReady is how long a new tunnel gets to log in and publish.
 	renewReady = 15 * time.Second
@@ -207,6 +213,7 @@ type tunnels struct {
 
 	dialsOK, dialsFailed       atomic.Int64
 	renewalsOK, renewalsFailed atomic.Int64
+	renewalsSkipped            atomic.Int64
 }
 
 func newTunnels(common *v1.ClientCommonConfig, proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) *tunnels {
@@ -304,15 +311,22 @@ func (ts *tunnels) renewEvery(ctx context.Context, age time.Duration) {
 	}
 }
 
-// renew opens a new tunnel and, once it publishes, retires the current
-// one. A new tunnel that does not come up in time is dropped, and the
-// current one stays.
+// renew opens a new tunnel and, once it publishes what the current one
+// does, retires the current one. A new tunnel that does not come up in
+// time is dropped, and the current one stays. With maxRetiring tunnels
+// still retiring, it waits for the next time.
 func (ts *tunnels) renew(ctx context.Context) bool {
 	ts.mu.Lock()
-	proxies := ts.proxies
+	if len(ts.retiring) >= maxRetiring {
+		ts.mu.Unlock()
+		ts.renewalsSkipped.Add(1)
+		log.Infof("tunnel renewal skipped: %d old tunnels still carry streams", maxRetiring)
+		return false
+	}
+	proxies, cur := ts.proxies, ts.cur
 	t, err := ts.open(ctx, proxies)
 	ts.mu.Unlock()
-	if err == nil && !t.ready(ctx, proxies) {
+	if err == nil && !t.ready(ctx, proxies, cur) {
 		t.close()
 		err = fmt.Errorf("it did not log in and publish within %s", renewReady)
 	}
@@ -340,21 +354,16 @@ func (ts *tunnels) renew(ctx context.Context) bool {
 }
 
 // ready reports whether the tunnel has logged in and, when it has proxies
-// to publish, the edge runs one.
-func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer) bool {
+// to publish, the edge runs one, and each that it runs for cur: a name the
+// edge refuses the new tunnel (a limit of the node's) would otherwise go
+// dark when cur retires, while one it refuses both is no reason to wait.
+func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer, cur *tunnel) bool {
 	deadline := time.After(renewReady)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if t.open.Load() {
-			if len(proxies) == 0 {
-				return true
-			}
-			for _, p := range proxies {
-				if st, ok := t.svc.StatusExporter().GetProxyStatus(p.GetBaseConfig().Name); ok && st.Phase == proxy.ProxyPhaseRunning {
-					return true
-				}
-			}
+		if t.open.Load() && (len(proxies) == 0 || t.runsAll(proxies, cur)) {
+			return true
 		}
 		select {
 		case <-ctx.Done():
@@ -364,6 +373,26 @@ func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer) bool {
 		case <-tick.C:
 		}
 	}
+}
+
+// runsAll reports whether t runs one of proxies, and each that cur runs.
+func (t *tunnel) runsAll(proxies []v1.ProxyConfigurer, cur *tunnel) bool {
+	one := false
+	for _, p := range proxies {
+		name := p.GetBaseConfig().Name
+		switch {
+		case t.runs(name):
+			one = true
+		case cur.runs(name):
+			return false
+		}
+	}
+	return one
+}
+
+func (t *tunnel) runs(name string) bool {
+	st, ok := t.svc.StatusExporter().GetProxyStatus(name)
+	return ok && st.Phase == proxy.ProxyPhaseRunning
 }
 
 // retire takes the tunnel out of the edge's choice, so it gets no new
@@ -433,8 +462,9 @@ func (ts *tunnels) writeMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_dials_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"ok\"} %d\n", ts.dialsOK.Load())
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"failed\"} %d\n", ts.dialsFailed.Load())
-	fmt.Fprintln(w, "# HELP fortresskube_tunnel_renewals_total Renewals of the tunnel, by result: ok, failed (the new tunnel did not come up, the old one stayed).")
+	fmt.Fprintln(w, "# HELP fortresskube_tunnel_renewals_total Renewals of the tunnel, by result: ok, failed (the new tunnel did not come up, the old one stayed), skipped (two old tunnels still carry streams).")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_renewals_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"ok\"} %d\n", ts.renewalsOK.Load())
 	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"failed\"} %d\n", ts.renewalsFailed.Load())
+	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"skipped\"} %d\n", ts.renewalsSkipped.Load())
 }
