@@ -24,7 +24,9 @@ var BakedPath = strings.TrimPrefix(config.BakedFile, "/")
 // initramfs. The kernel unpacks concatenated archives in order, so the
 // file is a second gzip cpio appended to the release's; the kernel, the
 // edge binary, and the boot loader are copied unchanged. dest carries
-// src's date, so the same src and fortress.yml give the same bytes.
+// src's date, so the same src and fortress.yml give the same bytes. A
+// fortress.yml with the edge's Vault secret ID makes the ISO a credential:
+// dest is created 0600, and fortress.yml is 0600 in the initramfs.
 func Bake(dest, src string, edge []byte) error {
 	if abs(dest) == abs(src) {
 		return errors.New("bake: output would overwrite the source ISO")
@@ -55,11 +57,15 @@ func Bake(dest, src string, edge []byte) error {
 	if baked {
 		return fmt.Errorf("bake: %s already has a %s; start from the release ISO", src, config.EdgeFile)
 	}
-	if err := appendSeed(initrd, edge); err != nil {
+	perm := os.FileMode(0o644)
+	if config.EdgeHoldsSecret(edge) {
+		perm = 0o600
+	}
+	if err := appendSeed(initrd, edge, perm); err != nil {
 		return err
 	}
-	return WriteISO(dest, filepath.Join(dir, "vmlinuz"), initrd,
-		filepath.Join(dir, "isolinux.bin"), filepath.Join(dir, "ldlinux.c32"), at)
+	return writeStamped(dest, filepath.Join(dir, "vmlinuz"), initrd,
+		filepath.Join(dir, "isolinux.bin"), filepath.Join(dir, "ldlinux.c32"), at, perm)
 }
 
 func abs(p string) string {
@@ -122,11 +128,11 @@ func hasSeed(path string) (bool, error) {
 	return bytes.Contains(b, []byte(BakedPath+"\x00")), nil
 }
 
-func appendSeed(path string, edge []byte) error {
+func appendSeed(path string, edge []byte, perm os.FileMode) error {
 	files := []entry{
 		{"etc", 0o040755, nil},
 		{filepath.Dir(BakedPath), 0o040755, nil},
-		{BakedPath, 0o100644, edge},
+		{BakedPath, 0o100000 | uint32(perm), edge},
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {

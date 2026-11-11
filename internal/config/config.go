@@ -4,13 +4,15 @@
 //	fortress.yml    baked into the ISO by fortressctl bake: what the edge
 //	                trusts and how it runs. A new ISO changes it.
 //	user-data       the NoCloud drive: fqdn, the edge's DNS name, and with
-//	                vault, vault_secret_id. Nothing else in it is read.
+//	                vault, vault_secret_id unless the ISO has it. Nothing
+//	                else in it is read.
 //	network-config  the NoCloud drive: the static address.
 //	policy.yml      the /var disk, from fortressctl apply: who may reach the
 //	                edge and how much. It changes while the edge runs.
 //
 // Only vault_secret_id is a secret. It differs per edge, so it is on the
-// edge's own drive and never in the ISO, which is shared and copied.
+// edge's own drive, not in the ISO, which is shared and copied; an ISO
+// baked for one edge alone may carry it, said so with vault_secret_in_iso.
 package config
 
 import (
@@ -143,7 +145,7 @@ type Vault struct {
 	Mount    string // the KV v2 mount
 	Path     string // the path in it, for these edges only
 	RoleID   string
-	SecretID string // the edge's own, from user-data
+	SecretID string // the edge's own, from user-data or its own ISO
 }
 
 // Policy is policy.yml: what the edge lets through. It is the part an
@@ -379,6 +381,8 @@ type edgeConfig struct {
 	VMount   string  `yaml:"vault_mount"`
 	VPath    string  `yaml:"vault_path"`
 	VRole    string  `yaml:"vault_role_id"`
+	VSecret  string  `yaml:"vault_secret_id"`
+	VInISO   bool    `yaml:"vault_secret_in_iso"`
 }
 
 // policyConfig is policy.yml.
@@ -415,7 +419,7 @@ type siteYAML struct {
 // with a pointer to where it belongs.
 var (
 	edgeKeys = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic",
-		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id"}
+		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id", "vault_secret_id", "vault_secret_in_iso"}
 	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
 		"trace", "sites", "tunnel_grace", "tunnel_dead_timeout", "collector"}
 )
@@ -708,8 +712,6 @@ func checkKeys(doc []byte, file string, known, other []string, elsewhere string)
 		case slices.Contains(known, k):
 		case slices.Contains(other, k):
 			return fmt.Errorf("%s: %s %s", file, k, elsewhere)
-		case k == "vault_secret_id":
-			return fmt.Errorf("%s: vault_secret_id is secret and differs per edge: it goes in the edge's user-data, on its NoCloud drive", file)
 		default:
 			return fmt.Errorf("%s: unknown key %q", file, k)
 		}
@@ -748,9 +750,9 @@ func checkNested(doc []byte, keys ...string) error {
 }
 
 // applyUserData takes fqdn from a cloud-config, and vault_secret_id when
-// fortress.yml sets vault, and nothing else: the platform writes the rest
-// (hostname, users, keys) for guests that have a shell, and this one has
-// none.
+// fortress.yml sets vault without one, and nothing else: the platform
+// writes the rest (hostname, users, keys) for guests that have a shell,
+// and this one has none.
 func applyUserData(c *Config, userData []byte) error {
 	var ud struct {
 		FQDN          string `yaml:"fqdn"`
@@ -769,6 +771,9 @@ func applyUserData(c *Config, userData []byte) error {
 	c.Tunnel = name
 	secret := strings.TrimSpace(ud.VaultSecretID)
 	switch {
+	case c.Vault != nil && c.Vault.SecretID != "" && secret != "":
+		return fmt.Errorf("user-data: vault_secret_id is in the ISO's %s too: give it in one place", EdgeFile)
+	case c.Vault != nil && c.Vault.SecretID != "":
 	case c.Vault != nil && secret == "":
 		return fmt.Errorf("user-data: vault_secret_id is required: %s sets vault, and this edge logs in with its AppRole's secret ID", EdgeFile)
 	case c.Vault == nil && secret != "":
@@ -850,9 +855,21 @@ func applyVault(c *Config, e edgeConfig) error {
 		Path: strings.Trim(strings.TrimSpace(e.VPath), "/"), RoleID: strings.TrimSpace(e.VRole),
 	}
 	ca := strings.TrimSpace(e.VaultCA)
+	secret := strings.TrimSpace(e.VSecret)
+	switch {
+	case secret != "" && !e.VInISO:
+		return fmt.Errorf("%s: vault_secret_id is secret and differs per edge: it goes in the edge's user-data, on its NoCloud drive; "+
+			"or, in an ISO baked for this one edge alone, beside vault_secret_in_iso: true", EdgeFile)
+	case secret == "" && e.VInISO:
+		return fmt.Errorf("%s: vault_secret_in_iso without vault_secret_id", EdgeFile)
+	}
 	if v.URL == "" && v.Mount == "" && v.Path == "" && v.RoleID == "" && ca == "" {
+		if secret != "" {
+			return fmt.Errorf("%s: vault_secret_id without vault", EdgeFile)
+		}
 		return nil
 	}
+	v.SecretID = secret
 	u, err := url.Parse(v.URL)
 	if v.URL == "" || err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.User != nil {
 		return fmt.Errorf("%s: vault: want the https URL of the Vault server, such as https://vault.example.com:8200", EdgeFile)
@@ -874,6 +891,13 @@ func applyVault(c *Config, e edgeConfig) error {
 	}
 	c.Vault = &v
 	return nil
+}
+
+// EdgeHoldsSecret reports whether fortress.yml carries a Vault secret ID
+// (vault_secret_in_iso): an ISO baked with it is a credential.
+func EdgeHoldsSecret(edge []byte) bool {
+	var c Config
+	return applyEdge(&c, edge) == nil && c.Vault != nil && c.Vault.SecretID != ""
 }
 
 // pemCerts parses one or more PEM certificates.

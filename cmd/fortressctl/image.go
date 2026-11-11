@@ -60,15 +60,18 @@ func newBake() *cobra.Command {
 		Short: "Copy a release ISO with fortress.yml baked in",
 		Long: `Writes a copy of the release ISO whose initramfs holds fortress.yml: the
 ACME server and its CA, the client CA, NTP, Vault, and how the edge runs.
-None of it is secret (fortress.yml refuses vault_secret_id), so the ISO
-can be published as a build artifact. One ISO serves every edge that
-shares those settings.
+None of it is secret, so the ISO can be published as a build artifact.
+One ISO serves every edge that shares those settings.
 
 Each machine boots it with a NoCloud (cloud-init) drive that gives its
 fqdn in user-data and its address in network-config: what Proxmox,
 libvirt, and cloud platforms write from their own settings. With vault,
 user-data also gives the edge's own vault_secret_id. The policy (block,
-exempt, limits) is applied later: fortressctl apply.`,
+exempt, limits) is applied later: fortressctl apply.
+
+An ISO baked for one edge alone may carry its vault_secret_id, beside
+vault_secret_in_iso: true. That ISO is a credential: it is written 0600;
+keep it as you keep the keys, never publish it, and bake one per edge.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return operator.Bake(out, args[0], edge)
