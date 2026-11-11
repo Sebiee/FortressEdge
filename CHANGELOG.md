@@ -8,13 +8,14 @@ minor release.
 
 Changes that need an operator:
 
-- The Vault AppRole secret ID moves out of `fortress.yml`, and so out of
-  the ISO, into each edge's cloud-init `user-data`
-  (`vault_secret_id`). `fortress.yml` and `bake` refuse the key, so an
-  ISO can no longer carry a secret, and each edge gets its own secret ID
-  that Vault can bind to its address. See
-  [provisioning](docs/provisioning.md). The Terraform provider needs the
-  matching release.
+- The Vault AppRole secret ID is refused in a shared ISO. Give each edge
+  its own, bound to its address: in its cloud-init `user-data`
+  (`vault_secret_id`), or in an ISO baked for that edge alone, with
+  `vault_secret_in_iso: true` beside `vault_secret_id` in
+  `fortress.yml`. `bake` writes such an ISO `0600` and warns that it is
+  a credential. Both at once are refused. See
+  [provisioning](docs/provisioning.md). Terraform provider 0.9.0 has
+  `vault_secret_in_iso`.
 - `fortresskube` needs `list` and `watch` on `gateways`,
   `gatewayclasses`, `namespaces` and `services` besides the routes, and
   stops at start, naming the resource, when one is forbidden. An

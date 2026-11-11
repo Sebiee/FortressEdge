@@ -121,7 +121,8 @@ vault_role_id: ...        # the edges' AppRole
 ```
 
 ```yaml
-# user-data, on each edge's NoCloud drive (see provisioning.md)
+# user-data, on each edge's NoCloud drive (see provisioning.md), or in an
+# ISO baked for this edge alone, beside vault_secret_in_iso: true
 vault_secret_id: ...      # this edge's own
 ```
 
@@ -187,11 +188,12 @@ vault write auth/approle/role/edge-prod/secret-id \
 ```
 
 A secret ID taken from one edge's drive is then useless anywhere else,
-and destroying it cuts off that edge alone. The secret ID is never in
-the ISO, and the ops API never shows it. Every edge with the AppRole can
+and destroying it cuts off that edge alone. Bind it so whether it is in
+`user-data` or in a per-edge ISO. It is never in a shared ISO, and the
+ops API never shows it. Every edge with the AppRole can
 read the private keys of every name on the path: give one path to edges
-that serve the same names, and keep each edge's `user-data` as you keep
-the keys.
+that serve the same names, and keep each edge's `user-data`, or its own
+ISO, as you keep the keys.
 
 `cert_store` in the [status](operations.md) says whether Vault is
 `reachable`, when a call last worked (`last_ok`), failed calls by
