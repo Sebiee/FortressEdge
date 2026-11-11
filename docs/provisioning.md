@@ -10,7 +10,8 @@ An edge's config has three parts, and each has one owner:
 
 The ISO holds no secret, so it can be a build artifact, and the drive can
 be what any platform writes. The one exception is the Vault secret ID of
-edges that share certificates: it is each edge's own, in its `user-data`
+edges that share certificates: it is each edge's own, in its `user-data`,
+or in an ISO baked for that edge alone
 ([below](#with-vault-the-secret-id)). There is no other way to configure
 an edge: no maintenance mode, no config upload, no shell.
 
@@ -139,13 +140,34 @@ fqdn: edge1.example.com
 vault_secret_id: 2f1b...
 ```
 
-`fortress.yml` refuses `vault_secret_id`: an ISO is shared and copied,
-and whoever holds a secret ID reads every private key on the path. Keep
-the drive, and wherever its `user-data` comes from, as you keep the keys.
-Proxmox writes no such key from the VM's settings, so give the VM a
-`user-data` of your own, with `fqdn` in it, as a snippet:
+A shared ISO holds no secret: `fortress.yml` refuses `vault_secret_id`,
+since an ISO is shared and copied, and whoever holds a secret ID reads
+every private key on the path. Keep the drive, and wherever its
+`user-data` comes from, as you keep the keys. Proxmox writes no such key
+from the VM's settings, so give the VM a `user-data` of your own, with
+`fqdn` in it, as a snippet:
 `qm set <vmid> --cicustom user=local:snippets/edge1-user-data.yaml`.
 Proxmox still writes `network-config` from the VM's settings.
+
+**A per-edge ISO.** Where a platform bakes one ISO for each edge anyway,
+that ISO may carry the edge's own secret ID instead, said so in its
+`fortress.yml`:
+
+```yaml
+vault_secret_id: 2f1b...     # this edge's own
+vault_secret_in_iso: true    # this ISO is this one edge's
+```
+
+Without `vault_secret_in_iso`, the key is refused, and with it in the
+ISO, `user-data` must not have one too. `fortressctl bake` writes such
+an ISO `0600`, with `fortress.yml` `0600` inside, and says so: the ISO is
+a credential. Keep it as you keep the keys, never publish it or put it
+in a CI artifact or a shared image store, and bake one per edge. Either
+way, bind each secret ID to its edge's address (`cidr_list`, see
+[certificates.md](certificates.md#several-edges-for-the-same-names)), so
+a copy is useless anywhere else. On Proxmox this needs no snippet and no
+SSH: the ISO goes to the image datastore like any other, readable by
+whoever reads that datastore.
 
 ## Terraform
 

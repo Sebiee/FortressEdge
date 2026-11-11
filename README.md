@@ -50,7 +50,9 @@ Dark node --TCP 443-->  frp over WebSocket, with a client certificate
 
 The ISO holds no secret, and one ISO serves every edge that shares a
 `fortress.yml`. The only secret, the Vault secret ID of edges that share
-certificates, is each edge's own, in its `user-data`. There is no other way in: no shell, no config upload. An
+certificates, is each edge's own, in its `user-data`, or in an ISO baked
+for that edge alone, said so with `vault_secret_in_iso: true`: that ISO
+is a credential, written `0600`. There is no other way in: no shell, no config upload. An
 edge whose config is missing or wrong says why on its console. Details in
 [docs/provisioning.md](docs/provisioning.md).
 
@@ -248,7 +250,8 @@ fortressctl apply edge1.example.com -f policy.yml \
 
 The cloud-init drive: `fqdn` in `user-data`, a DNS name with a domain,
 which is the tunnel name dark nodes and operators connect to; with
-`vault`, the edge's own `vault_secret_id` in `user-data` too; and a
+`vault`, the edge's own `vault_secret_id` in `user-data` too, unless its
+own ISO has it; and a
 static address and gateway in `network-config` (v1 or v2). Nothing else
 in `user-data` is read.
 

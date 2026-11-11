@@ -38,7 +38,8 @@ func TestEdgesShareCertificatesThroughVault(t *testing.T) {
 		"vault_mount: edge-certs\nvault_path: test/private\n" +
 		"vault_role_id: " + vault.RoleID + "\n" +
 		"vault_ca: |\n" + lab.Indent(vault.CA)
-	// Each edge's own secret ID, on its NoCloud drive: the ISO holds none.
+	// Each edge's own secret ID: the first's on its NoCloud drive, the
+	// second's in an ISO baked for it alone.
 	secret := "vault_secret_id: " + vault.SecretID + "\n"
 	tunnelCert := func() bool {
 		return slices.ContainsFunc(vault.Keys(), func(k string) bool {
@@ -51,7 +52,7 @@ func TestEdgesShareCertificatesThroughVault(t *testing.T) {
 	first := lab.Serial(t, a.Ops, lab.OpsURL+"status")
 
 	// The parent test owns it: a subtest's cleanup would stop it.
-	b := lab.BootEdge(t, lab.EdgeOptions{Config: conf, UserData: secret, SharePebble: a.Pebble})
+	b := lab.BootEdge(t, lab.EdgeOptions{Config: conf + secret + "vault_secret_in_iso: true\n", SharePebble: a.Pebble})
 	step(t, "a second edge starts with the first's certificate", func(t *testing.T) {
 		assert.Equal(t, first, lab.Serial(t, b.Ops, lab.OpsURL+"status"))
 		assert.Equal(t, []string{lab.Tunnel}, a.Pebble.Issued(), "ordered again")
