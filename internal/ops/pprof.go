@@ -25,16 +25,16 @@ func init() {
 	}
 	ops := []ca.Role{ca.RoleOps}
 	get := "GET " + config.OpsPathPrefix + "pprof/"
-	routes[get+"profile"] = route{ops, serve(http.HandlerFunc(pprof.Profile))}
-	routes[get+"trace"] = route{ops, serve(http.HandlerFunc(pprof.Trace))}
+	routes[get+"profile"] = route{roles: ops, serve: serve(http.HandlerFunc(pprof.Profile))}
+	routes[get+"trace"] = route{roles: ops, serve: serve(http.HandlerFunc(pprof.Trace))}
 	// The bench's reference: TLS and net/http on this VM, with nothing
 	// proxied (TestCeiling).
-	routes[get+"null"] = route{ops, func(_ *Handler, w http.ResponseWriter, _ *http.Request) {
+	routes[get+"null"] = route{roles: ops, serve: func(_ *Handler, w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}}
 	// What the edge process has spent so far: CPU and allocations. The
 	// bench's perf guard reads it before and after a replay.
-	routes[get+"metrics"] = route{ops, func(_ *Handler, w http.ResponseWriter, _ *http.Request) {
+	routes[get+"metrics"] = route{roles: ops, serve: func(_ *Handler, w http.ResponseWriter, _ *http.Request) {
 		var ru syscall.Rusage
 		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
 		s := []metrics.Sample{{Name: "/gc/heap/allocs:objects"}, {Name: "/gc/heap/allocs:bytes"},
@@ -53,7 +53,7 @@ func init() {
 		})
 	}}
 	for _, p := range []string{"heap", "allocs", "goroutine", "mutex", "block"} {
-		routes[get+p] = route{ops, serve(pprof.Handler(p))}
+		routes[get+p] = route{roles: ops, serve: serve(pprof.Handler(p))}
 	}
 }
 
