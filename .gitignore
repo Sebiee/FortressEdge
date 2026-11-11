@@ -1,6 +1,7 @@
 /fortressedge
 /fortressctl
 /fortresskube
+/fortresscollector
 /out/
 .apt-cache/
 *.img

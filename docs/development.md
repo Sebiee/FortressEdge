@@ -7,6 +7,7 @@
 | `cmd/fortressedge` | the edge, PID 1 of the ISO |
 | `cmd/fortressctl` | the operator tool, and the ISO builder |
 | `cmd/fortresskube` | frpc for Kubernetes; its own Go module |
+| `cmd/fortresscollector` | the collector of a location of edges (`internal/collect`) |
 | `bake/` | the one public package: checking and baking `fortress.yml`, for the [Terraform provider](https://github.com/Sebiee/terraform-provider-fortressedge) |
 | `internal/` | the edge's packages |
 | `bpf/` | the XDP filter; the compiled objects in `internal/flod` are committed |

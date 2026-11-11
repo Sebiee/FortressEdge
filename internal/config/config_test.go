@@ -650,3 +650,25 @@ func indentPEM(s string) string {
 	}
 	return b.String()
 }
+
+func TestPolicyCollector(t *testing.T) {
+	p, err := ParsePolicy([]byte("collector: gateway:9464\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Gateway: netip.MustParseAddr("10.4.1.1"), Policy: p}
+	if got := c.CollectorAddr(); got != "10.4.1.1:9464" {
+		t.Fatalf("gateway:9464 at 10.4.1.1 is %q", got)
+	}
+	if p, err := ParsePolicy([]byte("collector: 192.0.2.7:8080\n")); err != nil || (Config{Policy: p}).CollectorAddr() != "192.0.2.7:8080" {
+		t.Fatalf("an address: %v %q", err, p.Collector)
+	}
+	if (Config{}).CollectorAddr() != "" {
+		t.Fatal("no collector is no address")
+	}
+	for _, bad := range []string{"gateway", "gateway:0", "gateway:port", ":9464", "10.4.1.1:99999"} {
+		if _, err := ParsePolicy([]byte("collector: " + bad + "\n")); err == nil {
+			t.Fatalf("collector: %s was accepted", bad)
+		}
+	}
+}

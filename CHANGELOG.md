@@ -19,6 +19,23 @@
     `fortresskube_tunnel_streams`, `fortresskube_tunnels_retiring`,
     `fortresskube_tunnel_dials_total{result}` and
     `fortresskube_tunnel_renewals_total{result}`.
+- `fortresscollector`, a new program for several edges behind one
+  address (a location). It runs on the machine before the edges, keeps a
+  copy of every edge's log and access log, and answers reads of status,
+  metrics and logs for all of them. See
+  [the collector](docs/operations.md#the-collector).
+  - The policy's `collector` (`gateway:9464`, or `host:port`) makes an
+    edge pass such a read on to it, after it has checked the reader's
+    certificate, so a reader that reaches any edge gets the location.
+    `?self` asks for the edge it reaches alone; the collector itself
+    reads that way. Without `collector`, nothing changes.
+  - A log cursor is every edge's own, `a=<file-id>:<offset>,b=...`, and
+    is good at a second collector of the same edges. `X-Log-Gap` passes
+    through. Lines name their edge.
+  - Metrics are asked of every edge at the moment of the read, each
+    sample with an `edge` label; `fortresscollector_edge_up{edge}` tells
+    which edges answered.
+  - Releases attach `fortresscollector-<tag>-linux-amd64`.
 
 ## 0.7.3
 

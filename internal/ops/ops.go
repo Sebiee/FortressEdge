@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -121,10 +122,13 @@ func (h *Handler) config() config.Config {
 	return h.cfg
 }
 
-// route is one endpoint: the roles that may call it.
+// route is one endpoint: the roles that may call it, and whether it is a
+// read the location's collector answers for all its edges (policy.yml's
+// collector) unless the caller asks for this edge itself (?self).
 type route struct {
-	roles []ca.Role
-	serve func(h *Handler, w http.ResponseWriter, r *http.Request)
+	roles    []ca.Role
+	serve    func(h *Handler, w http.ResponseWriter, r *http.Request)
+	location bool
 }
 
 var (
@@ -134,12 +138,12 @@ var (
 
 // routes is keyed by method and path, as "GET /~!ops/status".
 var routes = map[string]route{
-	"GET " + config.OpsStatusPath:  {readers, (*Handler).status},
-	"GET " + config.OpsMetricsPath: {readers, (*Handler).serveMetrics},
-	"GET " + config.OpsLogsPath:    {readers, (*Handler).logs},
-	"GET " + config.OpsAccessPath:  {readers, (*Handler).access},
-	"GET " + config.OpsPolicyPath:  {readers, (*Handler).getPolicy},
-	"PUT " + config.OpsPolicyPath:  {operators, (*Handler).putPolicy},
+	"GET " + config.OpsStatusPath:  {readers, (*Handler).status, true},
+	"GET " + config.OpsMetricsPath: {readers, (*Handler).serveMetrics, true},
+	"GET " + config.OpsLogsPath:    {readers, (*Handler).logs, true},
+	"GET " + config.OpsAccessPath:  {readers, (*Handler).access, true},
+	"GET " + config.OpsPolicyPath:  {readers, (*Handler).getPolicy, false},
+	"PUT " + config.OpsPolicyPath:  {operators, (*Handler).putPolicy, false},
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +164,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, strings.Join(allow, " or ")+" only", http.StatusMethodNotAllowed)
 		return
 	}
+	if rt.location && !r.URL.Query().Has(config.OpsSelf) {
+		if addr := h.config().CollectorAddr(); addr != "" {
+			forward(w, r, addr, id)
+			return
+		}
+	}
 	rt.serve(h, w, r.WithContext(withCaller(r.Context(), id)))
+}
+
+// collector reaches the location's collector, on the edges' own network.
+var collector = &http.Client{Transport: &http.Transport{
+	DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+	ResponseHeaderTimeout: 15 * time.Second,
+	MaxIdleConnsPerHost:   4,
+}}
+
+// forward passes a read on to the location's collector and returns its
+// answer: the status, metrics or logs of every edge of the location. The
+// caller's certificate was checked here; the collector gets its SPIFFE ID.
+// A collector that does not answer is a 502: this edge's own answer would
+// pass for the location's.
+func forward(w http.ResponseWriter, r *http.Request, addr, id string) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+addr+r.URL.RequestURI(), nil)
+	if err == nil {
+		req.Header.Set("X-Fortress-Caller", id)
+		var resp *http.Response
+		if resp, err = collector.Do(req); err == nil {
+			defer resp.Body.Close()
+			for _, k := range []string{"Content-Type", "X-Log-Cursor", "X-Log-Gap"} {
+				if v := resp.Header.Get(k); v != "" {
+					w.Header().Set(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
+	}
+	slog.Warn("ops: the collector does not answer", "collector", addr, "path", r.URL.Path, "err", err)
+	http.Error(w, "ops: the collector does not answer; add ?"+config.OpsSelf+" for this edge alone", http.StatusBadGateway)
 }
 
 // methods lists the methods path has a route for.

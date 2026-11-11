@@ -52,6 +52,10 @@ const (
 	OpsMetricsPath = OpsPathPrefix + "metrics"
 	// OpsPolicyPath reads the policy (GET) and replaces it (PUT).
 	OpsPolicyPath = OpsPathPrefix + "policy"
+	// OpsSelf is the query key that makes an edge answer a read of its
+	// status, metrics or logs for itself, not pass it on to its collector
+	// (policy.yml's collector).
+	OpsSelf = "self"
 )
 
 func ControlAddr() string { return fmt.Sprintf("%s:%d", FrpsBindAddr, FrpsTCPPort) }
@@ -158,6 +162,12 @@ type Policy struct {
 	// frpc leaves its group and the others carry its share. 0 leaves it to
 	// frps's heartbeat. A tunnel keeps the timeout it connected with.
 	TunnelDeadTimeout time.Duration
+	// Collector is where reads of the ops API (status, metrics, logs) go
+	// that do not ask for this edge itself: the collector of the edge's
+	// location, which answers for all its edges. host:port, or
+	// gateway:port for the edge's own gateway. Empty: every read is
+	// answered here.
+	Collector string
 	// Sites are settings for one site, by the name its dark node publishes
 	// (app.example.com, *.example.com) or a name a wildcard covers.
 	Sites map[string]SitePolicy
@@ -252,6 +262,18 @@ func (p Policy) AccessLogAnywhere() bool {
 // compares it with the file in git.
 func PolicyETag(policy []byte) string {
 	return fmt.Sprintf("\"%x\"", sha256.Sum256(policy))
+}
+
+// CollectorAddr is the host:port of the location's collector, "" for none.
+func (c Config) CollectorAddr() string {
+	host, port, err := net.SplitHostPort(c.Collector)
+	if err != nil {
+		return ""
+	}
+	if host == "gateway" {
+		host = c.Gateway.String()
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // RebootFrom reports whether moving from cur to p needs a reboot: only
@@ -367,6 +389,7 @@ type policyConfig struct {
 	Trace             *traceYAML          `yaml:"trace"`
 	TunnelGrace       string              `yaml:"tunnel_grace"`
 	TunnelDeadTimeout string              `yaml:"tunnel_dead_timeout"`
+	Collector         string              `yaml:"collector"`
 	Sites             map[string]siteYAML `yaml:"sites"`
 }
 
@@ -390,7 +413,7 @@ var (
 	edgeKeys = []string{"acme", "acme_ca", "client_ca", "ntp", "renew_interval", "quic",
 		"vault", "vault_ca", "vault_mount", "vault_path", "vault_role_id", "vault_secret_id"}
 	policyKeys = []string{"block", "exempt", "limits", "access_log", "access_log_max_size", "access_log_max_files",
-		"trace", "sites", "tunnel_grace", "tunnel_dead_timeout"}
+		"trace", "sites", "tunnel_grace", "tunnel_dead_timeout", "collector"}
 )
 
 // EdgeKeys lists the keys fortress.yml takes.
@@ -527,6 +550,13 @@ func ParsePolicy(b []byte) (Policy, error) {
 			return Policy{}, fmt.Errorf("%s: tunnel_dead_timeout: want whole seconds from 0 (off) to 10m, such as 3s", PolicyName)
 		}
 		p.TunnelDeadTimeout = d
+	}
+	if s := strings.TrimSpace(y.Collector); s != "" {
+		host, port, err := net.SplitHostPort(s)
+		if n, perr := strconv.Atoi(port); err != nil || perr != nil || host == "" || n < 1 || n > 65535 {
+			return Policy{}, fmt.Errorf("%s: collector: want host:port, or gateway:port for the edge's gateway, such as gateway:9464", PolicyName)
+		}
+		p.Collector = s
 	}
 	if p.Sites, err = parseSites(y.Sites); err != nil {
 		return Policy{}, err

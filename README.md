@@ -263,6 +263,7 @@ in `user-data` is read.
 | `trace` | `trust_incoming: false` | Whether a visitor's W3C `traceparent` is continued, or only logged as a link |
 | `tunnel_grace` | `10m` | How long a site whose dark node left, or that was published before a reboot, answers `503` before it goes silent; `0` never answers it |
 | `tunnel_dead_timeout` | `3s` | How long a tunnel may go without the dark node acknowledging anything before the edge drops it, in whole seconds; `0` leaves it to frp's heartbeat. A tunnel keeps the one it connected with |
+| `collector` | none | Where reads of status, metrics and logs go that do not ask for this edge itself (`?self`): the [collector](docs/operations.md#the-collector) of the edge's location, as `host:port`, or `gateway:port` for the edge's own gateway |
 | `sites` | none | Per published name: `access_log`, `max_body_size`, `response_header_timeout` |
 
 Everything applies at once, except three limits that reboot the edge

@@ -39,6 +39,7 @@ test:
 build: kube
 	$(Q)CGO_ENABLED=0 go build $(BUILDFLAGS) -o fortressedge ./cmd/fortressedge
 	$(Q)go build $(BUILDFLAGS) -o fortressctl ./cmd/fortressctl
+	$(Q)CGO_ENABLED=0 go build $(BUILDFLAGS) -o out/fortresscollector ./cmd/fortresscollector
 
 kube:
 	$(Q)CGO_ENABLED=0 go -C cmd/fortresskube build $(BUILDFLAGS) -o $(CURDIR)/out/kube/fortresskube .

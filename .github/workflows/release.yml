@@ -63,7 +63,8 @@ jobs:
           cp out/fortressctl "dist/fortressctl-${TAG}-linux-amd64"
           make kube
           cp out/kube/fortresskube "dist/fortresskube-${TAG}-linux-amd64"
-          (cd dist && sha256sum "fortressedge-${TAG}.iso" "fortressctl-${TAG}-linux-amd64" "fortresskube-${TAG}-linux-amd64" > SHA256SUMS)
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/fortresscollector-${TAG}-linux-amd64" ./cmd/fortresscollector
+          (cd dist && sha256sum "fortressedge-${TAG}.iso" "fortressctl-${TAG}-linux-amd64" "fortresskube-${TAG}-linux-amd64" "fortresscollector-${TAG}-linux-amd64" > SHA256SUMS)
       - name: Image
         id: image
         env:
@@ -85,6 +86,7 @@ jobs:
             dist/fortressedge-${{ env.TAG }}.iso
             dist/fortressctl-${{ env.TAG }}-linux-amd64
             dist/fortresskube-${{ env.TAG }}-linux-amd64
+            dist/fortresscollector-${{ env.TAG }}-linux-amd64
       - name: Attest image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -105,6 +107,7 @@ jobs:
           - fortressedge-${TAG}.iso
           - fortressctl-${TAG}-linux-amd64
           - fortresskube-${TAG}-linux-amd64 (image: ghcr.io/${GH_REPO,,}/fortresskube:${TAG})
+          - fortresscollector-${TAG}-linux-amd64
           - SHA256SUMS
 
           Verify
@@ -113,6 +116,7 @@ jobs:
           gh attestation verify fortressedge-${TAG}.iso --repo ${GH_REPO}
           gh attestation verify fortressctl-${TAG}-linux-amd64 --repo ${GH_REPO}
           gh attestation verify fortresskube-${TAG}-linux-amd64 --repo ${GH_REPO}
+          gh attestation verify fortresscollector-${TAG}-linux-amd64 --repo ${GH_REPO}
           gh attestation verify oci://ghcr.io/${GH_REPO,,}/fortresskube:${TAG} --repo ${GH_REPO}
           \`\`\`
 
@@ -126,4 +130,5 @@ jobs:
             "dist/fortressedge-${TAG}.iso" \
             "dist/fortressctl-${TAG}-linux-amd64" \
             "dist/fortresskube-${TAG}-linux-amd64" \
+            "dist/fortresscollector-${TAG}-linux-amd64" \
             dist/SHA256SUMS

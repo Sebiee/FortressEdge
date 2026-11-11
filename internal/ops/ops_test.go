@@ -572,3 +572,61 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 }
+
+// With a collector set, a read of status, metrics or logs is the
+// location's: the edge checks the caller, then passes the read on, unless
+// the caller asks for this edge itself.
+func TestReadsGoToTheCollector(t *testing.T) {
+	var path, caller string
+	calls := 0
+	col := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		path, caller = r.URL.RequestURI(), r.Header.Get("X-Fortress-Caller")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Log-Cursor", "a=boot:7")
+		w.Header().Set("X-Log-Gap", "true")
+		_, _ = io.WriteString(w, "the location's\n")
+	}))
+	defer col.Close()
+	host, port, _ := strings.Cut(col.Listener.Addr().String(), ":")
+	dir := t.TempDir()
+	writeLogs(t, dir, "# boot "+testBoot+"\none\n", "")
+	cfg := testConfig()
+	cfg.Gateway = netip.MustParseAddr(host)
+	cfg.Collector = "gateway:" + port
+	h := New(cfg, nil, testBoot, dir)
+
+	rec := serve(t, h, config.OpsAccessPath+"?cursor=a%3Dboot%3A3", logsID)
+	if rec.Code != http.StatusOK || rec.Body.String() != "the location's\n" {
+		t.Fatalf("access: %d %q", rec.Code, rec.Body)
+	}
+	if path != config.OpsAccessPath+"?cursor=a%3Dboot%3A3" || caller != logsID {
+		t.Fatalf("the collector got %q from %q", path, caller)
+	}
+	if rec.Header().Get("X-Log-Cursor") != "a=boot:7" || rec.Header().Get("X-Log-Gap") != "true" ||
+		rec.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("headers: %v", rec.Header())
+	}
+
+	// For this edge itself, and what is the edge's own: answered here.
+	calls = 0
+	if rec := serve(t, h, config.OpsLogsPath+"?"+config.OpsSelf, logsID); rec.Body.String() != "# boot "+testBoot+"\none\n" {
+		t.Fatalf("logs?self: %q", rec.Body)
+	}
+	if rec := serve(t, h, config.OpsPolicyPath, logsID); rec.Code != http.StatusOK {
+		t.Fatalf("policy: %d", rec.Code)
+	}
+	// A dark node may not read, with or without a collector.
+	if rec := serve(t, h, config.OpsStatusPath, nodeID); rec.Code != http.StatusForbidden {
+		t.Fatalf("a dark node's read: %d", rec.Code)
+	}
+	if calls != 0 {
+		t.Fatalf("the collector was asked %d times", calls)
+	}
+
+	// A collector that does not answer: an error, not this edge's own answer.
+	col.Close()
+	if rec := serve(t, h, config.OpsStatusPath, opsID); rec.Code != http.StatusBadGateway {
+		t.Fatalf("collector away: %d %q", rec.Code, rec.Body)
+	}
+}

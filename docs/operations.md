@@ -19,6 +19,11 @@ A dark-node certificate gets 403 everywhere, and so does a log-reader
 certificate on `PUT`. Refusals and policy changes are logged with the
 caller's SPIFFE ID. The edge has no endpoint that signs certificates.
 
+With [a collector](#the-collector) set in the policy, a `GET` of status,
+metrics, logs or the access log is answered for every edge of the
+location, whichever edge it reaches. `?self` asks for the edge it reaches
+alone. The policy is always the edge's own.
+
 ```sh
 # --cacert is the root the edge's ACME certificates chain to; nothing for Let's Encrypt.
 curl --cacert acme-root.crt --cert tls/clients/ops/alice.crt --key tls/clients/ops/alice.key \
@@ -178,6 +183,82 @@ A cursor into any kept file continues through every newer one, so a
 shipper that polls before the oldest file is deleted loses nothing. For
 Filebeat, copy the input above with `url: …/~!ops/access`; each event is
 then the request record itself.
+
+## The collector
+
+Several edges that stand behind one address are one **location**. A
+reader that dials that address reaches any one of them, and each edge
+knows only its own share of the requests. `fortresscollector` runs on
+the machine that stands before the edges and answers for all of them:
+
+- Each edge's policy names it: `collector: gateway:9464` (the edge's own
+  gateway, port 9464) or `collector: <host>:<port>`.
+- An edge then checks a reader's certificate as before, and passes a
+  read of status, metrics, logs or the access log on to the collector.
+  The collector's answer is the location's. A collector that does not
+  answer is a `502`: the edge's own answer would pass for the location's.
+- The collector asks each edge for itself (`?self`), with its own
+  log-reader certificate, at the edge's address.
+
+```sh
+fortresscollector -listen :9464 -tunnel tunnel.example.com \
+  -edges a=10.4.1.11,b=10.4.1.12 \
+  -ca acme-root.crt -cert logs-collector.crt -key logs-collector.key \
+  -dir /var/lib/fortresscollector -keep 1GiB
+```
+
+| Flag | Default | What |
+| --- | --- | --- |
+| `-listen` | `:9464` | Where the edges reach it. It checks no caller: let only the edges' network in |
+| `-edges` | none | The location's edges, `name=host[:port]`, port 443 when left out. The name is the `edge` in every answer |
+| `-tunnel` | none | The edges' tunnel name |
+| `-ca` | the system's roots | The root the edges' certificates chain to |
+| `-cert`, `-key` | none | Its log-reader certificate, `spiffe://<tunnel>/logs/<name>`. The files are read at every connection, so a renewed one needs no restart |
+| `-dir` | `/var/lib/fortresscollector` | Where the copies of the logs are kept |
+| `-keep` | `1GiB` | Size of the copy of each log of each edge; the oldest lines go first |
+| `-every` | `2s` | How often each edge's logs are read |
+
+**Logs.** The collector keeps a copy of every edge's log and access log:
+the edge's own files, by their ids, with the same bytes at the same
+offsets. It reads them with the edge's cursor, so it loses nothing while
+it is away, up to what the edge still has. A copy starts at the edge's
+current file.
+
+A reader's cursor is every edge's own cursor, by name:
+`a=<file-id>:<offset>,b=<file-id>:<offset>`. Treat it as one opaque
+string, as before. An edge it does not name is read from the oldest line
+kept. Because the copies have the edges' offsets, two collectors that
+copy the same edges answer the same cursor with the same lines: when
+the machine before the edges fails and its partner takes over, the
+reader goes on where it was.
+
+- Each line names its edge: an access record gets an `edge` key in
+  front, a log line ` edge=<name>` at its end, or an `edge` key with
+  `format=ndjson`. The lines come edge by edge, each edge's in order.
+- `X-Log-Gap: true` means lines are lost between the cursor and the
+  answer, as on an edge: the edge had lost them before the collector
+  read them, or the cursor names a file this copy does not have (a
+  collector started later than its partner, or past `-keep`).
+- An answer holds at most about 8 MiB of lines. Read again with its
+  cursor until an answer is empty.
+- `?follow` is not served (`501`): poll with the cursor.
+
+**Metrics.** A read of `/~!ops/metrics` asks every edge at that moment
+and returns their samples under one head per metric, each sample with
+an `edge` label in front. Nothing is kept, so a counter never goes
+backward when another collector answers the next read. An edge that
+does not answer is left out and counted: `fortresscollector_edge_up{edge}`
+is 0. The collector adds its own: `fortresscollector_log_bytes{edge,log}`,
+`fortresscollector_log_reads_total{edge,log,result}` and
+`fortresscollector_log_gaps_total{edge,log}`.
+
+**Status.** `/~!ops/status` returns `{"edges": {"<name>": {...}}}`, each
+edge's status as it is now, `null` for one that does not answer.
+
+**Limits.** The collector and the edges speak plain HTTP on the edges'
+own network, and the collector trusts what reaches it there: keep that
+network to the edges and the machines before them. Every reader with a
+certificate sees every hostname of the location.
 
 ## TCP routes
 
