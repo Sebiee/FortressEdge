@@ -269,6 +269,17 @@ status and `fortressedge_tunnel_group_members{group="<name>"}`
 count the replicas logged in. Spread them across zones, as above, so
 that losing a node or a zone leaves the sites up.
 
+Each edge limits one certificate to 64 logins, 4096 proxies and 256
+names. The logins of a certificate on an edge are the replicas that
+reach it, plus one for each replica renewing its tunnel (`-renew`), plus
+retired tunnels that still carry a stream: a renewal waits while a
+replica has two of those, so a replica holds at most four. Where edges
+are away and one edge takes every replica, about 15 replicas of one
+certificate fit with room to spare. Every login publishes every name, so
+the proxies are the logins times the names. Past a limit, the edge
+refuses the login or the proxy, and a renewal that cannot publish every
+name keeps the tunnel it has.
+
 The group is the certificate's, not the Deployment's: two
 `fortresskube` Deployments with one certificate are one node to the
 edge, and a name both publish joins one group, whatever Gateway each
