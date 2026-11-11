@@ -831,7 +831,22 @@ func TestReadsGoToTheCollector(t *testing.T) {
 		t.Fatalf("the collector was asked %d times", calls)
 	}
 
+	// A policy PUT that names another collector moves the next read to it.
+	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "the new collector's\n")
+	}))
+	defer moved.Close()
+	_, movedPort, _ := strings.Cut(moved.Listener.Addr().String(), ":")
+	h.SetApply(Apply{Store: func([]byte) error { return nil }})
+	if rec := putPolicy(h, opsID, "collector: gateway:"+movedPort+"\n"); rec.Code != http.StatusOK {
+		t.Fatalf("put: %d %q", rec.Code, rec.Body)
+	}
+	if rec := serve(t, h, config.OpsStatusPath, opsID); rec.Body.String() != "the new collector's\n" {
+		t.Fatalf("after the put: %d %q", rec.Code, rec.Body)
+	}
+
 	// A collector that does not answer: an error, not this edge's own answer.
+	moved.Close()
 	col.Close()
 	if rec := serve(t, h, config.OpsStatusPath, opsID); rec.Code != http.StatusBadGateway {
 		t.Fatalf("collector away: %d %q", rec.Code, rec.Body)
