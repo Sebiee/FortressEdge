@@ -238,6 +238,22 @@ resource "proxmox_virtual_environment_file" "edge1_user_data" {
 and, in the VM's `initialization`, `user_data_file_id =
 proxmox_virtual_environment_file.edge1_user_data.id`.
 
+The Proxmox API cannot upload snippets, so the `bpg/proxmox` provider
+writes this file over SSH to the node, which a platform that so far uses
+only an API token does not have:
+
+- The provider needs an `ssh` block and a PAM user on the node, and the
+  datastore must have the `snippets` content type turned on.
+- By default it streams the file with `sudo tee` into the snippets
+  directory, so that user needs sudo for it. With `upload_mode = "sftp"`
+  on the file resource it needs no sudo, but must be allowed to write
+  the snippets directory itself.
+
+Either way the platform gets standing SSH access to its hypervisors:
+scope that user to this one directory where you can. Without Terraform,
+copy the snippet to the node as you deploy (`qm set ... --cicustom`
+above).
+
 `fortressedge_iso` takes the `fortress.yml` settings as attributes of the
 same names (`client_ca`, `acme`, `acme_ca`, `ntp`, and the rest), checked
 at plan time as the edge checks them, and `release_url` with
