@@ -152,6 +152,12 @@ func (c *Collector) copyLog(ctx context.Context, e Edge, kind, path string) bool
 			}
 			ctx, cancel := context.WithTimeout(ctx, time.Minute)
 			resp, err := c.cfg.Fetch(ctx, e, path, q)
+			if err == nil && resp.StatusCode == http.StatusBadRequest && cursor == oldest {
+				// An edge before 0.8.0 does not know "oldest": its current file.
+				_ = resp.Body.Close()
+				q.Del("cursor")
+				resp, err = c.cfg.Fetch(ctx, e, path, q)
+			}
 			if err != nil {
 				cancel()
 				return nil, err
@@ -167,6 +173,7 @@ func (c *Collector) copyLog(ctx context.Context, e Edge, kind, path string) bool
 			return &page{
 				body: cancelBody{resp.Body, cancel},
 				next: resp.Header.Get("X-Log-Cursor"),
+				file: resp.Header.Get("X-Log-File"),
 				gap:  resp.Header.Get("X-Log-Gap") == "true",
 			}, nil
 		})

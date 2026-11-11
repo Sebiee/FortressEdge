@@ -417,3 +417,68 @@ func TestACopyThatIsBehindAnswersTheOthersCursor(t *testing.T) {
 		t.Fatalf("after it caught up: %s, gap %q", got, next.Header().Get("X-Log-Gap"))
 	}
 }
+
+// A collector that starts later than its partner copies all the edge still
+// keeps, not only its current file: it answers a cursor into an older file.
+func TestACopyStartsAtTheEdgesOldestFile(t *testing.T) {
+	a := newEdge(t, "boota")
+	edges := map[string]*edge{"a": a}
+	a.write("access", "# boot boota\n"+`{"id":"1"}`+"\n"+`{"id":"2"}`+"\n")
+	a.write("", "time=1 msg=one\n")
+	front1 := newCollector(t, edges)
+	first := get(t, front1, config.OpsAccessPath)
+	if got := strings.Join(lineIDs(t, first.Body.String()), " "); got != "a1 a2" {
+		t.Fatalf("first read: %s", got)
+	}
+	// The reader stops after record 1 of the first file; then the edge's
+	// logs rotate twice (it keeps the old files), and it reboots.
+	cursor := "a=boota:24"
+	a.rotate("access", "boota.log", "boota.1")
+	a.write("access", `{"id":"3"}`+"\n")
+	a.rotate("access", "boota.1.log", "boota.2")
+	a.write("access", `{"id":"4"}`+"\n")
+	a.rotate("", "previous.log", "bootb")
+	a.write("", "time=2 msg=two\n")
+
+	// A collector that starts only now.
+	front2 := newCollector(t, edges)
+	next := get(t, front2, config.OpsAccessPath+"?cursor="+url.QueryEscape(cursor))
+	if got := strings.Join(lineIDs(t, next.Body.String()), " "); got != "a2 a3 a4" || next.Header().Get("X-Log-Gap") != "" {
+		t.Fatalf("a late collector: %s, gap %q", got, next.Header().Get("X-Log-Gap"))
+	}
+	for _, f := range []string{"boota.log", "boota.1.log"} {
+		same(t, filepath.Join(front2.cfg.Dir, "a/access", f), filepath.Join(a.dir, "access", f))
+	}
+	same(t, filepath.Join(front2.cfg.Dir, "a/access/boota.2.log"), filepath.Join(a.dir, "access/current.log"))
+	logs := get(t, front2, config.OpsLogsPath).Body.String()
+	if logs != "# boot boota\ntime=1 msg=one edge=a\n# boot bootb\ntime=2 msg=two edge=a\n" {
+		t.Fatalf("the edge's log from its previous boot on: %q", logs)
+	}
+}
+
+// An edge before 0.8.0 refuses cursor=oldest: its copy starts at its
+// current file, as before.
+func TestAnOlderEdgeGivesItsCurrentFile(t *testing.T) {
+	a := newEdge(t, "boota")
+	a.write("", "time=1 msg=one\n")
+	a.rotate("", "previous.log", "bootb")
+	a.write("", "time=2 msg=two\n")
+	edges := map[string]*edge{"a": a}
+	c := newCollector(t, edges)
+	inner := c.cfg.Fetch
+	c.cfg.Fetch = func(ctx context.Context, e Edge, path string, q url.Values) (*http.Response, error) {
+		if q.Get("cursor") == oldest {
+			rec := httptest.NewRecorder()
+			http.Error(rec, "cursor: want <boot-id>:<offset>", http.StatusBadRequest)
+			return rec.Result(), nil
+		}
+		resp, err := inner(ctx, e, path, q)
+		if err == nil {
+			resp.Header.Del("X-Log-File")
+		}
+		return resp, err
+	}
+	if got := get(t, c, config.OpsLogsPath).Body.String(); got != "# boot bootb\ntime=2 msg=two edge=a\n" {
+		t.Fatalf("an older edge's log: %q", got)
+	}
+}

@@ -46,8 +46,10 @@ line of each log file) makes reboots visible: a cursor from the previous
 boot drains `previous.log` first, then continues into the current one.
 When the cursor's file is older than what is kept, the edge answers from
 the start of the current log with `X-Log-Gap: true`. That is the only way
-lines are lost, and it is signalled. `?cursor=now` starts at the end;
-`/~!ops/status` returns the current cursor as `log_cursor`.
+lines are lost, and it is signalled. `?cursor=now` starts at the end,
+`?cursor=oldest` at the oldest file the edge still keeps;
+`/~!ops/status` returns the current cursor as `log_cursor`. Every answer
+names the file its lines are from in `X-Log-File`.
 
 Delivery is at least once: a shipper that polls at least once per boot
 loses nothing, and may see duplicates after a crash. Give a shipper its
@@ -223,8 +225,9 @@ the edge's own files, by their ids, with the same bytes at the same
 offsets. It reads them with the edge's cursor, every `-every` and again
 at each read, so it loses nothing while it is away, up to what the edge
 still has, and an answer has what the edges have at that moment (it
-waits up to 3 seconds for them). A copy starts at the edge's current
-file.
+waits up to 3 seconds for them). A copy starts at the oldest file the
+edge still keeps (`cursor=oldest`), so a collector that starts later
+than its partner has the same files as far back as the edges have them.
 
 A reader's cursor is every edge's own cursor, by name:
 `a=<file-id>:<offset>,b=<file-id>:<offset>`. Treat it as one opaque
@@ -242,8 +245,9 @@ line comes twice, and nothing is signalled as lost that is not.
   `format=ndjson`. The lines come edge by edge, each edge's in order.
 - `X-Log-Gap: true` means lines are lost between the cursor and the
   answer, as on an edge: the edge had lost them before the collector
-  read them, or the cursor names a file this copy does not have (a
-  collector started later than its partner, or past `-keep`).
+  read them, or the cursor names a file that neither this copy nor the
+  edge has any more (past `-keep`, or older than what the edges kept
+  when this collector started).
 - An answer holds at most about 8 MiB of lines. Read again with its
   cursor until an answer is empty.
 - `?follow` is not served (`501`): poll with the cursor.

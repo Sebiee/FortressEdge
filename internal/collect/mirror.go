@@ -139,14 +139,20 @@ func (m *mirror) begin(id string, gap bool) error {
 }
 
 // A page is one answer of an edge's log API: the bytes after the position
-// asked for, where to ask next (X-Log-Cursor), and whether the edge had
+// asked for, where to ask next (X-Log-Cursor), the file the bytes are from
+// (X-Log-File; an edge before 0.8.0 does not say), and whether the edge had
 // lost the file asked for (X-Log-Gap) and sent its current one from the
 // start.
 type page struct {
 	body io.ReadCloser
 	next string
+	file string
 	gap  bool
 }
+
+// oldest asks an edge for the oldest file it keeps, from its start: where
+// a copy begins.
+const oldest = "oldest"
 
 // pull asks the edge for what follows the copy and appends it. more means
 // the edge has a newer file to read at once.
@@ -154,7 +160,11 @@ func (m *mirror) pull(fetch func(cursor string) (*page, error)) (more bool, err 
 	m.pulling.Lock()
 	defer m.pulling.Unlock()
 	at := m.end()
-	p, err := fetch(at.String())
+	ask := at.String()
+	if at.id == "" {
+		ask = oldest // all the edge still keeps, not only its current file
+	}
+	p, err := fetch(ask)
 	if err != nil {
 		return false, err
 	}
@@ -165,8 +175,12 @@ func (m *mirror) pull(fetch func(cursor string) (*page, error)) (more bool, err 
 	}
 	target := at.id
 	if at.id == "" || p.gap {
-		// The bytes are the edge's current file, from its start.
+		// The bytes are a file's the copy does not have, from its start:
+		// the oldest the edge keeps, or after a gap its current one.
 		target = next.id
+		if p.file != "" {
+			target = p.file
+		}
 		if err := m.begin(target, p.gap && at.id != ""); err != nil {
 			return false, err
 		}

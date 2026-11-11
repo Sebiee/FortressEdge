@@ -318,10 +318,10 @@ var errCursor = errors.New("cursor")
 // partial last line). next is the id of the file to read after this one:
 // its own for current.log, else the next newer file's. gap means the
 // cursor's file is gone: lines were lost, so we restart at current.log's
-// beginning and say so.
+// beginning and say so. "oldest" names the oldest file kept, from its start.
 func (h *Handler) open(dir, q string) (f *os.File, next string, off int64, live, gap bool, err error) {
 	var c cursor
-	if q != "" && q != "now" {
+	if q != "" && q != "now" && q != "oldest" {
 		if c, err = parseCursor(q); err != nil {
 			return nil, "", 0, false, false, fmt.Errorf("%w: %v", errCursor, err)
 		}
@@ -340,18 +340,22 @@ func (h *Handler) open(dir, q string) (f *os.File, next string, off int64, live,
 	// Older files, newest first: the edge's log keeps previous.log, the
 	// access log up to access_log_max_files.
 	newer := id
-	for _, p := range logx.Rotated(dir) {
+	rotated := logx.Rotated(dir)
+	for i, p := range rotated {
 		old, err := os.Open(p)
 		if err != nil {
 			continue
 		}
 		oid := fileID(old)
-		if oid == c.boot {
+		if oid == c.boot && q != "oldest" || q == "oldest" && i == len(rotated)-1 {
 			_ = cur.Close()
 			return old, newer, c.off, false, false, nil
 		}
 		_ = old.Close()
 		newer = oid
+	}
+	if q == "oldest" {
+		return cur, id, 0, true, false, nil // no older file: the current one is the oldest
 	}
 	return cur, id, 0, true, true, nil
 }
@@ -412,6 +416,13 @@ func (h *Handler) serveLog(w http.ResponseWriter, r *http.Request, dir string, r
 		w.Header().Set("X-Log-Gap", "true")
 	}
 	w.Header().Set("X-Log-Cursor", resume.String())
+	// The file these bytes are from: a copier that asked for the oldest
+	// file, or was sent the current one after a gap, cannot tell otherwise.
+	if from := fileID(f); from != "" {
+		w.Header().Set("X-Log-File", from)
+	} else if live {
+		w.Header().Set("X-Log-File", next)
+	}
 	serveRange(w, f, off, end, wrap)
 	off = end
 

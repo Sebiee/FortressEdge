@@ -36,6 +36,10 @@
     sample with an `edge` label; `fortresscollector_edge_up{edge}` tells
     which edges answered.
   - Releases attach `fortresscollector-<tag>-linux-amd64`.
+- The log API takes `?cursor=oldest`, the oldest file the edge still
+  keeps from its start, and names the file an answer's lines are from
+  in `X-Log-File`. A shipper, and the collector, can so begin with all
+  the edge has, not only its current file.
 
 ## 0.7.3
 

@@ -630,3 +630,30 @@ func TestReadsGoToTheCollector(t *testing.T) {
 		t.Fatalf("collector away: %d %q", rec.Code, rec.Body)
 	}
 }
+
+// cursor=oldest starts at the oldest file kept, and every answer names the
+// file its bytes are from.
+func TestOldestCursorAndFileHeader(t *testing.T) {
+	dir := t.TempDir()
+	writeLogs(t, dir, "# boot "+testBoot+"\nnew\n", "# boot old-boot\nold\n")
+	h := New(testConfig(), nil, testBoot, dir)
+
+	rec := serve(t, h, config.OpsLogsPath+"?cursor=oldest", logsID)
+	if rec.Body.String() != "# boot old-boot\nold\n" || rec.Header().Get("X-Log-File") != "old-boot" ||
+		rec.Header().Get("X-Log-Cursor") != testBoot+":0" || rec.Header().Get("X-Log-Gap") != "" {
+		t.Fatalf("oldest: %q, file %q, cursor %q", rec.Body, rec.Header().Get("X-Log-File"), rec.Header().Get("X-Log-Cursor"))
+	}
+	rec = serve(t, h, config.OpsLogsPath+"?cursor="+url.QueryEscape(rec.Header().Get("X-Log-Cursor")), logsID)
+	if rec.Body.String() != "# boot "+testBoot+"\nnew\n" || rec.Header().Get("X-Log-File") != testBoot {
+		t.Fatalf("then the current file: %q, file %q", rec.Body, rec.Header().Get("X-Log-File"))
+	}
+
+	// With no older file, the oldest is the current one.
+	if err := os.Remove(filepath.Join(dir, "previous.log")); err != nil {
+		t.Fatal(err)
+	}
+	rec = serve(t, h, config.OpsLogsPath+"?cursor=oldest", logsID)
+	if rec.Body.String() != "# boot "+testBoot+"\nnew\n" || rec.Header().Get("X-Log-File") != testBoot || rec.Header().Get("X-Log-Gap") != "" {
+		t.Fatalf("oldest with one file: %q, file %q", rec.Body, rec.Header().Get("X-Log-File"))
+	}
+}
