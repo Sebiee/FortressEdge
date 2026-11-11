@@ -263,7 +263,7 @@ in `user-data` is read.
 | `access_log_max_size` | `8MiB` | Size at which the access log starts a new file (`KiB`, `MiB`, `GiB`) |
 | `access_log_max_files` | `3` | Access log files kept, the current one included; the oldest is deleted |
 | `trace` | `trust_incoming: false` | Whether a visitor's W3C `traceparent` is continued, or only logged as a link |
-| `tunnel_grace` | `10m` | How long a site whose dark node left, or that was published before a reboot, answers `503` before it goes silent; `0` never answers it |
+| `tunnel_grace` | `10m` | How long a site whose dark node left, or that was published before a reboot, answers `503` before it goes silent, and how long no other dark node may publish a name its node left; `0` never answers it, and holds no name |
 | `tunnel_dead_timeout` | `3s` | How long a tunnel may go without the dark node acknowledging anything before the edge drops it, in whole seconds; `0` leaves it to frp's heartbeat. A tunnel keeps the one it connected with |
 | `collector` | none | Where reads of status, metrics and logs go that do not ask for this edge itself (`?self`): the [collector](docs/operations.md#the-collector) of the edge's location, as `host:port`, or `gateway:port` for the edge's own gateway |
 | `sites` | none | Per published name: `access_log`, `max_body_size`, `response_header_timeout` |

@@ -33,7 +33,7 @@ The fixes:
 
 - Names belong to one dark node. A name, with all its locations, HTTP
   users and kinds, is one node certificate's while any of its proxies
-  has it, and for 10 minutes after the last leaves, so another node
+  has it, and for `tunnel_grace` after the last leaves, so another node
   cannot take it during a reconnect. A name the edge holds is answered
   503 by the edge itself, never by another node's wildcard, and an exact
   name never falls back to another node's wildcard for a path or user it

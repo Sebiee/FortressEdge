@@ -65,6 +65,10 @@ type Options struct {
 	// Node names the dark node of a tunnel connection's verified client
 	// certificate, for the per-node session count.
 	Node func(tls.ConnectionState) string
+	// Grace is how long a name stays its dark node's after the node's last
+	// proxy for it left (policy.yml's tunnel_grace): another node is
+	// refused it meanwhile. 0 holds nothing.
+	Grace time.Duration
 }
 
 // Frps is a running frps.
@@ -150,6 +154,7 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 	if err != nil {
 		return nil, fmt.Errorf("frps: %w", err)
 	}
+	svr.SetDomainGrace(opts.Grace)
 	runCtx, runCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -175,6 +180,10 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 		"response_header_timeout", time.Duration(cfg.VhostHTTPTimeout)*time.Second)
 	return &Frps{Control: controlHandler(control, opts.Node), Vhost: trustVhost(svr.VhostHTTP()), Stop: stop, svr: svr}, nil
 }
+
+// SetGrace sets Options.Grace for a policy applied in place. A name in its
+// grace follows it, from when its last proxy left.
+func (f *Frps) SetGrace(grace time.Duration) { f.svr.SetDomainGrace(grace) }
 
 // quietLine is a frp line an operator does not need at info or warn: a
 // visitor who left, and a response body cut short, which OnProxyError

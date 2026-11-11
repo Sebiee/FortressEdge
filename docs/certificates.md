@@ -223,6 +223,13 @@ whose certificates are still valid, are answered: they are public in
 Certificate Transparency logs already, and a name nobody published stays
 silent. `tunnel_grace: 0` turns this off.
 
+A name is one dark node's, by its certificate, while any of its proxies
+publishes it, and for `tunnel_grace` after the last leaves: another node
+that publishes it meanwhile is refused, so it cannot take the name while
+its node reconnects. A changed `tunnel_grace` applies at once, to names
+already in their grace too. The edge does not keep this across its own
+reboot yet: right after a boot, the first node to publish a name has it.
+
 A published name whose origin does not answer gets `502`, or `504` after
 a minute without response headers (`response_header_timeout` in the
 [policy](operations.md#limits)), with an empty body. Nothing the edge
