@@ -114,6 +114,6 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // grace after it leaves, canonical names, proxy names and run IDs of its
 // own, http and tcp-tls proxies only, and limits on its logins, proxies,
 // names and stream windows.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261112163605-d3b1eece3507
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261112180737-fa397a4d51ec
 
 tool gotest.tools/gotestsum
