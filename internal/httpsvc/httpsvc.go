@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/Sebiee/fortressedge/internal/ca"
 	"github.com/Sebiee/fortressedge/internal/certstore"
@@ -41,7 +42,10 @@ const drainTimeout = time.Second
 // reaching vhost. Any other host gets no response at all. A nil route
 // passes every host to vhost as its own site. A nil st counts nothing; a
 // nil lim uses the default limits; a nil control leaves frp control out.
-func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (name string, held, ok bool), lim *liveLimits) (http.Handler, error) {
+// While leave says the edge leaves, the policy's health check site is
+// answered 503 here, and every site's response closes its connection; a
+// nil leave never does.
+func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (name string, held, ok bool), lim *liveLimits, leave *Leave) (http.Handler, error) {
 	if vhost == nil {
 		return nil, errors.New("nil vhost")
 	}
@@ -72,7 +76,21 @@ func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, ro
 			next = noTunnel
 		}
 		p := lim.get()
-		st.serveSite(next, host, published, p.Site(host, published), p.Trace.TrustIncoming, w, r)
+		pol := p.Site(host, published)
+		if leave.Leaving() {
+			// The visitor's next request opens a connection, which the
+			// balancer gives to another edge: HTTP/1 closes after this
+			// response, HTTP/2 after the streams it has open. Not an
+			// upgrade: its 101 answers Connection: Upgrade, and the
+			// WebSocket lasts until the edge closes.
+			if !httpguts.HeaderValuesContainsToken(r.Header["Connection"], "upgrade") {
+				w.Header().Set("Connection", "close")
+			}
+			if pol.HealthCheck {
+				next = left
+			}
+		}
+		st.serveSite(next, host, published, pol, p.Trace.TrustIncoming, w, r)
 	}), nil
 }
 
@@ -219,8 +237,9 @@ func (e Extras) ready() bool { return e.Ready != nil && e.Ready() }
 // Serve runs the HTTP and HTTPS servers until ctx ends, and the TCP
 // routes on the HTTPS port. policy is the policy.yml cfg holds, as
 // stored; apply puts a new one in force and stores it, after the parts
-// this process holds.
-func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, routes TCPRoutes, apply ops.Apply, more Extras) error {
+// this process holds. leave is the stage before ctx ends, in which the
+// edge still serves and only its health check fails.
+func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilter, domains *Domains, control, vhost http.Handler, routes TCPRoutes, apply ops.Apply, more Extras, leave *Leave) error {
 	st := &httpStats{}
 	domains.SetTunnelGrace(cfg.TunnelGrace)
 	socks := &sockets{}
@@ -244,6 +263,8 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	}
 	go vis.run(ctx)
 	tcp := newStreams(ctx, notTunnel(cfg.Tunnel, routes), nil, lim, vis, socks, st)
+	// An edge that leaves is not ready: it takes no new visitors.
+	ready := func() bool { return more.ready() && !leave.Leaving() }
 	// The ops API rides the tunnel SNI's mTLS.
 	oh := ops.New(cfg, policy, logx.BootID(), config.LogDir)
 	oh.SetDegraded(degraded)
@@ -254,7 +275,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		if s := domains.CertStore(); s != nil {
 			m["cert_store"] = s.Status()
 		}
-		m["ready"] = more.ready()
+		m["ready"] = ready()
 		for k, f := range more.Status {
 			m[k] = f()
 		}
@@ -262,12 +283,12 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	})
 	oh.SetMetrics(func(w *metrics.Writer) {
 		w.Family("fortressedge_ready", "gauge",
-			"1 when the edge can serve sites: a valid certificate for the tunnel name and at least one dark node logged in.")
-		ready := int64(0)
-		if more.ready() {
-			ready = 1
+			"1 when the edge can serve sites: a valid certificate for the tunnel name, at least one dark node logged in, and no stop under way.")
+		up := int64(0)
+		if ready() {
+			up = 1
 		}
-		w.Int("fortressedge_ready", ready)
+		w.Int("fortressedge_ready", up)
 		writeMetrics(w, st, filt, track, vis, domains)
 		tcp.writeMetrics(w)
 		for _, f := range more.Metrics {
@@ -283,7 +304,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	slog.Info("ops api up", "logs", config.OpsLogsPath, "status", config.OpsStatusPath, "metrics", config.OpsMetricsPath,
 		"policy", config.OpsPolicyPath)
 	// Sites are frps's proxy in this process. The request is already parsed.
-	h, err := Handler(cfg.Tunnel, vhost, control, oh, st, domains.Route, lim)
+	h, err := Handler(cfg.Tunnel, vhost, control, oh, st, domains.Route, lim, leave)
 	if err != nil {
 		return err
 	}
@@ -301,6 +322,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 		s.MaxHeaderBytes = cfg.Limits.MaxHeaderBytes
 		s.HTTP2.MaxConcurrentStreams = cfg.Limits.MaxHTTP2Streams
 	}
+	leave.serving(func() bool { return lim.get().policy.HasHealthCheck() })
 	return serve(ctx, servers, track, vis, socks, tcp, drainTimeout)
 }
 

@@ -135,3 +135,112 @@ func TestTunnelComesBack(t *testing.T) {
 		back(t, within)
 	})
 }
+
+// An edge behind a load balancer stops in two stages. For three seconds
+// after the power button it fails the policy's health check site itself,
+// serves every other site to new connections, and closes each connection
+// after its response. Only then does it close its ports and power off.
+func TestStopLeavesBeforeItCloses(t *testing.T) {
+	t.Parallel()
+	e := lab.BootEdge(t, lab.EdgeOptions{
+		Policy: "limits:\n  requests_per_second: 0\n  connections_per_source: 0\n  new_connections_per_second: 0\n" +
+			"sites:\n  check.example.com:\n    health_check: true\n"})
+	vm, web := e.VM, e.Web
+	crt, key := e.Cert(ca.RoleNode, "node1")
+	vm.Publish(t, "wss", e.Roots, crt, key, lab.Origin(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "ok")
+	})), "app.example.com", "check.example.com")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		for _, host := range []string{"app.example.com", "check.example.com"} {
+			resp, _, err := lab.Get(web, "https://"+host+"/")
+			require.NoError(c, err)
+			assert.Equal(c, http.StatusOK, resp.StatusCode, host)
+		}
+	}, lab.Until(t), lab.Tick)
+
+	// fresh opens a connection for each request, as a balancer's check and
+	// a new visitor do. kept reuses its connection, as a visitor who was
+	// there before does, over HTTP/1, where a response says when it closes
+	// the connection.
+	tr := web.Transport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	fresh := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+	tr = web.Transport.(*http.Transport).Clone()
+	tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	kept := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+
+	type answer struct {
+		at     time.Time
+		host   string
+		status int
+		closes bool
+		err    error
+	}
+	var answers []answer
+	stop, probed := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(probed)
+		for {
+			for _, host := range []string{"check.example.com", "app.example.com", ""} {
+				a := answer{at: time.Now(), host: host}
+				c := fresh
+				if host == "" { // the visitor who was there before
+					c, host = kept, "app.example.com"
+				}
+				resp, _, err := lab.Get(c, "https://"+host+"/")
+				if a.err = err; err == nil {
+					a.status, a.closes = resp.StatusCode, resp.Close
+				}
+				answers = append(answers, a)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}()
+	time.Sleep(time.Second)
+	pressed := time.Now()
+	vm.PowerDown(t)
+	took := time.Since(pressed)
+	close(stop)
+	<-probed
+	t.Logf("powered off %s after the press", took.Round(time.Millisecond))
+	assert.Greater(t, took, 3*time.Second, "the edge serves for 3 s first")
+	assert.Less(t, took, 8*time.Second)
+
+	// Requests begun from 0.5 s after the press, the edge's time to notice
+	// it, until 2.5 s after: well inside the stage.
+	before, during := 0, 0
+	for _, a := range answers {
+		since, who := a.at.Sub(pressed), a.host
+		if who == "" {
+			who = "the kept connection"
+		}
+		switch {
+		case since < -100*time.Millisecond:
+			before++
+			require.NoError(t, a.err, "%s before the press", who)
+			assert.Equal(t, http.StatusOK, a.status, "%s before the press", who)
+			if a.host == "" {
+				assert.False(t, a.closes, "before the press the edge closed a visitor's connection")
+			}
+		case since > 500*time.Millisecond && since < 2500*time.Millisecond:
+			during++
+			require.NoError(t, a.err, "%s %s after the press: it must be served", who, since.Round(time.Millisecond))
+			want := http.StatusOK
+			if a.host == "check.example.com" {
+				want = http.StatusServiceUnavailable
+			}
+			assert.Equal(t, want, a.status, "%s %s after the press", who, since.Round(time.Millisecond))
+			if a.host == "" {
+				assert.True(t, a.closes, "%s after the press: the response left the visitor's connection open", since.Round(time.Millisecond))
+			}
+		}
+	}
+	// Few on a busy host, where a request takes long; never none.
+	assert.Greater(t, before, 2, "requests before the press")
+	assert.Greater(t, during, 8, "requests while the edge left")
+	t.Logf("%d requests before the press, %d while the edge left, all answered", before, during)
+}

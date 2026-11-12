@@ -124,7 +124,7 @@ func TestHeldNameIsNoWildcards(t *testing.T) {
 	var reached []string
 	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = append(reached, r.Host) })
 	st := &httpStats{}
-	h, err := Handler("tunnel.example.com", frps, nil, nil, st, d.Route, nil)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, d.Route, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestNoTunnelIs503(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound) // frps's answer for no route
 	})
 	st := &httpStats{}
-	h, err := Handler("tunnel.example.com", frps, nil, nil, st, nil, nil)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

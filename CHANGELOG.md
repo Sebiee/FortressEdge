@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.1 (not released yet)
+
+- An edge behind a load balancer stops without refusing a visitor. Mark
+  the site the balancer checks the edge with, `health_check: true` under
+  `sites` in the policy. An edge that stops then answers that site `503`
+  itself for 3 seconds while it serves every other site, and closes
+  each visitor's connection after its response, so the balancer sends
+  new visitors to the other edges before the ports close. Before, the
+  ports closed at once, and visitors were refused until the balancer's
+  next check, a second or so. Without the mark a stop is as it was. The
+  mark is refused on a wildcard. See
+  [operations](docs/operations.md#readiness).
+- `ready` in the status and `fortressedge_ready` are false while an edge
+  with a `health_check` site stops.
+
 ## 0.9.0
 
 Security fixes from an audit of the edge, the frp fork and

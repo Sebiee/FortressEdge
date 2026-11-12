@@ -406,6 +406,13 @@ func TestParseSites(t *testing.T) {
 	if p.AccessLog.On || !p.AccessLogAnywhere() || !p.Site("a.example.com", "a.example.com").AccessLog {
 		t.Fatal("one site's access log")
 	}
+	if p.HasHealthCheck() || p.Site("a.example.com", "a.example.com").HealthCheck {
+		t.Fatal("a health check nobody marked")
+	}
+	p, _ = ParsePolicy([]byte("sites:\n  check.example.com:\n    health_check: true\n  a.example.com: {}\n"))
+	if !p.HasHealthCheck() || !p.Site("check.example.com", "check.example.com").HealthCheck || p.Site("a.example.com", "a.example.com").HealthCheck {
+		t.Fatal("the marked site is the health check, and only it")
+	}
 	for _, bad := range []string{
 		"sites:\n  localhost:\n    access_log: true\n",
 		"sites:\n  '*example.com':\n    access_log: true\n",
@@ -413,6 +420,8 @@ func TestParseSites(t *testing.T) {
 		"sites:\n  a.example.com:\n    response_header_timeout: 1h\n",
 		"sites:\n  a.example.com:\n    ban: 1m\n",
 		"sites:\n  a.example.com: {}\n  A.example.com: {}\n",
+		"sites:\n  '*.example.com':\n    health_check: true\n",
+		"sites:\n  '*':\n    health_check: true\n",
 	} {
 		if _, err := ParsePolicy([]byte(bad)); err == nil {
 			t.Errorf("%q: want error", bad)

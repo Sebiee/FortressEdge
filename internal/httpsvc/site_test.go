@@ -34,7 +34,7 @@ func TestSiteRequestIDStatsAndAccessLog(t *testing.T) {
 	st := &httpStats{}
 	st.access.Store(newAccessLog(chanWriter(logc)))
 	lim := newLivePolicy(config.Policy{Limits: config.DefaultLimits(), AccessLog: config.AccessLog{On: true}})
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, st, nil, lim)
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, st, nil, lim, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestSiteCountsBadGateway(t *testing.T) {
 	vhost := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	h, err := Handler("tunnel.example.com", vhost, nil, nil, st, nil, nil)
+	h, err := Handler("tunnel.example.com", vhost, nil, nil, st, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestSiteCountsBadGateway(t *testing.T) {
 func TestMalformedUnknownNameStaysSilent(t *testing.T) {
 	st := &httpStats{}
 	h, err := Handler("tunnel.example.com", http.NotFoundHandler(), nil, nil, st,
-		func(host string) (string, bool, bool) { return host, false, host == "app.example.com" }, nil)
+		func(host string) (string, bool, bool) { return host, false, host == "app.example.com" }, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestProxyErrorLine(t *testing.T) {
 	st.access.Store(newAccessLog(chanWriter(logc)))
 	lim := newLivePolicy(config.Policy{Limits: config.DefaultLimits(), AccessLog: config.AccessLog{On: true}})
 	route := func(host string) (string, bool, bool) { return "*.example.com", false, true }
-	h, err := Handler("tunnel.example.com", frps, nil, nil, st, route, lim)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, route, lim, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestSiteBodyLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := &httpStats{}
-	h, err := Handler("tunnel.example.com", frps, nil, nil, st, nil, newLivePolicy(p))
+	h, err := Handler("tunnel.example.com", frps, nil, nil, st, nil, newLivePolicy(p), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ var frpsTakesBody = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request
 func TestSiteBodyStall(t *testing.T) {
 	shortStall(t, 300*time.Millisecond)
 	st := &httpStats{}
-	h, err := Handler("tunnel.example.com", frpsTakesBody, nil, nil, st, nil, nil)
+	h, err := Handler("tunnel.example.com", frpsTakesBody, nil, nil, st, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestSiteResponseStall(t *testing.T) {
 		}
 		ended[r.ProtoMajor] <- err
 	})
-	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestSiteResponseStall(t *testing.T) {
 func TestSiteHTTP2StreamWithoutWindowEnds(t *testing.T) {
 	shortStall(t, 200*time.Millisecond)
 	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "a short answer") })
-	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestSiteWebSocketOutlivesStallTimeout(t *testing.T) {
 		rw.WriteString("echo " + line)
 		rw.Flush()
 	})
-	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", frps, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

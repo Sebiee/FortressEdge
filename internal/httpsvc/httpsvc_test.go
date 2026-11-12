@@ -44,7 +44,7 @@ func TestHostForwardedToVhost(t *testing.T) {
 	}))
 	t.Cleanup(vhost.Close)
 
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestUnroutedHostGetsNoResponse(t *testing.T) {
 	}))
 	t.Cleanup(vhost.Close)
 	route := func(host string) (string, bool, bool) { return host, false, host == "app.example.com" }
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, nil, route, nil)
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, nil, nil, route, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestTunnelWebsocketPath(t *testing.T) {
 	}))
 	t.Cleanup(control.Close)
 
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, control.Config.Handler, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, control.Config.Handler, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestOpsPathStaysOnTunnelHost(t *testing.T) {
 		opsHit = true
 		io.WriteString(w, "ops")
 	})
-	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, opsH, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", vhost.Config.Handler, nil, opsH, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1143,7 +1143,7 @@ func TestFrpControlIsForDarkNodesOnly(t *testing.T) {
 	var hits atomic.Int32
 	control := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	t.Cleanup(control.Close)
-	h, err := Handler("tunnel.example.com", http.NotFoundHandler(), control.Config.Handler, nil, nil, nil, nil)
+	h, err := Handler("tunnel.example.com", http.NotFoundHandler(), control.Config.Handler, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -400,9 +400,39 @@ line into the edge's span.
 
 `ready` in the status, and `fortressedge_ready` (1 or 0) in the metrics,
 say whether the edge can serve sites: it holds a valid certificate for
-the tunnel name, and at least one dark node's frpc is logged in. A
-standby's health check, or a load balancer in front of several edges,
-can follow it.
+the tunnel name, at least one dark node's frpc is logged in, and the
+edge is not stopping. A standby's health check, or a load balancer in
+front of several edges, can follow it.
+
+A load balancer that cannot present an operator certificate checks the
+edge with a site instead: a name the dark node publishes and answers
+itself, so the check passes only while a tunnel carries it. Mark that
+name in the policy:
+
+```yaml
+sites:
+  edge-check.example.com:
+    health_check: true
+    access_log: false
+```
+
+The mark is for one name, not a wildcard, and changes nothing while the
+edge runs. An edge that stops answers the marked site `503` itself for
+3 seconds, and serves every other site as before; the balancer sends
+new visitors to the other edges meanwhile. Each response in those
+seconds also closes its connection (`Connection: close`, or HTTP/2's
+GOAWAY; not a WebSocket's), so a visitor's next request arrives on a new
+one, at another edge. Only then does the edge close its ports (see
+[Shutdown](#shutdown)), so no new connection is refused.
+
+The balancer must take the edge out well within those 3 seconds: its
+check interval, times the failures it waits for, plus the check's
+timeout. keepalived with `delay_loop 1`, `retry 0` and
+`connect_timeout 1` does within about a second. A connection a visitor
+left idle through the 3 seconds is closed with the ports; a browser
+sends a request that meets such a close again, on a new connection. The
+edge's own `503`s count in the check site's metrics, and in its access
+log when that is on, at every stop: they are not an error to alert on.
 
 `tunnel_groups` counts each dark node's logged-in frpc, by the name in
 its SPIFFE ID (`node/<name>`): `{"node1": 2}`. All frpc with one node certificate
@@ -693,13 +723,22 @@ other failed boot prints the error and reboots after 30 seconds.
 
 ## Shutdown
 
-The ACPI power button (Proxmox's Shutdown and Reboot) stops the edge:
-it waits up to a second for requests in flight, closes every connection,
-tunnels included, so dark nodes start reconnecting at once, and powers
-off, about a second and a quarter after the press. Streams and requests
-still running then are cut, as the reboot would cut them anyway. The
-edge watches the button from early in boot; a press before that, in the
-first second or two after power-on, is lost, as on any machine.
+The ACPI power button (Proxmox's Shutdown and Reboot) stops the edge,
+and so does a policy that needs a reboot. A stop has two stages:
+
+1. With a `health_check` site in the policy (see
+   [Readiness](#readiness)), the edge leaves first: for 3 seconds it
+   serves as before, fails that check, and says `ready: false`. Without
+   one, this stage is skipped.
+2. It closes its ports, waits up to a second for requests in flight,
+   closes every connection, tunnels included, so dark nodes start
+   reconnecting at once, and powers off: about a second and a quarter
+   after the press without the first stage, four and a quarter with it.
+
+Streams and requests still running then are cut, as the reboot would
+cut them anyway. A second signal to the process skips the first stage.
+The edge watches the button from early in boot; a press before that, in
+the first second or two after power-on, is lost, as on any machine.
 
 ## Why mutual TLS and not SSO
 

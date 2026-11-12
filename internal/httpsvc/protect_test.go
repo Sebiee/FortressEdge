@@ -101,7 +101,7 @@ func TestBodyAndURILimitsChangeLive(t *testing.T) {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 		}
 	})
-	h, err := Handler("tunnel.example.com", echo, nil, nil, nil, nil, lim)
+	h, err := Handler("tunnel.example.com", echo, nil, nil, nil, nil, lim, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

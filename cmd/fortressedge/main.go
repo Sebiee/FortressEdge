@@ -95,8 +95,21 @@ func run() error {
 		}
 	}
 	logx.Setup()
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	// A stop has two stages. The edge first leaves: it serves on while its
+	// health check fails, so that a load balancer sends new visitors to the
+	// other edges. Then ctx ends, and it closes. A second signal skips to
+	// that.
+	ctx, closeNow := context.WithCancel(context.Background())
+	defer closeNow()
+	leave := &httpsvc.Leave{}
+	stop := func() { leave.Begin(closeNow) }
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		for range sigs {
+			stop()
+		}
+	}()
 	logx.Watch(ctx)
 	slog.Info("fortressedge: starting")
 
@@ -245,14 +258,16 @@ func run() error {
 		},
 		Ready:    func() bool { return domains.TunnelCertValid(time.Now()) && len(frps.Groups()) > 0 },
 		Degraded: degraded,
-	})
+	}, leave)
 	if pid1 && wantReboot.Load() {
 		say("fortressedge: rebooting into the new policy")
 		reboot()
 		return nil
 	}
 	if pid1 {
-		poweroff(ctx)
+		// A stop that Serve's own end overtook, in its first stage, is still
+		// the operator's.
+		poweroff(ctx.Err() != nil || leave.Leaving())
 	}
 	return err
 }
@@ -346,8 +361,8 @@ func cannotStart(ctx context.Context, err error) {
 }
 
 // poweroff ends PID 1: power off when the operator signalled, reboot otherwise.
-func poweroff(ctx context.Context) {
-	if ctx.Err() != nil {
+func poweroff(signalled bool) {
+	if signalled {
 		say("fortressedge: powering off")
 		halt()
 		return

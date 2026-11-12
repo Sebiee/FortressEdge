@@ -205,6 +205,11 @@ type SitePolicy struct {
 	// For a TCP route: see Limits.
 	TCPIdleTimeout    *time.Duration
 	TCPConnsPerSource *int
+	// HealthCheck marks the name a load balancer checks the edge with. The
+	// dark node answers it, like any name; an edge that stops answers it
+	// 503 itself first, while it still serves, so that new visitors go to
+	// the other edges before it closes.
+	HealthCheck bool
 }
 
 // Site is the settings in force for one request.
@@ -214,6 +219,7 @@ type Site struct {
 	ResponseHeaderTimeout time.Duration
 	TCPIdleTimeout        time.Duration // 0: never
 	TCPConnsPerSource     int           // 0: no limit
+	HealthCheck           bool          // see SitePolicy
 }
 
 // Site is what applies to a request for host, which frps routed by route,
@@ -248,7 +254,19 @@ func (p Policy) Site(host, route string) Site {
 	if sp.TCPConnsPerSource != nil {
 		s.TCPConnsPerSource = *sp.TCPConnsPerSource
 	}
+	s.HealthCheck = sp.HealthCheck
 	return s
+}
+
+// HasHealthCheck reports whether any site is a load balancer's health
+// check: whether a stop has someone to tell.
+func (p Policy) HasHealthCheck() bool {
+	for _, sp := range p.Sites {
+		if sp.HealthCheck {
+			return true
+		}
+	}
+	return false
 }
 
 // AccessLogAnywhere reports whether any site may write the access log.
@@ -413,6 +431,7 @@ type siteYAML struct {
 	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 	TCPIdleTimeout        string `yaml:"tcp_idle_timeout"`
 	TCPConnsPerSource     *int   `yaml:"tcp_connections_per_source"`
+	HealthCheck           bool   `yaml:"health_check"`
 }
 
 // The keys each file takes. A key in the other file's list is refused
@@ -667,7 +686,11 @@ func parseSites(y map[string]siteYAML) (map[string]SitePolicy, error) {
 			return nil, fmt.Errorf("%s: sites: %q twice", PolicyName, name)
 		}
 		sy := y[key]
-		sp := SitePolicy{AccessLog: sy.AccessLog}
+		// A wildcard's sites are real ones: all would answer 503 at a stop.
+		if sy.HealthCheck && strings.HasPrefix(name, "*") {
+			return nil, fmt.Errorf("%s: sites: %s: health_check: want one name, such as edge-check.example.com, not a wildcard", PolicyName, name)
+		}
+		sp := SitePolicy{AccessLog: sy.AccessLog, HealthCheck: sy.HealthCheck}
 		if s := strings.TrimSpace(sy.MaxBodySize); s != "" {
 			n, err := parseBodySize(s)
 			if err != nil {
