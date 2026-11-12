@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.2
+
+- The frp fork: `Close` on frps from another goroutine, before or while
+  `Run` starts, ends `Run` without a data race. Before, a `Close` that
+  came first left `Run` waiting forever, and one that came close to it
+  was a race the race detector caught in a release run of 0.9.1. The
+  edge always waited long enough for `Run` before closing, so no edge
+  hung.
+- The edge stops its frps without first dialling its control port. A
+  start that failed before frps listened spent up to 15 more seconds
+  there.
+
 ## 0.9.1
 
 - An edge behind a load balancer stops without refusing a visitor. Mark
