@@ -118,7 +118,10 @@ type tunnel struct {
 	user string
 	born time.Time
 
-	open    atomic.Bool  // its connection to the edge is up
+	// conn is the connector whose connection to the edge is up, nil while
+	// none is. frp makes a connector for each login, and at a reconnect
+	// the old one's Close may come after the new one's Open.
+	conn    atomic.Pointer[countingConnector]
 	streams atomic.Int64 // work connections that carry a request now
 	retired atomic.Bool  // closed by fortresskube, not by a failure
 	server  atomic.Value // string: the address it dialled last
@@ -147,7 +150,9 @@ func (c *countingConnector) Open() error {
 	err := c.Connector.Open()
 	c.t.set.pick.dialled(err == nil)
 	c.t.set.dialled(err == nil)
-	c.t.open.Store(err == nil)
+	if err == nil {
+		c.t.conn.Store(c)
+	}
 	return err
 }
 
@@ -160,9 +165,12 @@ func (c *countingConnector) Connect() (net.Conn, error) {
 }
 
 func (c *countingConnector) Close() error {
-	c.t.open.Store(false)
+	c.t.conn.CompareAndSwap(c, nil)
 	return c.Connector.Close()
 }
+
+// up reports whether the tunnel's connection to the edge is up.
+func (t *tunnel) up() bool { return t.conn.Load() != nil }
 
 // workConn is a work connection. It waits at the edge until a request
 // needs it; the edge's first bytes on it start that request, and its close
@@ -371,7 +379,7 @@ func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer, cur *t
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if t.open.Load() && (len(proxies) == 0 || t.runsAll(proxies, cur)) {
+		if t.up() && (len(proxies) == 0 || t.runsAll(proxies, cur)) {
 			return true
 		}
 		select {
@@ -415,7 +423,7 @@ func (ts *tunnels) retire(ctx context.Context, t *tunnel, every time.Duration) {
 	}
 	tick := time.NewTicker(every)
 	defer tick.Stop()
-	for idle := 0; idle < 3 && t.open.Load(); {
+	for idle := 0; idle < 3 && t.up(); {
 		select {
 		case <-ctx.Done():
 			idle = 3
@@ -445,7 +453,7 @@ func (ts *tunnels) writeMetrics(w io.Writer) {
 	cur, retiring := ts.cur, slices.Clone(ts.retiring)
 	ts.mu.Unlock()
 	up, streams := 0, cur.streams.Load()
-	if cur.open.Load() {
+	if cur.up() {
 		up = 1
 	}
 	for _, t := range retiring {

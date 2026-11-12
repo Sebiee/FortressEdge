@@ -180,7 +180,7 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 
 	// The old tunnel stays while its request lasts.
 	time.Sleep(10 * retireTick)
-	require.True(t, before.open.Load(), "the old tunnel stays open while it carries a request")
+	require.True(t, before.up(), "the old tunnel stays open while it carries a request")
 	ts.mu.Lock()
 	retiring := len(ts.retiring)
 	ts.mu.Unlock()
@@ -193,7 +193,7 @@ func TestRenewRetiresTheOldTunnelWhenIdle(t *testing.T) {
 	require.Eventually(t, func() bool {
 		ts.mu.Lock()
 		defer ts.mu.Unlock()
-		return len(ts.retiring) == 0 && !before.open.Load()
+		return len(ts.retiring) == 0 && !before.up()
 	}, 5*time.Second, 20*time.Millisecond, "then the old tunnel closes")
 	require.True(t, served())
 
@@ -272,4 +272,31 @@ func TestRenewClosesTheOldestPastMaxRetiring(t *testing.T) {
 	require.Contains(t, metrics.String(), fmt.Sprintf(`fortresskube_tunnel_renewals_total{result="ok"} %d`, maxRetiring+1))
 	require.Contains(t, metrics.String(), "fortresskube_tunnels_cut_total 1\n")
 	require.NotContains(t, metrics.String(), "fortresskube_tunnel_streams_cut_total 0\n")
+}
+
+// fakeConnector stands in for frp's connector to the edge.
+type fakeConnector struct{ fail error }
+
+func (f fakeConnector) Open() error              { return f.fail }
+func (fakeConnector) Connect() (net.Conn, error) { return nil, errors.New("no connection") }
+func (fakeConnector) Close() error               { return nil }
+
+// frp makes a connector for each login. At a reconnect the old one's Close
+// may come after the new one's Open: the tunnel is up until the connector
+// it is up on closes.
+func TestTunnelUpFollowsItsCurrentConnector(t *testing.T) {
+	tn := &tunnel{set: &tunnels{pick: newPicker("192.0.2.1", "replica-0")}}
+	conn := func(fail error) *countingConnector { return &countingConnector{Connector: fakeConnector{fail}, t: tn} }
+	a, b := conn(nil), conn(nil)
+	require.NoError(t, a.Open())
+	require.True(t, tn.up())
+	require.NoError(t, b.Open())
+	require.NoError(t, a.Close())
+	require.True(t, tn.up(), "the old connector's late Close left the tunnel down")
+	require.Error(t, conn(errors.New("refused")).Open())
+	require.True(t, tn.up(), "a failed dial took down the connection that is up")
+	require.NoError(t, b.Close())
+	require.False(t, tn.up())
+	require.Equal(t, int64(2), tn.set.dialsOK.Load())
+	require.Equal(t, int64(1), tn.set.dialsFailed.Load())
 }
