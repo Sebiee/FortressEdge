@@ -163,12 +163,11 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 	}()
 	control := newConnListener()
 	go svr.HandleListener(control, false)
-	// Cancel the context Run honors, then Close once cancel is published so we
-	// do not race Service.cancel, then wait until Run returns so ports are free.
+	// Close ends Run, whenever it comes; then wait until Run returns so the
+	// ports are free.
 	stop := func() {
 		_ = control.Close()
 		runCancel()
-		_ = waitRun(context.Background(), 15*time.Second)
 		_ = svr.Close()
 		<-done
 	}
@@ -374,48 +373,6 @@ func wait(ctx context.Context, addr string, d time.Duration) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("wait %s: %w", addr, err)
-}
-
-// waitRun blocks until Service.Run has published cancel and Accept'd on the
-// control port. Close reads cancel; calling it earlier races with Run.
-func waitRun(ctx context.Context, d time.Duration) error {
-	deadline := time.Now().Add(d)
-	var last error
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		c, err := net.DialTimeout("tcp", config.ControlAddr(), 200*time.Millisecond)
-		if err != nil {
-			last = err
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		tc, ok := c.(*net.TCPConn)
-		if !ok {
-			c.Close()
-			return fmt.Errorf("wait run: not TCP")
-		}
-		_ = tc.SetDeadline(time.Now().Add(2 * time.Second))
-		// Half-close so Accept+TLS-peek sees EOF and drops us immediately.
-		_, _ = tc.Write([]byte("x"))
-		_ = tc.CloseWrite()
-		_, last = tc.Read(make([]byte, 1))
-		tc.Close()
-		if last != nil {
-			if ne, ok := last.(net.Error); ok && ne.Timeout() {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			// EOF/reset: HandleListener accepted — cancel is set.
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if last == nil {
-		last = fmt.Errorf("timeout")
-	}
-	return fmt.Errorf("wait run %s: %w", config.ControlAddr(), last)
 }
 
 // tunnel counts what frps does for dark nodes. frps's metrics hook is a
