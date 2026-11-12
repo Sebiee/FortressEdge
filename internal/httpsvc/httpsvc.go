@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/fatedier/frp/pkg/transport"
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/Sebiee/fortressedge/internal/ca"
@@ -681,10 +682,11 @@ func tlsConfig(ctx context.Context, cfg config.Config, domains *Domains) (httpsC
 }
 
 // requireTunnelCert wraps base so the tunnel SNI — and only it — requires a
-// client cert and speaks plain http/1.1 (frps websocket). Site
-// hosts and ACME TLS-ALPN-01 handshakes pass through unchanged. A server
-// name that known rejects, or no server name, closes the connection before
-// any byte is sent: no certificate, no alert.
+// client cert from pool, without naming pool's CAs, and speaks plain
+// http/1.1 (frps websocket). Site hosts and ACME TLS-ALPN-01 handshakes
+// pass through unchanged. A server name that known rejects, or no server
+// name, closes the connection before any byte is sent: no certificate, no
+// alert.
 func requireTunnelCert(base *tls.Config, pool *x509.CertPool, tunnel string, known func(string) bool) *tls.Config {
 	tunnel = hostname(tunnel)
 	orig := base.GetConfigForClient
@@ -724,8 +726,22 @@ func requireTunnelCert(base *tls.Config, pool *x509.CertPool, tunnel string, kno
 		if hostname(hello.ServerName) != tunnel {
 			return out, nil
 		}
-		out.ClientAuth = tls.RequireAndVerifyClientCert
-		out.ClientCAs = pool
+		// The certificate request names no CA, so a client without one of
+		// our certificates learns nothing about who issues them: the chain
+		// is checked by VerifyClientChain, not by ClientCAs.
+		out.ClientAuth = tls.RequireAnyClientCert
+		out.ClientCAs = nil
+		chain := transport.VerifyClientChain(pool)
+		if more := out.VerifyConnection; more != nil {
+			out.VerifyConnection = func(cs tls.ConnectionState) error {
+				if err := chain(cs); err != nil {
+					return err
+				}
+				return more(cs)
+			}
+		} else {
+			out.VerifyConnection = chain
+		}
 		out.NextProtos = []string{"http/1.1"}
 		return out, nil
 	}

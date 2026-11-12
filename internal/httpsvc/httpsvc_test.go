@@ -26,6 +26,7 @@ import (
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
 
+	"github.com/Sebiee/fortressedge/internal/ca"
 	"github.com/Sebiee/fortressedge/internal/certstore"
 	"github.com/Sebiee/fortressedge/internal/certstore/vaulttest"
 	"github.com/Sebiee/fortressedge/internal/config"
@@ -1195,6 +1196,87 @@ func TestStampForwarded(t *testing.T) {
 	} {
 		if got := strings.Join(r.Header.Values(k), ","); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// The tunnel name asks for a client certificate without naming the CA: a
+// client without one of ours learns nothing about who issues them. The
+// chain is still checked: ours passes, another CA's is refused.
+func TestTunnelCertRequestNamesNoCA(t *testing.T) {
+	d := NewDomains("tunnel.example.com")
+	cert := selfSigned(t, "tunnel.example.com")
+	base := &tls.Config{Certificates: []tls.Certificate{cert}}
+	clientCert := func(caPEM, caKeyPEM []byte) *tls.Certificate {
+		t.Helper()
+		caCert, caKey, err := ca.ParseCA(caPEM, caKeyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crt, err := ca.SignClient(caCert, caKey, ca.ID("tunnel.example.com", ca.RoleNode, "node1"), &key.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := pem.Decode(crt)
+		return &tls.Certificate{Certificate: [][]byte{b.Bytes}, PrivateKey: key}
+	}
+	oursPEM, oursKey, err := ca.NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPEM, otherKey, err := ca.NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(oursPEM)
+	cfg := requireTunnelCert(base, pool, "tunnel.example.com", d.Known)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(ln.Addr().String(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "ok")
+	}), cfg)
+	go func() { _ = s.ServeTLS(tlsOnly{ln}, "", "") }()
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, tc := range []struct {
+		name string
+		cert *tls.Certificate
+		ok   bool
+	}{
+		{"none", nil, false},
+		{"ours", clientCert(oursPEM, oursKey), true},
+		{"another CA's", clientCert(otherPEM, otherKey), false},
+	} {
+		asked, named := false, -1
+		c := tls.Client(dialCounting(t, ln.Addr().String()), &tls.Config{
+			ServerName: "tunnel.example.com", InsecureSkipVerify: true,
+			GetClientCertificate: func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				asked, named = true, len(cri.AcceptableCAs)
+				if tc.cert == nil {
+					return &tls.Certificate{}, nil
+				}
+				return tc.cert, nil
+			},
+		})
+		err := c.Handshake()
+		if err == nil {
+			// TLS 1.3: the server checks the client's certificate after the
+			// client's handshake ends.
+			fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: tunnel.example.com\r\n\r\n")
+			_, err = c.Read(make([]byte, 1))
+		}
+		if !asked || named != 0 {
+			t.Fatalf("%s: asked for a certificate %v, naming %d CAs; want asked, naming none", tc.name, asked, named)
+		}
+		if tc.ok != (err == nil) {
+			t.Fatalf("%s: %v, want ok=%v", tc.name, err, tc.ok)
 		}
 	}
 }
