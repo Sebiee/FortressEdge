@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.3
+
+- `fortresskube_tunnel_up` is 1 again after a tunnel reconnects by
+  itself. frp makes a connection for each login, and at a reconnect the
+  old one's close could come after the new one's login and leave the
+  tunnel counted down, with the metric at 0 until the next renewal or
+  restart. The same count could keep a renewal waiting for a new tunnel
+  that was up, and close a retiring tunnel before its requests had
+  ended.
+
 ## 0.9.2
 
 - The frp fork: `Close` on frps from another goroutine, before or while
