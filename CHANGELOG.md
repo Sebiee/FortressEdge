@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.1 (not released yet)
+## 0.9.1
 
 - An edge behind a load balancer stops without refusing a visitor. Mark
   the site the balancer checks the edge with, `health_check: true` under
