@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.4
+
+- The tunnel name asks for a client certificate without naming the CA,
+  on TCP and on QUIC. Before, Go's TLS server listed the client CA's name
+  in its certificate request, sent before the client proves anything, so
+  anyone who named the tunnel learned who issues its certificates:
+  `fortressedge-ca`, which names the product, or the name of the
+  operator's own CA. The chain is checked as before: the client CA, for
+  client auth, in date, and again when a session resumes. Clients need
+  no change; curl and `openssl s_client` send their certificate as
+  before.
+
 ## 0.9.3
 
 - `fortresskube_tunnel_up` is 1 again after a tunnel reconnects by
