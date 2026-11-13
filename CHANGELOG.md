@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.0
+
+An edge trusts several client CAs at once, so that the edges can change
+their client CA without refusing a tunnel. `fortress.yml` takes more, so
+this is a minor release; a `fortress.yml` with one CA works as before.
+
+- `client_ca` holds up to four CA certificates, one after the other, in
+  `fortress.yml`, `fortressctl bake`, the `bake` package, and the
+  Terraform provider's `fortressedge_iso`. Every check of a client
+  certificate takes any of them: the tunnel name on TCP 443 (frp control
+  and the ops API) and QUIC.
+- A certificate is its SPIFFE ID, whichever CA signed it: `node/node1`
+  from the old CA and from the new one are one node, in one group, with
+  the same names, so a dark node's replicas can change certificates one
+  at a time. The same holds for operators and log readers. Every CA in
+  the list can therefore name any node, operator, and log reader. See
+  [changing the client CA](docs/certificates.md#changing-the-client-ca).
+- `client_ca` holds CA certificates and nothing else: text between them,
+  another PEM block, PEM headers, a certificate that is not a CA's, the
+  same CA twice, or more than four are refused, so that a reader of the
+  file sees every CA the edge trusts. `fortressctl bake` lists the CAs
+  when there are several.
+- The status lists the client CAs under `client_cas` (subject, SHA-256,
+  end), and `fortressedge_client_ca_not_after_seconds` gives each one's
+  end. The boot log warns of a CA that ends within 30 days.
+
 ## 0.9.4
 
 - The tunnel name asks for a client certificate without naming the CA,
