@@ -490,6 +490,7 @@ names visitors make up.
 | `fortressedge_connections`, `fortressedge_visitors` | | open connections; sources tracked |
 | `fortressedge_bans_total`, `fortressedge_banned_sources` | | bans since boot; banned now |
 | `fortressedge_ready` | | 1 while the edge can serve sites, see [Readiness](#readiness) |
+| `fortressedge_client_ca_not_after_seconds` | `sha256`, `subject` | when each client CA the edge trusts ends, see [certificates.md](certificates.md#changing-the-client-ca) |
 | `fortressedge_policy_degraded` | | 1 while part of the stored policy is not in force, see [provisioning.md](provisioning.md#when-the-stored-policy-does-not-load) |
 | `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
 | `fortressedge_tunnel_group_members` | `group` | logged-in frpc by dark node (`node/<name>`): its group, which shares its names |

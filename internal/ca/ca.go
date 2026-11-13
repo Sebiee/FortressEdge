@@ -5,9 +5,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/url"
@@ -286,26 +289,61 @@ func ParseCertPEM(pemBytes []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(b.Bytes)
 }
 
-// ParseCAPEM parses exactly one PEM certificate, which must be a CA's.
-// Anything after it is refused: a trust anchor that holds a second
-// certificate would trust that one too, and a reader of the file might
-// see only the first.
-func ParseCAPEM(pemBytes []byte) (*x509.Certificate, error) {
-	b, rest := pem.Decode(pemBytes)
-	if b == nil || b.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("no PEM certificate")
+// MaxCAs is how many CAs client_ca may hold. A change of CA needs two, the
+// old and the new; more would be trust nobody looks at.
+const MaxCAs = 4
+
+// ParseCAs parses client_ca: one or more PEM certificates, each a CA's,
+// with nothing but space between them. Text, another PEM type, or PEM
+// headers are refused, so that a reader of the file sees every CA the edge
+// trusts; so is the same certificate twice, or more than MaxCAs.
+func ParseCAs(pemBytes []byte) ([]*x509.Certificate, error) {
+	rest := bytes.TrimSpace(pemBytes)
+	if len(rest) == 0 {
+		return nil, errors.New("no PEM certificate")
 	}
-	if len(bytes.TrimSpace(rest)) > 0 {
-		return nil, fmt.Errorf("more than one certificate: give the one CA")
+	var cas []*x509.Certificate
+	seen := map[[32]byte]bool{}
+	for len(rest) > 0 {
+		n := len(cas) + 1
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return nil, fmt.Errorf("certificate %d: text that is not PEM: give the CA certificates alone", n)
+		}
+		b, after := pem.Decode(rest)
+		if b == nil {
+			return nil, fmt.Errorf("certificate %d: not a PEM block", n)
+		}
+		if b.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("certificate %d: a PEM %s: give the CA certificates alone", n, b.Type)
+		}
+		if len(b.Headers) > 0 {
+			return nil, fmt.Errorf("certificate %d: PEM headers: give the CA certificates alone", n)
+		}
+		c, err := x509.ParseCertificate(b.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("certificate %d: %w", n, err)
+		}
+		if !c.IsCA {
+			return nil, fmt.Errorf("certificate %d: %q is not a CA certificate", n, c.Subject.CommonName)
+		}
+		sum := sha256.Sum256(c.Raw)
+		if seen[sum] {
+			return nil, fmt.Errorf("certificate %d: %q is there twice", n, c.Subject.CommonName)
+		}
+		seen[sum] = true
+		if cas = append(cas, c); len(cas) > MaxCAs {
+			return nil, fmt.Errorf("more than %d CAs: a change of CA needs two", MaxCAs)
+		}
+		rest = bytes.TrimSpace(after)
 	}
-	c, err := x509.ParseCertificate(b.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	if !c.IsCA {
-		return nil, fmt.Errorf("%q is not a CA certificate", c.Subject.CommonName)
-	}
-	return c, nil
+	return cas, nil
+}
+
+// Fingerprint is a certificate's SHA-256, in hex: what tells two CAs with
+// the same name apart.
+func Fingerprint(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // LoadPool reads a PEM CA bundle into a pool.

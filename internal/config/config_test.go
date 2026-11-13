@@ -521,14 +521,29 @@ func TestParseClientCA(t *testing.T) {
 	if err := CheckEdge([]byte("client_ca: not-a-cert\n")); err == nil {
 		t.Fatal("expected client_ca error")
 	}
-	// One CA only: a second certificate would be trusted too.
+	if len(c.ClientCAs) != 1 {
+		t.Fatalf("one CA parsed as %d", len(c.ClientCAs))
+	}
+	// Several CAs, as during a change of CA: all are trusted, in order.
 	other, _, err := ca.NewCA()
 	if err != nil {
 		t.Fatal(err)
 	}
 	two := "client_ca: |\n" + indentPEM(testCA) + indentPEM(string(other))
-	if err := CheckEdge([]byte(two)); err == nil || !strings.Contains(err.Error(), "more than one certificate") {
+	if err := CheckEdge([]byte(two)); err != nil {
 		t.Fatalf("two CAs: %v", err)
+	}
+	cas := EdgeClientCAs([]byte(two))
+	if len(cas) != 2 || cas[0].Equal(cas[1]) {
+		t.Fatalf("two CAs parsed as %d", len(cas))
+	}
+	// Anything but the certificates is refused: a reader sees every CA.
+	withText := "client_ca: |\n" + indentPEM(testCA) + "  the new one:\n" + indentPEM(string(other))
+	if err := CheckEdge([]byte(withText)); err == nil || !strings.Contains(err.Error(), "client_ca: certificate 2: text") {
+		t.Fatalf("text between two CAs: %v", err)
+	}
+	if EdgeClientCAs([]byte(withText)) != nil {
+		t.Fatal("CAs of a fortress.yml that is not valid")
 	}
 }
 

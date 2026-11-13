@@ -15,7 +15,9 @@ func newCA() *cobra.Command {
 		Use:   "init <dir>",
 		Short: "Write ca.key and ca.crt: the client CA fortress.yml names as client_ca",
 		Long: `Writes a client CA into <dir>. ca.crt goes into fortress.yml as client_ca;
-ca.key stays with whoever signs certificates, never on an edge or in an ISO.`,
+ca.key stays with whoever signs certificates, never on an edge or in an ISO.
+While the edges change CA, client_ca holds the old CA's certificate and the
+new one's, one after the other.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return ca.Init(args[0], nil)

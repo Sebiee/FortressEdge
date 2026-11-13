@@ -128,9 +128,12 @@ type Config struct {
 	// Vault, when set, is where the edges that serve the same names share
 	// their certificates, ACME account, and challenges.
 	Vault *Vault
-	// ClientCA is the PEM trust anchor from fortress.yml (client_ca) for
-	// dark-node, operator, and log-reader certificates.
+	// ClientCA is the PEM trust anchors from fortress.yml (client_ca) for
+	// dark-node, operator, and log-reader certificates: one CA, or several
+	// while the edge changes CA. Each can name any identity.
 	ClientCA []byte
+	// ClientCAs is ClientCA parsed, in its order.
+	ClientCAs []*x509.Certificate
 	// ClientCAPath is the file listeners load this boot. Set after boot
 	// resolves client_ca; not part of fortress.yml.
 	ClientCAPath string
@@ -862,10 +865,11 @@ func applyEdge(c *Config, edge []byte) error {
 	if pemText == "" {
 		return fmt.Errorf("%s: client_ca is required (fortressctl bake adds one)", EdgeFile)
 	}
-	if _, err := ca.ParseCAPEM([]byte(pemText)); err != nil {
+	cas, err := ca.ParseCAs([]byte(pemText))
+	if err != nil {
 		return fmt.Errorf("%s: client_ca: %w", EdgeFile, err)
 	}
-	c.ClientCA = []byte(pemText)
+	c.ClientCA, c.ClientCAs = []byte(pemText), cas
 	return nil
 }
 
@@ -921,6 +925,16 @@ func applyVault(c *Config, e edgeConfig) error {
 func EdgeHoldsSecret(edge []byte) bool {
 	var c Config
 	return applyEdge(&c, edge) == nil && c.Vault != nil && c.Vault.SecretID != ""
+}
+
+// EdgeClientCAs is the client CAs a valid fortress.yml trusts, in its
+// order; nil for one that is not valid.
+func EdgeClientCAs(edge []byte) []*x509.Certificate {
+	var c Config
+	if applyEdge(&c, edge) != nil {
+		return nil
+	}
+	return c.ClientCAs
 }
 
 // pemCerts parses one or more PEM certificates.

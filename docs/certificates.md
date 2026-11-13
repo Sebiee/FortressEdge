@@ -3,7 +3,8 @@
 ## Client certificates
 
 Dark nodes, operators, and log shippers authenticate with client
-certificates from one client CA, set as `client_ca` in `fortress.yml`.
+certificates from the client CA set as `client_ca` in `fortress.yml`
+(several while you change CA, see [below](#changing-the-client-ca)).
 The edge holds that CA's certificate, never its key, and signs nothing.
 A certificate's only URI SAN is a SPIFFE ID (the CN is never read). Its
 trust domain is the edge's `fqdn` (the tunnel name), and its path is a
@@ -36,6 +37,36 @@ fortressctl ca client tls spiffe://tunnel.example.com/logs/filebeat
 
 Keep `tls/ca.key` off the edge and off log hosts: whoever holds it can
 enroll dark nodes, which can publish any hostname.
+
+### Changing the client CA
+
+`client_ca` may hold up to four CA certificates, one after the other, so
+that edges can move to a new CA without refusing a tunnel:
+
+1. Bake the old CA and the new one into every edge, and restart each.
+2. Re-issue the certificates from the new CA, in any order: a dark node's
+   replicas can change one at a time.
+3. Bake the new CA alone, and restart each edge again.
+
+A certificate is its SPIFFE ID, whichever CA signed it.
+`spiffe://tunnel.example.com/node/node1` from the old CA and from the new
+one are the same node: one group, the same names, which it keeps while
+its replicas change certificates. The same holds for operators and log
+readers.
+
+That is also the cost: **every CA in `client_ca` can name any node,
+operator, and log reader of the edge**, and a node it names can publish
+any hostname that node may. There are no hostnames per CA. Keep the list
+to the change at hand, and take the old CA out once nothing uses it.
+
+`client_ca` holds CA certificates and nothing else: text between them,
+another PEM block, PEM headers, a certificate that is not a CA's, or the
+same CA twice is refused, so that whoever reads the file sees every CA
+the edge trusts. `fortressctl bake` lists them when there is more than
+one. A running edge shows them under `client_cas` in its status, by
+subject, SHA-256, and end, and in `fortressedge_client_ca_not_after_seconds`:
+together they tell when the old CA is gone from every edge, and when a CA
+nears its end. The boot log warns of a CA that ends within 30 days.
 
 ## Server certificates
 
