@@ -213,5 +213,7 @@ Still to come:
   (`acme`, and `acme_ca` and `client_ca` base64-encoded, a couple of KiB),
   answering with the baked ISO, for any tool that can download a file.
   Reproducible bakes let anyone check what it serves: bake the same
-  release and `fortress.yml` and compare checksums. `client_ca` takes one
-  certificate only, so a second CA cannot hide in it.
+  release and `fortress.yml` and compare checksums. `client_ca` may hold
+  several CAs, for a change of CA, and each can name any node and
+  operator; it holds nothing else, so the endpoint can list every CA it
+  bakes, by subject and SHA-256, and none can hide in it.

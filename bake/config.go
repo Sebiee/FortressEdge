@@ -13,8 +13,10 @@ import (
 // them. A field left at its zero value leaves its key out, so the edge uses
 // the key's default.
 type Config struct {
-	// ClientCA is the PEM CA certificate that signs the dark-node, operator,
-	// and log-reader certificates: exactly one certificate. Required.
+	// ClientCA is the PEM CA certificates that sign the dark-node, operator,
+	// and log-reader certificates: one, or up to four while the edges change
+	// CA, with nothing but space between them. Each CA can name any node,
+	// operator, and log reader. Required.
 	ClientCA string `yaml:"client_ca"`
 	// ACME is the ACME directory URL. Empty is Let's Encrypt.
 	ACME string `yaml:"acme"`

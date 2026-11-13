@@ -1202,7 +1202,7 @@ func TestStampForwarded(t *testing.T) {
 
 // The tunnel name asks for a client certificate without naming the CA: a
 // client without one of ours learns nothing about who issues them. The
-// chain is still checked: ours passes, another CA's is refused.
+// chain is still checked: either trusted CA's passes, another's is refused.
 func TestTunnelCertRequestNamesNoCA(t *testing.T) {
 	d := NewDomains("tunnel.example.com")
 	cert := selfSigned(t, "tunnel.example.com")
@@ -1228,12 +1228,17 @@ func TestTunnelCertRequestNamesNoCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secondPEM, secondKey, err := ca.NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
 	otherPEM, otherKey, err := ca.NewCA()
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Two trusted CAs, as during a change of CA.
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(oursPEM)
+	pool.AppendCertsFromPEM(append(append([]byte{}, oursPEM...), secondPEM...))
 	cfg := requireTunnelCert(base, pool, "tunnel.example.com", d.Known)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1252,6 +1257,7 @@ func TestTunnelCertRequestNamesNoCA(t *testing.T) {
 	}{
 		{"none", nil, false},
 		{"ours", clientCert(oursPEM, oursKey), true},
+		{"the second trusted CA's", clientCert(secondPEM, secondKey), true},
 		{"another CA's", clientCert(otherPEM, otherKey), false},
 	} {
 		asked, named := false, -1

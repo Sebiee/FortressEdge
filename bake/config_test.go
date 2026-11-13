@@ -79,3 +79,15 @@ func TestConfigYAMLLeavesDefaultsOut(t *testing.T) {
 		t.Fatalf("bad acme: %v", err)
 	}
 }
+
+// client_ca takes several CAs, as during a change of CA, and nothing else
+// between them.
+func TestConfigTakesSeveralClientCAs(t *testing.T) {
+	two := testCA(t) + testCA(t)
+	if err := (Config{ClientCA: two}).Check(); err != nil {
+		t.Fatalf("two CAs: %v", err)
+	}
+	if err := (Config{ClientCA: testCA(t) + "the new one\n" + testCA(t)}).Check(); err == nil {
+		t.Fatal("text between two CAs accepted")
+	}
+}

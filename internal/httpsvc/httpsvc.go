@@ -266,6 +266,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 	tcp := newStreams(ctx, notTunnel(cfg.Tunnel, routes), nil, lim, vis, socks, st)
 	// An edge that leaves is not ready: it takes no new visitors.
 	ready := func() bool { return more.ready() && !leave.Leaving() }
+	logClientCAs(cfg.ClientCAs, time.Now())
 	// The ops API rides the tunnel SNI's mTLS.
 	oh := ops.New(cfg, policy, logx.BootID(), config.LogDir)
 	oh.SetDegraded(degraded)
@@ -277,6 +278,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			m["cert_store"] = s.Status()
 		}
 		m["ready"] = ready()
+		m["client_cas"] = clientCAStatus(cfg.ClientCAs)
 		for k, f := range more.Status {
 			m[k] = f()
 		}
@@ -290,6 +292,7 @@ func Serve(ctx context.Context, cfg config.Config, policy []byte, filt edgeFilte
 			up = 1
 		}
 		w.Int("fortressedge_ready", up)
+		writeClientCAMetrics(w, cfg.ClientCAs)
 		writeMetrics(w, st, filt, track, vis, domains)
 		tcp.writeMetrics(w)
 		for _, f := range more.Metrics {

@@ -35,6 +35,12 @@ type EdgeOptions struct {
 	// SharePebble is another edge's Pebble, for edges that share
 	// certificates: one ACME CA, which validates against that edge's VM.
 	SharePebble *Pebble
+	// PKI is another edge's PKI, whose CA this edge trusts too; empty
+	// makes the edge its own.
+	PKI string
+	// MoreClientCAs are PKIs whose CAs client_ca lists after the edge's
+	// own, as while the edges change CA.
+	MoreClientCAs []string
 }
 
 // Edge is an edge VM as an operator deploys one: a release ISO baked with
@@ -56,7 +62,14 @@ type Edge struct {
 func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 	t.Helper()
 	e := &Edge{Dir: t.TempDir()}
-	e.PKI = PKI(t, e.Dir)
+	e.PKI = o.PKI
+	if e.PKI == "" {
+		e.PKI = PKI(t, e.Dir)
+	}
+	clientCA := readFile(t, filepath.Join(e.PKI, "ca.crt"))
+	for _, p := range o.MoreClientCAs {
+		clientCA = append(clientCA, readFile(t, filepath.Join(p, "ca.crt"))...)
+	}
 	drive := filepath.Join(e.Dir, "cidata.iso")
 	if o.NoDrive {
 		drive = ""
@@ -79,7 +92,7 @@ func NewEdge(t *testing.T, o EdgeOptions) *Edge {
 		"acme: " + e.Pebble.URL + "\n" +
 		"acme_ca: |\n" + Indent(e.Pebble.TLSCA) +
 		"ntp: " + ntp + "\n" +
-		"client_ca: |\n" + Indent(readFile(t, filepath.Join(e.PKI, "ca.crt"))))
+		"client_ca: |\n" + Indent(clientCA))
 	e.VM.ISO = Bake(t, e.Dir, cmp.Or(o.ISO, *iso), edge)
 	if drive != "" {
 		Drive(t, drive, append(UserData(cmp.Or(o.FQDN, Tunnel)), o.UserData...), e.VM.NetworkConfig())
@@ -128,7 +141,14 @@ func (e *Edge) Cert(role ca.Role, name string) (crt, key string) {
 // returns what it printed.
 func (e *Edge) Apply(t *testing.T, policy string) string {
 	t.Helper()
-	return CtlOut(t, append([]string{"apply", Tunnel, "-f", Write(t, t.TempDir(), "policy.yml", []byte(policy))}, e.ctlFlags()...)...)
+	crt, key := e.Cert(ca.RoleOps, "alice")
+	return e.ApplyAs(t, crt, key, policy)
+}
+
+// ApplyAs is Apply as the operator whose certificate is crt/key.
+func (e *Edge) ApplyAs(t *testing.T, crt, key, policy string) string {
+	t.Helper()
+	return CtlOut(t, append([]string{"apply", Tunnel, "-f", Write(t, t.TempDir(), "policy.yml", []byte(policy))}, e.ctlFlagsAs(crt, key)...)...)
 }
 
 // Diff runs fortressctl diff against policy and returns what it printed
@@ -145,6 +165,10 @@ func (e *Edge) Diff(t *testing.T, policy string) (string, bool) {
 // guest's 443, trusting Pebble's root.
 func (e *Edge) ctlFlags() []string {
 	crt, key := e.Cert(ca.RoleOps, "alice")
+	return e.ctlFlagsAs(crt, key)
+}
+
+func (e *Edge) ctlFlagsAs(crt, key string) []string {
 	return []string{"--cert", crt, "--key", key, "--cacert", e.Roots,
 		"--connect", net.JoinHostPort(e.VM.Addr, strconv.Itoa(e.VM.HTTPS))}
 }

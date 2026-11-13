@@ -65,8 +65,8 @@ fortressctl bake -o edge-prod.iso -c fortress.yml fortressedge-v0.9.4.iso
 ```
 
 `bake` checks the file first: a missing `client_ca`, a `client_ca` with
-more than one certificate, an unknown key, or a policy key (which belongs
-in `policy.yml`) is refused. A bake is reproducible: the same release and
+anything but CA certificates or more than four of them, an unknown key, or
+a policy key (which belongs in `policy.yml`) is refused. A bake is reproducible: the same release and
 `fortress.yml` give the same bytes, wherever they are baked. The release's
 kernel and edge binary are copied unchanged, and `fortress.yml` becomes
 one more archive in the initramfs. One ISO serves every edge that shares

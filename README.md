@@ -240,7 +240,7 @@ fortressctl apply edge1.example.com -f policy.yml \
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `client_ca` | required | PEM CA that signs the dark-node, operator, and log-reader certificates |
+| `client_ca` | required | PEM CA that signs the dark-node, operator, and log-reader certificates; up to four while you [change CA](docs/certificates.md#changing-the-client-ca) |
 | `acme` | Let's Encrypt | ACME directory URL |
 | `acme_ca` | system roots | PEM CA that signed that directory's HTTPS certificate |
 | `renew_interval` | `4h` | How often ACME certificates are checked and renewed once due |

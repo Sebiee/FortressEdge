@@ -1,10 +1,14 @@
 package ca
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +88,72 @@ func TestIdentifyNeedsExactlyOneURI(t *testing.T) {
 	}
 	if _, _, ok := Identify(nil, "tunnel.example.com"); ok {
 		t.Error("nil certificate accepted")
+	}
+}
+
+// client_ca holds one CA or several, as PEM certificates and nothing else:
+// whatever the edge trusts, a reader of the file sees.
+func TestParseCAs(t *testing.T) {
+	newCA := func() (string, []byte) {
+		t.Helper()
+		crt, key, err := NewCA()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(crt)), key
+	}
+	a, aKey := newCA()
+	b, _ := newCA()
+	for _, tc := range []struct {
+		name, pem string
+		n         int
+	}{
+		{"one", a, 1},
+		{"two", a + "\n" + b + "\n", 2},
+		{"two with blank lines and indentation", "\n" + a + "\n\n   " + b + "\n\n", 2},
+	} {
+		cas, err := ParseCAs([]byte(tc.pem))
+		if err != nil || len(cas) != tc.n {
+			t.Fatalf("%s: %d CAs, %v; want %d", tc.name, len(cas), err, tc.n)
+		}
+	}
+	cas, _ := ParseCAs([]byte(a + "\n" + b))
+	first, _ := ParseCAs([]byte(a))
+	if !cas[0].Equal(first[0]) || Fingerprint(cas[0]) == Fingerprint(cas[1]) || len(Fingerprint(cas[0])) != 64 {
+		t.Fatal("the CAs are not in the file's order, or their fingerprints do not tell them apart")
+	}
+
+	caCert, caKey, err := ParseCA([]byte(a), aKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := SignClient(caCert, caKey, ID("tunnel.example.com", RoleNode, "node1"), &key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooMany := ""
+	for range MaxCAs + 1 {
+		c, _ := newCA()
+		tooMany += c + "\n"
+	}
+	for name, bad := range map[string]string{
+		"empty":                          "  \n",
+		"text before":                    "subject=CN = old CA\n" + a,
+		"text between":                   a + "\nsubject=CN = new CA\n" + b,
+		"text after":                     a + "\n# the old one\n",
+		"a key":                          a + "\n-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIB==\n-----END EC PRIVATE KEY-----",
+		"PEM headers":                    strings.Replace(a, "-----BEGIN CERTIFICATE-----\n", "-----BEGIN CERTIFICATE-----\nComment: old\n\n", 1),
+		"the same CA twice":              a + "\n" + b + "\n" + a,
+		"more than MaxCAs":               tooMany,
+		"a certificate that is not a CA": a + "\n" + string(leaf),
+		"a broken block":                 "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----",
+	} {
+		if _, err := ParseCAs([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
