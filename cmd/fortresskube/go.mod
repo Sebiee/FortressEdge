@@ -15,9 +15,10 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // groups by client identity, and tcp-tls proxies whose TLS the edge ends;
 // and, for a client with an identity, a name owned by one identity with a
 // grace after it leaves, canonical names, proxy names and run IDs of its
-// own, http and tcp-tls proxies only, and limits on its logins, proxies,
-// names and stream windows.
-replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261112180737-fa397a4d51ec
+// own, http and tcp-tls proxies only, limits on its logins, proxies,
+// names and stream windows, and a count of its logins in each login
+// answer, with a leave for another server that a server grants.
+replace github.com/fatedier/frp => github.com/Sebiee/frp v0.71.1-0.20261118142937-c432a003b631
 
 require (
 	github.com/fatedier/frp v0.0.0-00010101000000-000000000000

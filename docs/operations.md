@@ -437,7 +437,8 @@ log when that is on, at every stop: they are not an error to alert on.
 The mark also tells the edge that a balancer chooses between it and
 other edges. An edge can be without a tunnel of a dark node while
 another edge has them: a balancer in front of the tunnels gives each
-new tunnel to one edge (see **An edge service with several edges** in
+new tunnel to one edge, and an edge that comes back has none until a
+tunnel moves to it (see **An edge service with several edges** in
 [kubernetes.md](kubernetes.md)). Its check then fails, and it gets no
 new visitor, but a visitor whose connection is open goes on asking it.
 So with a marked site in the policy, the `503` for a site no tunnel
@@ -461,6 +462,22 @@ a `GET` or `HEAD` without a body whose pooled work connection turns out
 dead before any answer is tried once more too. A request already sent to
 a member that dies is answered `502`. See
 [kubernetes.md](kubernetes.md) for `fortresskube`'s replicas.
+
+Behind a balancer, a dark node's tunnels should be spread evenly over
+the edges, and only an edge can count the ones it has. So the edge
+answers each login with a count: the node's tunnels that serve here (a
+tunnel serves while it publishes a name), and its logins that have not
+published yet, the new one among them. A frpc that has logged in at
+another edge too may ask this one, on its tunnel: may I leave for an
+edge with that count? The edge grants it only when more of the node's
+tunnels serve here than the count, one question at a time, and counts
+the tunnel as gone from then on, until the frpc says that it stays
+after all. So an edge never lets its last serving tunnel go.
+`fortresskube -renew` asks this way before it moves a tunnel; see
+**An edge service with several edges** in
+[kubernetes.md](kubernetes.md). The second login is in `tunnel_groups`
+for the seconds it lasts. A frpc of 0.10.0 or older never asks, and its
+tunnels come and go as before.
 
 ## Metrics
 
@@ -507,6 +524,7 @@ names visitors make up.
 | `fortressedge_tunnel_clients` | `node` | open tunnel connections by dark node (`node/<name>`) |
 | `fortressedge_tunnel_group_members` | `group` | logged-in frpc by dark node (`node/<name>`): its group, which shares its names |
 | `fortressedge_tunnel_logins_total`, `fortressedge_tunnel_proxies` | | frpc logins; proxies registered |
+| `fortressedge_tunnel_leaves_total` | `result` | answers to a frpc that asked to move its tunnel to another edge: `granted` (more of its node's tunnels serve here than the other edge would have), `refused`; see [Readiness](#readiness) |
 | `fortressedge_published_names` | | names published, wildcards and TCP routes included |
 | `fortressedge_tcp_route_connections` | `site` | connections to a [TCP route](#tcp-routes) open now |
 | `fortressedge_tcp_route_connections_total` | `site`, `result` | connections to a TCP route by result: `ok`, `alpn_refused`, `policy_refused`, `no_backend`, `tls_failed` |
