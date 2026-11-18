@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- An edge with a `health_check` site in its policy closes the visitor's
+  connection after a `503` for a site no tunnel carries (`no_tunnel`):
+  `Connection: close`, or HTTP/2's GOAWAY; not on a WebSocket's request.
+  The visitor's next request arrives on a new connection, which the
+  balancer gives to an edge that passes the check. Without a marked
+  site the connection stays open, as before. See
+  [operations](docs/operations.md#readiness).
+
 ## 0.10.0
 
 An edge trusts several client CAs at once, so that the edges can change

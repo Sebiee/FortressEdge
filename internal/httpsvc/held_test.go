@@ -8,14 +8,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/fatedier/frp/pkg/util/vhost"
+
+	"github.com/Sebiee/fortressedge/internal/config"
 )
 
 // certPEM is a self-signed certificate for name valid until notAfter, and
@@ -175,8 +179,116 @@ func TestNoTunnelIs503(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
 		t.Fatalf("status %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
 	}
+	if c := rec.Header().Get("Connection"); c != "" {
+		t.Fatalf("Connection %q from an edge no balancer checks, want none", c)
+	}
 	s := st.site("app.example.com")
 	if s.proxyErrors[reasonNoTunnel].Load() != 1 || s.status[5].Load() != 1 {
 		t.Fatalf("no_tunnel %d, 5xx %d", s.proxyErrors[reasonNoTunnel].Load(), s.status[5].Load())
 	}
+}
+
+// balancedHandler is an edge behind a load balancer, by its policy's health
+// check site: dark.example.com is held, with no tunnel to carry it, frps
+// has no route for gone.example.com, and it answers every other site.
+func balancedHandler(t *testing.T) http.Handler {
+	t.Helper()
+	p, err := config.ParsePolicy([]byte("sites:\n  check.example.com:\n    health_check: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frps := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hostname(r.Host) == "gone.example.com" {
+			ProxyError(r, &vhost.ProxyError{Stage: vhost.StageRoute, Err: vhost.ErrNoRouteFound})
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, "ok")
+	})
+	route := func(host string) (string, bool, bool) { return host, host == "dark.example.com", true }
+	h, err := Handler("tunnel.example.com", frps, nil, nil, &httpStats{}, route, newLivePolicy(p), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// Behind a load balancer, the 503 for a site no tunnel carries closes the
+// visitor's connection; a site that is carried keeps it, and an upgrade is
+// left to its own Connection header.
+func TestNoTunnelClosesTheConnectionBehindABalancer(t *testing.T) {
+	h := balancedHandler(t)
+	for _, tc := range []struct {
+		host     string
+		upgrade  bool
+		status   int
+		wantConn string
+	}{
+		{"dark.example.com", false, http.StatusServiceUnavailable, "close"},
+		{"dark.example.com", true, http.StatusServiceUnavailable, ""},
+		{"gone.example.com", false, http.StatusServiceUnavailable, "close"},
+		{"app.example.com", false, http.StatusOK, ""},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://"+tc.host+"/", nil)
+		if tc.upgrade {
+			req.Header.Set("Connection", "keep-alive, Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if c := rec.Header().Get("Connection"); rec.Code != tc.status || c != tc.wantConn {
+			t.Errorf("%s (upgrade %v): %d, Connection %q; want %d, %q", tc.host, tc.upgrade, rec.Code, c, tc.status, tc.wantConn)
+		}
+	}
+}
+
+// On a real listener: a visitor's connection is kept from one request to
+// the next, until a request on it finds no tunnel. The request after that
+// one arrives on a new connection, which a balancer gives to another edge.
+// HTTP/2 says so with GOAWAY, which the client may read a moment after the
+// response.
+func TestNoTunnelSendsTheVisitorToANewConnection(t *testing.T) {
+	overHTTP1And2(t, balancedHandler(t), func(t *testing.T, url string, c *http.Client) {
+		get := func(host string) (status int, reused bool) {
+			t.Helper()
+			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+				GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+			})
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = host
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			return resp.StatusCode, reused
+		}
+		if status, _ := get("app.example.com"); status != http.StatusOK {
+			t.Fatalf("a site: %d", status)
+		}
+		if status, reused := get("app.example.com"); status != http.StatusOK || !reused {
+			t.Fatalf("a site again: %d, connection reused %v; want it kept", status, reused)
+		}
+		if status, reused := get("dark.example.com"); status != http.StatusServiceUnavailable || !reused {
+			t.Fatalf("a site without a tunnel: %d, connection reused %v; want 503 on the open connection", status, reused)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			status, reused := get("app.example.com")
+			if status != http.StatusOK {
+				t.Fatalf("a site, after the 503: %d", status)
+			}
+			if !reused {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the visitor's connection stayed open after the 503")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 }

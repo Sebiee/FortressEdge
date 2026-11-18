@@ -44,6 +44,9 @@ type edgeLimits struct {
 	Exempt []netip.Prefix
 	Trace  config.Trace
 	policy config.Policy
+	// balanced is whether the policy marks a health check site: a load
+	// balancer chooses between this edge and others.
+	balanced bool
 }
 
 // Site is the settings for a request to host, published as route.
@@ -65,7 +68,7 @@ func (l *liveLimits) set(lim config.Limits, exempt []netip.Prefix) {
 
 func (l *liveLimits) setPolicy(p config.Policy) {
 	p.Exempt = slices.Clone(p.Exempt)
-	l.p.Store(&edgeLimits{Limits: p.Limits, Exempt: p.Exempt, Trace: p.Trace, policy: p})
+	l.p.Store(&edgeLimits{Limits: p.Limits, Exempt: p.Exempt, Trace: p.Trace, policy: p, balanced: p.HasHealthCheck()})
 }
 
 // get returns the limits in force; the defaults for a nil l (tests).

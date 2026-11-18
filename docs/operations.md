@@ -104,7 +104,7 @@ response bytes the visitor already had. `reason` is where it failed:
 
 | `reason` | The visitor gets | Usually |
 | --- | --- | --- |
-| `no_tunnel` | `503`, `Retry-After: 1` | no dark node publishes the name now: its tunnel is away, and the name is within `tunnel_grace` (see [certificates.md](certificates.md#which-names-get-an-answer)); logged at debug, as it is expected while a dark node or the edge restarts |
+| `no_tunnel` | `503`, `Retry-After: 1` | no dark node publishes the name now: its tunnel is away, and the name is within `tunnel_grace` (see [certificates.md](certificates.md#which-names-get-an-answer)); logged at debug, as it is expected while a dark node or the edge restarts. Behind a load balancer the response also closes the visitor's connection, see [Readiness](#readiness) |
 | `dial` | `503`, `Retry-After: 1` | no work connection to the dark node: its tunnel is broken, or going |
 | `send` | `502` | the request could not be written to the dark node |
 | `header_timeout` | `504` | the origin sent no response headers within `response_header_timeout` |
@@ -433,6 +433,18 @@ left idle through the 3 seconds is closed with the ports; a browser
 sends a request that meets such a close again, on a new connection. The
 edge's own `503`s count in the check site's metrics, and in its access
 log when that is on, at every stop: they are not an error to alert on.
+
+The mark also tells the edge that a balancer chooses between it and
+other edges. An edge can be without a tunnel of a dark node while
+another edge has them: a balancer in front of the tunnels gives each
+new tunnel to one edge (see **An edge service with several edges** in
+[kubernetes.md](kubernetes.md)). Its check then fails, and it gets no
+new visitor, but a visitor whose connection is open goes on asking it.
+So with a marked site in the policy, the `503` for a site no tunnel
+carries (`no_tunnel`) closes the visitor's connection after the
+response, as a stop does: the next request arrives on a new connection,
+at an edge that passes the check. Without a marked site the connection
+stays open, as before.
 
 `tunnel_groups` counts each dark node's logged-in frpc, by the name in
 its SPIFFE ID (`node/<name>`): `{"node1": 2}`. All frpc with one node certificate

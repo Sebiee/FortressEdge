@@ -148,6 +148,8 @@ type siteReq struct {
 	site        *siteStats
 	rec         *recorder
 	body        *countingBody
+	// balanced is whether a load balancer checks the edge (edgeLimits).
+	balanced bool
 	// failure is why frps could not proxy the request, for the access log.
 	failure string
 }
@@ -160,14 +162,15 @@ func siteReqOf(r *http.Request) *siteReq {
 }
 
 // serveSite proxies a request for host, which the route published: it
-// gets an id and a trace, the site's settings (pol), and is counted for
-// the site and written to the access log once it ends.
-func (st *httpStats) serveSite(h http.Handler, host, route string, pol config.Site, trustTrace bool, w http.ResponseWriter, r *http.Request) {
+// gets an id and a trace, the site's settings (pol) of the policy in force
+// (p), and is counted for the site and written to the access log once it
+// ends.
+func (st *httpStats) serveSite(h http.Handler, host, route string, pol config.Site, p *edgeLimits, w http.ResponseWriter, r *http.Request) {
 	s := st.site(route)
-	rs := &siteReq{id: uuid.NewV7().String(), host: host, route: route, start: time.Now(), site: s}
+	rs := &siteReq{id: uuid.NewV7().String(), host: host, route: route, start: time.Now(), site: s, balanced: p.balanced}
 	r.Header.Set(requestIDHeaderOut, rs.id) // replaces one the visitor sent
 	w.Header().Set(requestIDHeader, rs.id)
-	rs.trace = startTrace(r.Header, trustTrace)
+	rs.trace = startTrace(r.Header, p.Trace.TrustIncoming)
 	w.Header().Set(traceIDHeader, rs.trace.traceID)
 	rc := http.NewResponseController(w)
 	rs.rec = &recorder{ResponseWriter: w, rc: rc, start: rs.start}
@@ -339,6 +342,14 @@ func ProxyError(r *http.Request, err error) {
 			// Expected while a dark node restarts, and a visitor can ask
 			// for it at will: counted, not a warning each time.
 			lvl = slog.LevelDebug
+			// Behind a load balancer, an edge whose dark node has all
+			// its tunnels at the other edges fails its health check and
+			// gets no new visitor. A visitor whose connection is open
+			// would go on asking this edge: closed after this response,
+			// its next request reaches an edge that has a tunnel.
+			if rs.balanced {
+				closeAfter(rs.rec, r)
+			}
 		}
 	}
 	slog.Log(context.Background(), lvl, "proxy error", append(attrs, "reason", rs.failure,
