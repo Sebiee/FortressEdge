@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -28,24 +29,38 @@ import (
 //     service) is dialled at one of them, chosen by the replica's own name,
 //     so replicas spread over the addresses; an address that does not answer
 //     is passed over until the next dial;
-//   - the renewal (-renew): at a fixed age the replica opens a new tunnel
-//     and retires the old one, so a balancer in front of several edges can
-//     give an edge that came back its share;
-//   - the retirement: the old tunnel takes no new request, and closes when
-//     the requests and TCP sessions it carries have ended, or when it is
-//     the oldest of more than maxRetiring. The edge keeps a
+//   - the look (-renew): at a fixed interval the replica logs in a second
+//     time, with nothing to publish, and a balancer in front of several
+//     edges gives that login to one of them. The edge says how many
+//     tunnels of the node it would then have, and the replica asks the
+//     edge of its tunnel whether it may leave for that one. That edge
+//     grants it only when it has more tunnels that serve than the other
+//     would, and counts the tunnel as gone from then on: so a tunnel moves
+//     only when the move spreads the node's tunnels more evenly, and an
+//     edge never lets its last one go. On a grant the second login
+//     publishes and becomes the tunnel; else it is closed, and nothing
+//     has changed. An edge of 0.10.0 or older does not count: with one,
+//     the second login becomes the tunnel without asking;
+//   - the retirement: the tunnel a replica left takes no new request, and
+//     closes when the requests and TCP sessions it carries have ended, or
+//     when it is the oldest of more than maxRetiring. The edge keeps a
 //     work connection for the next request for up to a minute, so that is
 //     up to a minute after the last request.
 
 // maxRetiring is how many retired tunnels a replica keeps while their
 // streams last, a WebSocket of hours among them. Each is a login of the
-// node on the edge, which bounds those (the frp fork's limits), so a
-// renewal that would keep one more closes the oldest, with what it still
-// carries: a stream lives through at least maxRetiring renewals.
+// node on the edge, which bounds those (the frp fork's limits), so a move
+// that would keep one more closes the oldest, with what it still carries:
+// a stream lives through at least maxRetiring moves.
 const maxRetiring = 4
 
+// stayWait is how long the edge gets to hear that a tunnel it let go
+// stays after all.
+const stayWait = 5 * time.Second
+
 var (
-	// renewReady is how long a new tunnel gets to log in and publish.
+	// renewReady is how long a look gets, from its dial until the new
+	// tunnel publishes.
 	renewReady = 15 * time.Second
 	// retireTick is how often a retiring tunnel is looked at; after three
 	// looks without a request in flight it is closed.
@@ -221,9 +236,28 @@ type tunnels struct {
 	proxies  []v1.ProxyConfigurer
 	gen      int
 
-	dialsOK, dialsFailed       atomic.Int64
-	renewalsOK, renewalsFailed atomic.Int64
-	tunnelsCut, streamsCut     atomic.Int64
+	// login is a tunnel's login; tests stand in an edge that does not
+	// count with it.
+	login func(*tunnel) (runID string, peers int, ok bool)
+
+	dialsOK, dialsFailed   atomic.Int64
+	looks                  [lookResults]atomic.Int64
+	tunnelsCut, streamsCut atomic.Int64
+}
+
+// lookResult is how a look ended.
+type lookResult int
+
+const (
+	lookMoved   lookResult = iota // its edge let the tunnel go to another
+	lookStayed                    // its edge kept it: no better spread
+	lookOldEdge                   // moved without asking: an edge does not count
+	lookFailed                    // the look or the move failed; the tunnel stays
+	lookResults
+)
+
+func (r lookResult) String() string {
+	return [...]string{"moved", "stayed", "old_edge", "failed"}[r]
 }
 
 func newTunnels(common *v1.ClientCommonConfig, proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) *tunnels {
@@ -231,6 +265,7 @@ func newTunnels(common *v1.ClientCommonConfig, proxies []v1.ProxyConfigurer, vis
 		common: common, visitors: visitors, proxies: proxies,
 		pick:   newPicker(common.ServerAddr, common.User),
 		failed: make(chan error, 1),
+		login:  (*tunnel).login,
 	}
 }
 
@@ -246,7 +281,7 @@ func (ts *tunnels) dialled(ok bool) {
 func (ts *tunnels) start(ctx context.Context) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	t, err := ts.open(ctx, ts.proxies)
+	t, err := ts.open(ctx, ts.proxies, ts.visitors)
 	if err != nil {
 		return err
 	}
@@ -256,14 +291,14 @@ func (ts *tunnels) start(ctx context.Context) error {
 
 // open starts a tunnel that publishes proxies. Each tunnel logs in under
 // its own user, so the edge tells the proxies of an old and a new one apart.
-func (ts *tunnels) open(ctx context.Context, proxies []v1.ProxyConfigurer) (*tunnel, error) {
+func (ts *tunnels) open(ctx context.Context, proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) (*tunnel, error) {
 	c := *ts.common
 	if ts.gen > 0 {
 		c.User = fmt.Sprintf("%s-%d", ts.common.User, ts.gen)
 	}
 	ts.gen++
 	src := source.NewConfigSource()
-	if err := src.ReplaceAll(proxies, ts.visitors); err != nil {
+	if err := src.ReplaceAll(proxies, visitors); err != nil {
 		return nil, err
 	}
 	t := &tunnel{set: ts, user: c.User, born: time.Now()}
@@ -294,9 +329,14 @@ func (ts *tunnels) publish(proxies []v1.ProxyConfigurer) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.proxies = proxies
+	return ts.publishOn(ts.cur, proxies, ts.visitors)
+}
+
+// publishOn replaces what t publishes.
+func (ts *tunnels) publishOn(t *tunnel, proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) error {
 	c := *ts.common
-	c.User = ts.cur.user
-	return ts.cur.svc.UpdateConfigSource(&c, proxies, ts.visitors)
+	c.User = t.user
+	return t.svc.UpdateConfigSource(&c, proxies, visitors)
 }
 
 // GetProxyStatus is the status of a proxy of the current tunnel.
@@ -307,8 +347,8 @@ func (ts *tunnels) GetProxyStatus(name string) (*proxy.WorkingStatus, bool) {
 	return t.svc.StatusExporter().GetProxyStatus(name)
 }
 
-// renewEvery renews the tunnel at about every age (within a fifth of it,
-// so replicas started together do not renew together).
+// renewEvery looks for a better edge about every age (within a fifth of
+// it, so replicas started together do not look together).
 func (ts *tunnels) renewEvery(ctx context.Context, age time.Duration) {
 	for {
 		wait := age - age/5 + rand.N(2*age/5+1)
@@ -316,66 +356,163 @@ func (ts *tunnels) renewEvery(ctx context.Context, age time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
-			ts.renew(ctx)
+			ts.look(ctx)
 		}
 	}
 }
 
-// renew opens a new tunnel and, once it publishes what the current one
-// does, retires the current one, and closes the oldest retiring one past
-// maxRetiring. A new tunnel that does not come up in time is dropped, and
-// the current one stays, and so do the retiring ones.
-func (ts *tunnels) renew(ctx context.Context) bool {
+// login is the tunnel's login at its edge: the run ID the edge gave it,
+// and how many tunnels of the node the edge then counted, this one among
+// them; 0 from an edge that does not count (0.10.0 or older). ok is false
+// while the tunnel is not logged in.
+func (t *tunnel) login() (runID string, peers int, ok bool) {
+	return t.svc.Login()
+}
+
+// look logs in a second time, without proxies, and asks the edge of the
+// current tunnel whether the tunnel may leave for the edge that login
+// reached. On a grant the new login publishes what the current tunnel
+// does and takes over; the current one retires, and the oldest retiring
+// one past maxRetiring is closed. In every other case the new login is
+// closed and the current tunnel stays as it is, and so do the retiring
+// ones. With an edge that does not count, or no connection to ask on, the
+// new login takes over without a question.
+func (ts *tunnels) look(ctx context.Context) lookResult {
 	ts.mu.Lock()
-	proxies, cur := ts.proxies, ts.cur
-	t, err := ts.open(ctx, proxies)
+	cur := ts.cur
+	t, err := ts.open(ctx, nil, nil)
 	ts.mu.Unlock()
-	if err == nil && !t.ready(ctx, proxies, cur) {
+	if err != nil {
+		return ts.looked(lookFailed, "%v", err)
+	}
+	wait, cancel := context.WithTimeout(ctx, renewReady)
+	defer cancel()
+	there, n, ok := ts.loggedIn(wait, t)
+	if !ok {
 		t.close()
-		err = fmt.Errorf("it did not log in and publish within %s", renewReady)
+		return ts.looked(lookFailed, "the second login did not come up within %s", renewReady)
+	}
+
+	result, asked := lookMoved, false
+	_, here, up := ts.login(cur)
+	switch {
+	case !up:
+		// No edge to ask, and none that would lose a tunnel.
+	case n == 0 || here == 0:
+		result = lookOldEdge
+	default:
+		granted, serving, err := cur.svc.Leave(wait, there, n)
+		switch {
+		case errors.Is(err, client.ErrLeaveUnknown):
+			// The tunnel has logged in again meanwhile, at an old edge.
+			result = lookOldEdge
+		case err != nil:
+			// The edge may have granted it all the same.
+			ts.stay(ctx, cur)
+			t.close()
+			return ts.looked(lookFailed, "no answer from the tunnel's edge: %v", err)
+		case !granted:
+			t.close()
+			return ts.looked(lookStayed, "%d of this node's tunnels serve at its edge, and the edge offered would have %d", serving, n)
+		default:
+			asked = true
+		}
+	}
+
+	ts.mu.Lock()
+	proxies := ts.proxies
+	err = ts.publishOn(t, proxies, ts.visitors)
+	ts.mu.Unlock()
+	if err == nil && !t.ready(wait, proxies, cur) {
+		err = fmt.Errorf("the new tunnel did not publish within %s", renewReady)
 	}
 	if err != nil {
-		ts.renewalsFailed.Add(1)
-		log.Warnf("tunnel renewal: %v; the tunnel stays as it is", err)
-		return false
+		if asked {
+			ts.stay(ctx, cur)
+		}
+		t.close()
+		return ts.looked(lookFailed, "%v", err)
 	}
+
 	ts.mu.Lock()
-	old := ts.cur
 	ts.cur = t
-	ts.retiring = append(ts.retiring, old)
+	ts.retiring = append(ts.retiring, cur)
 	var cut []*tunnel
 	for len(ts.retiring) > maxRetiring {
 		cut = append(cut, ts.retiring[0])
 		ts.retiring = ts.retiring[1:]
 	}
 	// What was published while the new tunnel came up.
-	c := *ts.common
-	c.User = t.user
-	if err := t.svc.UpdateConfigSource(&c, ts.proxies, ts.visitors); err != nil {
+	if err := ts.publishOn(t, ts.proxies, ts.visitors); err != nil {
 		log.Warnf("publish routes: %v", err)
 	}
 	ts.mu.Unlock()
-	ts.renewalsOK.Add(1)
-	server, _ := t.server.Load().(string)
-	log.Infof("tunnel renewed (to %s); the old one closes when its requests have ended", server)
-	go ts.retire(ctx, old, retireTick)
+	go ts.retire(ctx, cur, retireTick)
 	for _, o := range cut {
 		if n := o.streams.Load(); n > 0 {
 			ts.tunnelsCut.Add(1)
 			ts.streamsCut.Add(n)
-			log.Warnf("old tunnel closed with %d streams still on it: it outlived %d renewals", n, maxRetiring)
+			log.Warnf("old tunnel closed with %d streams still on it: it outlived %d moves", n, maxRetiring)
 		}
 		o.close()
 	}
-	return true
+	server, _ := t.server.Load().(string)
+	if n == 0 {
+		return ts.looked(result, "to %s", server)
+	}
+	return ts.looked(result, "to %s, as tunnel %d of this node at that edge", server, n)
 }
 
-// ready reports whether the tunnel has logged in and, when it has proxies
-// to publish, the edge runs one, and each that it runs for cur: a name the
-// edge refuses the new tunnel (a limit of the node's) would otherwise go
-// dark when cur retires, while one it refuses both is no reason to wait.
+// loggedIn waits for t's login, until ctx ends.
+func (ts *tunnels) loggedIn(ctx context.Context, t *tunnel) (runID string, peers int, ok bool) {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if runID, peers, ok = ts.login(t); ok {
+			return runID, peers, true
+		}
+		select {
+		case <-ctx.Done():
+			return "", 0, false
+		case <-tick.C:
+		}
+	}
+}
+
+// stay tells the edge of t that t does not leave after all, so the edge
+// counts it again. An edge that does not hear it has lost the tunnel, and
+// counts it anew when it logs in again.
+func (ts *tunnels) stay(ctx context.Context, t *tunnel) {
+	ctx, cancel := context.WithTimeout(ctx, stayWait)
+	defer cancel()
+	if err := t.svc.Stay(ctx); err != nil {
+		log.Debugf("tunnel look: the tunnel's edge did not hear that it stays: %v", err)
+	}
+}
+
+// looked counts a look's result and logs it, with what led to it.
+func (ts *tunnels) looked(r lookResult, format string, args ...any) lookResult {
+	ts.looks[r].Add(1)
+	why := fmt.Sprintf(format, args...)
+	switch r {
+	case lookMoved:
+		log.Infof("tunnel moved %s; the old one closes when its requests have ended", why)
+	case lookOldEdge:
+		log.Infof("tunnel moved %s, without asking: an edge of 0.10.0 or older does not count; the old one closes when its requests have ended", why)
+	case lookStayed:
+		log.Infof("tunnel stays: %s", why)
+	default:
+		log.Warnf("tunnel look: %s; the tunnel stays as it is", why)
+	}
+	return r
+}
+
+// ready reports whether, before ctx ends, the tunnel has logged in and,
+// when it has proxies to publish, the edge runs one, and each that it runs
+// for cur: a name the edge refuses the new tunnel (a limit of the node's)
+// would otherwise go dark when cur retires, while one it refuses both is
+// no reason to wait.
 func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer, cur *tunnel) bool {
-	deadline := time.After(renewReady)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -384,8 +521,6 @@ func (t *tunnel) ready(ctx context.Context, proxies []v1.ProxyConfigurer, cur *t
 		}
 		select {
 		case <-ctx.Done():
-			return false
-		case <-deadline:
 			return false
 		case <-tick.C:
 		}
@@ -416,9 +551,7 @@ func (t *tunnel) runs(name string) bool {
 // request, and closes it once nothing has been in flight for three looks,
 // or when its connection ends by itself.
 func (ts *tunnels) retire(ctx context.Context, t *tunnel, every time.Duration) {
-	c := *ts.common
-	c.User = t.user
-	if err := t.svc.UpdateConfigSource(&c, nil, nil); err != nil {
+	if err := ts.publishOn(t, nil, nil); err != nil {
 		log.Warnf("retire tunnel: %v", err)
 	}
 	tick := time.NewTicker(every)
@@ -466,24 +599,27 @@ func (ts *tunnels) writeMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# HELP fortresskube_tunnel_info 1, with the address the tunnel dialled last as a label.")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_info gauge")
 	fmt.Fprintf(w, "fortresskube_tunnel_info{server=%q} 1\n", server)
-	fmt.Fprintln(w, "# HELP fortresskube_tunnel_age_seconds Seconds since the tunnel was opened (it is renewed at about -renew).")
+	fmt.Fprintln(w, "# HELP fortresskube_tunnel_age_seconds Seconds since the tunnel was opened (it stays until a look moves it, or the pod restarts).")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_age_seconds gauge")
 	fmt.Fprintf(w, "fortresskube_tunnel_age_seconds %.0f\n", time.Since(cur.born).Seconds())
 	fmt.Fprintln(w, "# HELP fortresskube_tunnel_streams Requests and TCP sessions this replica carries now, on its tunnel and on those it retires.")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_streams gauge")
 	fmt.Fprintf(w, "fortresskube_tunnel_streams %d\n", streams)
-	fmt.Fprintln(w, "# HELP fortresskube_tunnels_retiring Old tunnels that still carry a request and take no new one.")
+	fmt.Fprintln(w, "# HELP fortresskube_tunnels_retiring Tunnels the replica left that still carry a request and take no new one.")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnels_retiring gauge")
 	fmt.Fprintf(w, "fortresskube_tunnels_retiring %d\n", len(retiring))
 	fmt.Fprintln(w, "# HELP fortresskube_tunnel_dials_total Dials to the edge, by result: ok, failed.")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_dials_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"ok\"} %d\n", ts.dialsOK.Load())
 	fmt.Fprintf(w, "fortresskube_tunnel_dials_total{result=\"failed\"} %d\n", ts.dialsFailed.Load())
-	fmt.Fprintln(w, "# HELP fortresskube_tunnel_renewals_total Renewals of the tunnel, by result: ok, failed (the new tunnel did not come up, the old one stayed).")
-	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_renewals_total counter")
-	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"ok\"} %d\n", ts.renewalsOK.Load())
-	fmt.Fprintf(w, "fortresskube_tunnel_renewals_total{result=\"failed\"} %d\n", ts.renewalsFailed.Load())
-	fmt.Fprintln(w, "# HELP fortresskube_tunnels_cut_total Old tunnels closed by a renewal while they still carried streams.")
+	fmt.Fprintln(w, "# HELP fortresskube_tunnel_looks_total Looks for a better edge (one about every -renew), by result: moved (its edge let the tunnel go to an edge with fewer), "+
+		"stayed (the move would not spread the node's tunnels more evenly), old_edge (moved without asking: an edge of 0.10.0 or older does not count), "+
+		"failed (the second login or the move failed, the tunnel stayed).")
+	fmt.Fprintln(w, "# TYPE fortresskube_tunnel_looks_total counter")
+	for r := range lookResults {
+		fmt.Fprintf(w, "fortresskube_tunnel_looks_total{result=%q} %d\n", r.String(), ts.looks[r].Load())
+	}
+	fmt.Fprintln(w, "# HELP fortresskube_tunnels_cut_total Old tunnels closed by a move while they still carried streams.")
 	fmt.Fprintln(w, "# TYPE fortresskube_tunnels_cut_total counter")
 	fmt.Fprintf(w, "fortresskube_tunnels_cut_total %d\n", ts.tunnelsCut.Load())
 	fmt.Fprintln(w, "# HELP fortresskube_tunnel_streams_cut_total Requests and TCP sessions ended by those closes.")

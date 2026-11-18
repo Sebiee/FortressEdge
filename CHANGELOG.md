@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+Behind a balancer in front of several edges, `fortresskube -renew`
+opened a new tunnel every few minutes and retired the old one, whatever
+edge the balancer gave the new one to. The balancer counts connections,
+old tunnels that still carry a stream among them, so every new tunnel
+could go to the other edges: an edge was then without a tunnel for up to
+a renewal interval, and visitors with an open connection to it got
+`503`. Each renewal could also leave an old tunnel with a long request,
+and the fifth cut the oldest, so a WebSocket or a stream ended after
+about 20 minutes. Now a tunnel moves only when the move spreads the
+tunnels more evenly, and the edge it leaves decides.
+
+- `fortresskube -renew` is now how often a replica looks for a better
+  edge. It logs in a second time with nothing to publish, and the edge
+  the balancer gives that login to answers with a count of the node's
+  tunnels there. The replica asks the edge of its tunnel whether it may
+  leave for an edge with that count, and that edge says yes only when
+  more of the node's tunnels serve at it than the count: one question at
+  a time, and never for its last tunnel. After a yes the second login
+  publishes and becomes the tunnel, and the old one retires as before;
+  after a no it is closed, and nothing has changed. See **An edge
+  service with several edges** in [kubernetes.md](docs/kubernetes.md).
+- Tunnels live long: until the pod or the edge restarts, the connection
+  breaks, or the tunnels are spread unevenly. In a steady service a long
+  request is no longer cut by `-renew`. The edge still checks a client
+  certificate only at login, so a certificate that has ended keeps the
+  tunnels it has; a look logs in with the certificate the replica holds
+  now, and fails when that no longer logs in.
+- A replica holds one login at an edge, and a second for the seconds of
+  a look; tunnels it left stay only while their streams last, at most 4.
+- Edges and replicas of different versions work together; update the
+  edges first. With an edge of 0.10.0 or older, which gives no count, a
+  look moves the tunnel without a question, as every renewal did. A
+  replica of 0.10.0 or older renews as before at an edge of this
+  version.
+- `fortresskube_tunnel_looks_total{result}` counts the looks: `moved`,
+  `stayed`, `old_edge`, `failed`. It replaces
+  `fortresskube_tunnel_renewals_total`. Each look is one log line. The
+  edge counts its answers in `fortressedge_tunnel_leaves_total{result}`:
+  `granted`, `refused`.
+- The frp fork: a login answer carries the count (`peers`), and a client
+  asks on its control connection whether it may leave (`Leave`,
+  `LeaveResp`), in both wire protocols. A server that gives no count is
+  never asked.
 - An edge with a `health_check` site in its policy closes the visitor's
   connection after a `503` for a site no tunnel carries (`no_tunnel`):
   `Connection: close`, or HTTP/2's GOAWAY; not on a WebSocket's request.

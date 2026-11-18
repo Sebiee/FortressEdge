@@ -116,6 +116,15 @@ func Start(ctx context.Context, opts Options) (*Frps, error) {
 		// A surplus work connection is a burst's leftover: counted, and
 		// closed without the error frpc would log.
 		OnWorkConnDiscarded: func() { tunnel.discards.Add(1) },
+		// A dark node's frpc that has logged in at another edge too asks
+		// this one whether it may leave for it: counted by the answer.
+		OnLeave: func(_ string, granted bool) {
+			if granted {
+				tunnel.leavesGranted.Add(1)
+			} else {
+				tunnel.leavesRefused.Add(1)
+			}
+		},
 		// frp's own 404 page names frp. An empty one names nothing.
 		Custom404Page: os.DevNull,
 		// How long a visitor waits for the origin's response headers
@@ -380,9 +389,10 @@ func wait(ctx context.Context, addr string, d time.Duration) error {
 var tunnel = &tunnelStats{}
 
 // tunnelStats is frps's ServerMetrics: logins and proxies, from frps;
-// sessions, discards, and name conflicts, from the edge's hooks.
+// sessions, discards, leaves, and name conflicts, from the edge's hooks.
 type tunnelStats struct {
 	logins, clients, proxies, discards atomic.Int64
+	leavesGranted, leavesRefused       atomic.Int64
 
 	mu        sync.Mutex
 	sessions  map[string]int // open tunnel connections, by dark node
@@ -514,6 +524,10 @@ func (f *Frps) WriteMetrics(w *metrics.Writer) {
 	}
 	w.Family("fortressedge_tunnel_logins_total", "counter", "frpc logins frps accepted.")
 	w.Int("fortressedge_tunnel_logins_total", tunnel.logins.Load())
+	w.Family("fortressedge_tunnel_leaves_total", "counter",
+		"Answers to a frpc that asked to move its tunnel to another edge, by result: granted (this edge had more of the dark node's tunnels serving than the other would), refused.")
+	w.Int("fortressedge_tunnel_leaves_total", tunnel.leavesGranted.Load(), "result", "granted")
+	w.Int("fortressedge_tunnel_leaves_total", tunnel.leavesRefused.Load(), "result", "refused")
 	w.Family("fortressedge_tunnel_proxies", "gauge", "Proxies dark nodes have registered with frps now.")
 	w.Int("fortressedge_tunnel_proxies", tunnel.proxies.Load())
 	pooled, idle, active := f.svr.WorkConns()

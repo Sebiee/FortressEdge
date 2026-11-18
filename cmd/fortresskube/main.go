@@ -62,8 +62,9 @@ func run() error {
 	metricsAddr := flag.String("metrics", "", "host:port to serve Prometheus metrics on, such as :9100; empty serves none")
 	healthAddr := flag.String("health", "", "host:port to serve /healthz on, such as :8081, for a liveness probe: "+
 		"200 while a TCP connection to the backend opens, 503 while not; empty serves none")
-	renew := flag.Duration("renew", 0, "age at which the replica opens a new tunnel and retires the old one, such as 5m, "+
-		"for an edge service that spreads tunnels over several edges; 0 never renews")
+	renew := flag.Duration("renew", 0, "how often the replica looks for a better edge, such as 5m: it logs in a second time, "+
+		"and moves its tunnel there when the edge of its tunnel says that spreads the tunnels more evenly, "+
+		"for an edge service with several edges; 0 never looks")
 	flag.Parse()
 
 	gwNS, gwName, ok := strings.Cut(*gateway, "/")
