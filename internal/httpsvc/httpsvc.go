@@ -45,7 +45,8 @@ const drainTimeout = time.Second
 // nil lim uses the default limits; a nil control leaves frp control out.
 // While leave says the edge leaves, the policy's health check site is
 // answered 503 here, and every site's response closes its connection; a
-// nil leave never does.
+// nil leave never does. With a health check site in the policy, a 503 for
+// a site no tunnel carries closes its connection too (ProxyError).
 func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, route func(string) (name string, held, ok bool), lim *liveLimits, leave *Leave) (http.Handler, error) {
 	if vhost == nil {
 		return nil, errors.New("nil vhost")
@@ -79,20 +80,24 @@ func Handler(tunnel string, vhost, control, opsH http.Handler, st *httpStats, ro
 		p := lim.get()
 		pol := p.Site(host, published)
 		if leave.Leaving() {
-			// The visitor's next request opens a connection, which the
-			// balancer gives to another edge: HTTP/1 closes after this
-			// response, HTTP/2 after the streams it has open. Not an
-			// upgrade: its 101 answers Connection: Upgrade, and the
-			// WebSocket lasts until the edge closes.
-			if !httpguts.HeaderValuesContainsToken(r.Header["Connection"], "upgrade") {
-				w.Header().Set("Connection", "close")
-			}
+			closeAfter(w, r)
 			if pol.HealthCheck {
 				next = left
 			}
 		}
-		st.serveSite(next, host, published, pol, p.Trace.TrustIncoming, w, r)
+		st.serveSite(next, host, published, pol, p, w, r)
 	}), nil
+}
+
+// closeAfter closes the visitor's connection after this response: HTTP/1
+// closes it, HTTP/2 once the streams it has open have ended. The visitor's
+// next request opens a connection, which a balancer gives to another edge.
+// Not an upgrade: its 101 answers Connection: Upgrade, and the WebSocket
+// lasts until the edge closes.
+func closeAfter(w http.ResponseWriter, r *http.Request) {
+	if !httpguts.HeaderValuesContainsToken(r.Header["Connection"], "upgrade") {
+		w.Header().Set("Connection", "close")
+	}
 }
 
 // tunnelHandler serves requests whose Host is the tunnel name: the ops API
