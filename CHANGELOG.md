@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
+
+`fortresskube -renew` changes meaning and one of its metrics is
+replaced, so this is a minor release. Update the edges first, then
+`fortresskube`.
 
 Behind a balancer in front of several edges, `fortresskube -renew`
 opened a new tunnel every few minutes and retired the old one, whatever

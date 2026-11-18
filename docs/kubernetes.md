@@ -125,7 +125,7 @@ spec:
           labelSelector: { matchLabels: { app: fortresskube } }
       containers:
         - name: fortresskube
-          image: ghcr.io/sebiee/fortressedge/fortresskube:v0.10.0
+          image: ghcr.io/sebiee/fortressedge/fortresskube:v0.11.0
           args: ["-c", "/etc/frp/frpc.toml", "-gateway", "infra/public"]
           volumeMounts: [{ name: config, mountPath: /etc/frp, readOnly: true }]
       volumes: [{ name: config, secret: { secretName: fortresskube } }]
